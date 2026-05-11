@@ -1,6 +1,5 @@
 import { create } from 'zustand';
 import { getEnvironmentConfig } from '../config/environment';
-import { estimateBmtReward } from '../lib/rewards';
 
 export type AppMode = 'benchmark' | 'mining';
 export type DeviceType = 'cpu' | 'gpu';
@@ -36,8 +35,6 @@ interface MiningState {
     lastRewardUpdatedAt: number | null;
 
     // Rewards ($BMT)
-    sessionRewards: number;
-    totalRewards: number;
     p2poolBalance: number; // XMR balance in P2Pool
     dbTotalBMT: number;   // Confirmed total BMT rewards from backend
     isPremium: boolean;
@@ -79,6 +76,10 @@ interface MiningState {
     rateXmrBmt: number;
     ratesLastUpdated: string | null; // Timestamp when rates were last fetched
 
+    // Dynamic Network Config
+    rpcHost: string;
+    rpcPort: number;
+
     // Actions
     setMode: (mode: AppMode) => void;
     setDeviceType: (type: DeviceType) => void;
@@ -107,6 +108,7 @@ interface MiningState {
     resetSession: () => void;
     saveSettings: () => void;
     loadSettings: () => void;
+    fetchPublicConfig: () => Promise<void>;
 }
 
 // Types for settings persistence
@@ -152,8 +154,6 @@ export const useMinerStore = create<MiningState>((set, get) => ({
     currentPower: null,
     lastRewardUpdatedAt: null,
 
-    sessionRewards: 0,
-    totalRewards: 0,
     dbTotalBMT: 0,
     p2poolBalance: 0,
     isPremium: false,
@@ -183,6 +183,9 @@ export const useMinerStore = create<MiningState>((set, get) => ({
     rateXmrBmt: 0, // Will be fetched from backend
     ratesLastUpdated: null, // Timestamp when rates were last fetched
 
+    rpcHost: env.poolRpcHost,
+    rpcPort: env.poolRpcPort,
+
     setMode: (mode) => set({ mode }),
     setDeviceType: (deviceType) => set({ deviceType }),
     setWallet: (wallet) => set({ wallet }),
@@ -194,17 +197,25 @@ export const useMinerStore = create<MiningState>((set, get) => ({
         isPaused: status === 'paused',
         lastRewardUpdatedAt: status === 'running' ? state.lastRewardUpdatedAt : null
     })),
-    setThreads: (threads) => set({ threads }),
+    setThreads: (threads) => set((state) => {
+        const safeCores = Math.max(1, state.cpuCores || 1);
+        const safeMiningMax = Math.max(1, safeCores - 1);
+        const requested = Number.isFinite(threads) ? Math.floor(threads) : state.threads;
+        return {
+            threads: Math.min(Math.max(1, requested), safeMiningMax)
+        };
+    }),
     setCpuInfo: (cpuName, cpuCores) => set((state) => {
         const safeCores = Math.max(1, cpuCores || 1);
+        const safeMiningMax = Math.max(1, safeCores - 1);
         const currentThreads = Number.isFinite(state.threads) && state.threads > 0
             ? state.threads
-            : safeCores;
+            : safeMiningMax;
         return {
             cpuName,
             cpuCores: safeCores,
-            // Keep user-selected threads; only clamp if it exceeds available cores.
-            threads: Math.min(currentThreads, safeCores)
+            // Leave one logical thread free for the UI, OS, and Tauri IPC.
+            threads: Math.min(currentThreads, safeMiningMax)
         };
     }),
     setDonateLevel: (donateLevel) => set({ donateLevel }),
@@ -217,7 +228,6 @@ export const useMinerStore = create<MiningState>((set, get) => ({
     setPremiumXmrWallet: (premiumXmrWallet) => set({ premiumXmrWallet }),
     setP2PoolBalance: (p2poolBalance) => set({ p2poolBalance }),
     setManualPoolSelection: (manualPoolSelection) => set({ manualPoolSelection }),
-
     addLog: (msg) => set((state) => ({
         logs: [...state.logs.slice(-100), `${new Date().toLocaleTimeString()} - ${msg}`]
     })),
@@ -247,25 +257,11 @@ export const useMinerStore = create<MiningState>((set, get) => ({
     updateStats: (hashrate: number, temp: number | null | undefined, power?: number) => set((state) => {
         const safeHashrate = hashrate || 0;
         const now = Date.now();
-        const elapsedSeconds = state.lastRewardUpdatedAt
-            ? Math.max((now - state.lastRewardUpdatedAt) / 1000, 0)
-            : 0;
-        const rewardTick = estimateBmtReward({
-            hashrate: safeHashrate,
-            seconds: elapsedSeconds,
-            networkHashrate: state.poolNetworkHashrate,
-            rateXmrBmt: state.rateXmrBmt
-        });
-        const newTotal = (state.totalRewards || 0) + rewardTick;
-        const newSession = (state.sessionRewards || 0) + rewardTick;
-
         return {
             currentHashrate: safeHashrate,
             currentTemp: temp,
             currentPower: power,
             lastRewardUpdatedAt: now,
-            sessionRewards: isNaN(newSession) ? state.sessionRewards : newSession,
-            totalRewards: isNaN(newTotal) ? state.totalRewards : newTotal,
             history: [...state.history.slice(-29), {
                 time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
                 hashrate: safeHashrate,
@@ -275,15 +271,16 @@ export const useMinerStore = create<MiningState>((set, get) => ({
         };
     }),
 
-    resetSession: () => set({
-        history: [],
-        currentHashrate: 0,
-        currentTemp: null,
-        currentPower: null,
-        lastRewardUpdatedAt: null,
-        sessionRewards: 0,
-        status: 'idle'
-    }),
+    resetSession: () => {
+        set({
+            history: [],
+            currentHashrate: 0,
+            currentTemp: null,
+            currentPower: null,
+            lastRewardUpdatedAt: null,
+            status: 'idle'
+        });
+    },
 
     saveSettings: () => {
         const state = get();
@@ -360,7 +357,7 @@ export const useMinerStore = create<MiningState>((set, get) => ({
         set({
             wallet: settings.wallet || state.wallet,
             workerName: settings.workerName || state.workerName,
-            threads: settings.threads || state.threads,
+            threads: Math.min(settings.threads || state.threads, Math.max(1, state.cpuCores - 1)),
             donateLevel: settings.donateLevel ?? state.donateLevel,
             poolUrl: nextPoolUrl,
             cpuPriority: settings.cpuPriority ?? state.cpuPriority,
@@ -369,6 +366,42 @@ export const useMinerStore = create<MiningState>((set, get) => ({
             deviceType: settings.deviceType || state.deviceType,
             manualPoolSelection: settings.manualPoolSelection ?? state.manualPoolSelection
         });
+    },
+
+    fetchPublicConfig: async () => {
+        try {
+            const configUrl = 'https://backend.minebench.cloud/public/config';
+            const response = await fetch(configUrl);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            
+            const data = await response.json();
+            console.log('🌐 Public configuration loaded from backend');
+
+            if (data.pool?.primary) {
+                const { rpcHost, rpcPort, stratumHost, stratumPort } = data.pool.primary;
+                
+                // Update rpc config in store
+                set({ rpcHost, rpcPort });
+                console.log(`📡 Updated RPC node to ${rpcHost}:${rpcPort}`);
+                
+                const currentStore = get();
+                
+                // If user hasn't manually selected a pool, update to the latest from backend
+                if (!currentStore.manualPoolSelection) {
+                    const newPoolUrl = `${stratumHost}:${stratumPort}`;
+                    if (currentStore.poolUrl !== newPoolUrl) {
+                        set({ poolUrl: newPoolUrl });
+                        console.log(`📡 Updated mining pool to ${newPoolUrl}`);
+                    }
+                }
+            }
+
+            if (data.rewards?.minClaimBmt) {
+                // Potential for storing min claim amount in state if needed
+            }
+        } catch (err) {
+            console.warn('⚠️ Failed to fetch public config from backend, using fallbacks:', err);
+        }
     }
 }));
 

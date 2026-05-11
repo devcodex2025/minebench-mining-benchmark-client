@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Terminal, Circle, Trash2, Download, FolderOpen } from 'lucide-react';
+import { Terminal, Circle, Trash2, Download, FolderOpen } from '../components/icons';
 import { useMinerStore } from '../store/useMinerStore';
 import { useTheme } from '../contexts/ThemeContext';
 import { cn } from '../lib/utils';
@@ -202,9 +202,9 @@ export const Logs: React.FC = () => {
             />
           </div>
           <div className={cn("mt-2 text-sm font-medium", theme === 'light' ? 'text-zinc-900' : 'text-white')}>{primaryStatus.text}</div>
-          {primaryStatus.pool?.height > 0 && (
+          {primaryStatus.pool && primaryStatus.pool.height > 0 && (
             <div className={cn("mt-1 text-xs font-mono", theme === 'light' ? 'text-zinc-600' : 'text-zinc-500')}>
-              Block {primaryStatus.pool.height.toLocaleString()} / {primaryStatus.pool.targetHeight.toLocaleString()}
+              Block {primaryStatus.pool.height.toLocaleString()} / {(primaryStatus.pool.targetHeight || 0).toLocaleString()}
             </div>
           )}
           {backupStatus?.pool && (

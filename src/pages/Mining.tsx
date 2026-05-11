@@ -1,14 +1,37 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
-import { Play, Square, Pause, Play as PlayIcon, Flame, Gauge, Zap, Shield, Cpu, TrendingUp, Clock, Activity, Thermometer, HardDrive, Info, Hourglass } from 'lucide-react';
+import { Play, PauseSolid, SquareSolid, Play as PlayIcon, Flame, Gauge, Zap, Shield, Cpu, TrendingUp, Clock, Activity, Thermometer, HardDrive, Info, Hourglass } from '../components/icons';
 import { useMinerStore } from '../store/useMinerStore';
-import { useSolanaAuth } from '../services/solanaAuth';
+import { SolanaAuthService, useSolanaAuth } from '../services/solanaAuth';
+import { MultiDeviceSyncService } from '../services/multiDeviceSync';
 import { useTheme } from '../contexts/ThemeContext';
 import { cn, formatHashrate } from '../lib/utils';
 import { p2poolAPI } from '../services/p2poolAPI';
 import type { P2PoolStratumSnapshot } from '../services/p2poolAPI';
 import { getEnvironmentConfig } from '../config/environment';
-import { estimateBmtReward, estimateXmrReward } from '../lib/rewards';
+
+const getBackendApiUrl = (path: string) => {
+    const env = getEnvironmentConfig();
+    const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+    const canUseRelativeApi = typeof window !== 'undefined'
+        && (window.location.protocol === 'http:' || window.location.protocol === 'https:')
+        && window.location.hostname === 'localhost';
+
+    return canUseRelativeApi
+        ? `/api${normalizedPath}`
+        : `${env.apiBaseUrl.replace(/\/+$/, '')}${normalizedPath}`;
+};
+
+const getErrorMessage = (err: any) => {
+    if (!err) return 'Unknown error';
+    if (typeof err === 'string') return err;
+    if (err.message) return err.message;
+    try {
+        return JSON.stringify(err);
+    } catch {
+        return String(err);
+    }
+};
 
 // Extend window type for API error logging
 declare global {
@@ -19,6 +42,8 @@ declare global {
 }
 
 // Chart component for hashrate visualization - MEMOIZED to prevent re-renders
+import { ShareAnimation } from '../components/ui/ShareAnimation';
+
 const HashRateChart: React.FC<{ data: any[]; theme: string }> = React.memo(({ data, theme }) => (
     <div className={cn("border rounded-xl p-6 space-y-4",
         theme === 'light'
@@ -38,35 +63,46 @@ const HashRateChart: React.FC<{ data: any[]; theme: string }> = React.memo(({ da
         </div>
 
         <div className="h-[300px] w-full">
-            <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={data}>
-                    <defs>
-                        <linearGradient id="colorHashrate" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor="#10b981" stopOpacity={0.8} />
-                            <stop offset="95%" stopColor="#10b981" stopOpacity={0.0} />
-                        </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke={theme === 'light' ? '#e4e4e7' : '#27272a'} />
-                    <XAxis dataKey="time" tick={{ fontSize: 12 }} stroke={theme === 'light' ? '#71717a' : '#a1a1aa'} />
-                    <YAxis tick={{ fontSize: 12 }} stroke={theme === 'light' ? '#71717a' : '#a1a1aa'} />
-                    <Tooltip
-                        contentStyle={{
-                            backgroundColor: theme === 'light' ? '#fafafa' : '#18181b',
-                            border: `1px solid ${theme === 'light' ? '#e4e4e7' : '#27272a'}`,
-                            borderRadius: '8px'
-                        }}
-                        formatter={(value) => [formatHashrate(value as number), 'H/s']}
-                    />
-                    <Area
-                        type="monotone"
-                        dataKey="hashrate"
-                        stroke="#10b981"
-                        strokeWidth={3}
-                        fillOpacity={1}
-                        fill="url(#colorHashrate)"
-                    />
-                </AreaChart>
-            </ResponsiveContainer>
+            {data.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={data}>
+                        <defs>
+                            <linearGradient id="colorHashrate" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="5%" stopColor="#10b981" stopOpacity={0.8} />
+                                <stop offset="95%" stopColor="#10b981" stopOpacity={0.0} />
+                            </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" stroke={theme === 'light' ? '#e4e4e7' : '#27272a'} />
+                        <XAxis dataKey="time" tick={{ fontSize: 12 }} stroke={theme === 'light' ? '#71717a' : '#a1a1aa'} />
+                        <YAxis tick={{ fontSize: 12 }} stroke={theme === 'light' ? '#71717a' : '#a1a1aa'} />
+                        <Tooltip
+                            contentStyle={{
+                                backgroundColor: theme === 'light' ? '#fafafa' : '#18181b',
+                                border: `1px solid ${theme === 'light' ? '#e4e4e7' : '#27272a'}`,
+                                borderRadius: '8px'
+                            }}
+                            formatter={(value) => [formatHashrate(value as number), 'H/s']}
+                        />
+                        <Area
+                            type="monotone"
+                            dataKey="hashrate"
+                            stroke="#10b981"
+                            strokeWidth={3}
+                            fillOpacity={1}
+                            fill="url(#colorHashrate)"
+                        />
+                    </AreaChart>
+                </ResponsiveContainer>
+            ) : (
+                <div className={cn(
+                    "h-full rounded-lg border border-dashed flex items-center justify-center text-sm",
+                    theme === 'light'
+                        ? 'border-zinc-200 bg-zinc-50 text-zinc-500'
+                        : 'border-white/10 bg-white/[0.03] text-zinc-500'
+                )}>
+                    No live hashrate data yet
+                </div>
+            )}
         </div>
     </div>
 ));
@@ -133,12 +169,16 @@ const Mining: React.FC = () => {
     });
     const [showHugePagesInfo, setShowHugePagesInfo] = useState(false);
     const [stratumStats, setStratumStats] = useState<P2PoolStratumSnapshot | null>(null);
-    const [lastKnownHashrate, setLastKnownHashrate] = useState<number>(0);
+    const [showShareAnimation, setShowShareAnimation] = useState(false);
 
     const statsIntervalRef = useRef<NodeJS.Timeout | null>(null);
     const timeIntervalRef = useRef<NodeJS.Timeout | null>(null);
     const poolStatsIntervalRef = useRef<NodeJS.Timeout | null>(null);
-    const hasPersistedInitialChartStateRef = useRef<boolean>(false);
+    const lastRewardReportAtRef = useRef(0);
+    const lastShareCountRef = useRef<number | null>(null);
+    const rewardReportSeqRef = useRef(0);
+    const miningStartedAtRef = useRef<number | null>(null);
+    const pausedElapsedRef = useRef(0);
     const [elapsedTime, setElapsedTime] = useState(0);
     const [peakHashrate, setPeakHashrate] = useState(0);
     const [poolNetworkHashrate, setPoolNetworkHashrate] = useState(300000000000); // Default Monero difficulty
@@ -148,23 +188,78 @@ const Mining: React.FC = () => {
     const isNodeFullySynced = env.enableBackupPool
         ? !!((primaryPool?.isSynced && primaryPool?.progress >= 99.9) || (reservePool?.isSynced && reservePool?.progress >= 99.9))
         : !!(primaryPool?.isSynced && primaryPool?.progress >= 99.9);
+    const maxMiningThreads = Math.max(1, cpuCores - 1);
+    const safeMiningThreads = Math.min(threads, maxMiningThreads);
+    const activeWindowUserShares = Number(miningStats?.activeWindowUserShares ?? miningStats?.activeShares ?? 0);
+    const activeWindowPoolShares = Number(miningStats?.activeWindowPoolShares ?? 0);
+    const activeWindowRewardSharePercent = Number(miningStats?.activeWindowRewardSharePercent ?? 0);
+
+    const persistMiningTimer = (startedAt: number | null, elapsed: number) => {
+        try {
+            localStorage.setItem('minebench_mining_elapsed_seconds', String(Math.max(0, Math.floor(elapsed))));
+            if (startedAt) {
+                localStorage.setItem('minebench_mining_started_at', String(startedAt));
+            } else {
+                localStorage.removeItem('minebench_mining_started_at');
+            }
+        } catch {
+            // Ignore storage failures; timer still works for the current mounted page.
+        }
+    };
+
+    const readStoredElapsed = () => {
+        try {
+            const elapsed = Number(localStorage.getItem('minebench_mining_elapsed_seconds') || 0);
+            return Number.isFinite(elapsed) ? Math.max(0, Math.floor(elapsed)) : 0;
+        } catch {
+            return 0;
+        }
+    };
     
     // Get global pool stats from store
     const poolHashrateTotal = useMinerStore((state) => state.poolHashrateTotal);
     const poolMinersCount = useMinerStore((state) => state.poolMinersCount);
     const setPoolNetworkHashrateStore = useMinerStore((state) => state.setPoolNetworkHashrate);
     const setExchangeRates = useMinerStore((state) => state.setExchangeRates);
-    const ratesLastUpdated = useMinerStore((state) => state.ratesLastUpdated);
 
     // Wallet balance and rewards
-    const [xmrBalance, setXmrBalance] = useState(0);
-    const [xmrUsd, setXmrUsd] = useState(0);
-    const [bmtUsd, setBmtUsd] = useState(0);
-    const [rateXmrBmt, setRateXmrBmt] = useState(0);
-    const [bmtBalance, setBmtBalance] = useState(0);
     const [walletValid, setWalletValid] = useState(false);
     const [settingsLoaded, setSettingsLoaded] = useState(false);
     const isSolanaConnected = !!user?.publicKey;
+
+    // Multi-Device Sync initialization
+    useEffect(() => {
+        if (!isSolanaConnected || !user?.publicKey) return;
+
+        const syncService = MultiDeviceSyncService.getInstance(user.publicKey);
+        
+        // Register this device if not already registered
+        let deviceId = localStorage.getItem('minebench_device_id');
+        if (!deviceId) {
+            deviceId = `device-${Math.random().toString(36).substring(2, 15)}`;
+            localStorage.setItem('minebench_device_id', deviceId);
+        }
+
+        syncService.registerDevice({
+            deviceId,
+            deviceName: `${cpuName || 'Unknown CPU'} (${workerName})`,
+            walletPublicKey: user.publicKey,
+            currentHashrate: 0,
+            totalHashesComputed: 0,
+            totalShares: 0,
+            accumulatedRewards: 0,
+            uptime: 0,
+            lastUpdate: Date.now(),
+            mode: 'mining'
+        });
+
+        // Start sync loop
+        syncService.startSyncLoop();
+
+        return () => {
+            syncService.stopSyncLoop();
+        };
+    }, [isSolanaConnected, user?.publicKey, cpuName, workerName]);
 
     // Load CPU info
     useEffect(() => {
@@ -180,50 +275,9 @@ const Mining: React.FC = () => {
         loadCpuInfo();
     }, [setCpuInfo]);
 
-    useEffect(() => {
-        try {
-            const stored = Number(localStorage.getItem('minebench_last_hashrate') || 0);
-            if (Number.isFinite(stored) && stored > 0) {
-                setLastKnownHashrate(stored);
-            }
-        } catch {
-            // Ignore persistence read errors
-        }
-    }, []);
-
-    useEffect(() => {
-        if (!Number.isFinite(currentHashrate) || currentHashrate <= 0) return;
-        setLastKnownHashrate(currentHashrate);
-    }, [currentHashrate]);
-
-    useEffect(() => {
-        if (hasPersistedInitialChartStateRef.current) return;
-        const firstValidPoint = history.find((point) => Number.isFinite(point?.hashrate) && (point?.hashrate || 0) > 0);
-        if (!firstValidPoint) return;
-
-        try {
-            localStorage.setItem('minebench_last_hashrate', String(firstValidPoint.hashrate));
-            hasPersistedInitialChartStateRef.current = true;
-        } catch {
-            // Ignore persistence write errors
-        }
-    }, [history]);
-
-    const chartData = useMemo(() => {
-        const hasLiveData = history.some((point) => (point?.hashrate || 0) > 0);
-        if (hasLiveData) return history;
-
-        // Show a calm placeholder trend based on last known hashrate or a default baseline.
-        const base = lastKnownHashrate > 0 ? lastKnownHashrate : 250;
-        const now = Date.now();
-        const offsets = [0.93, 0.98, 0.95, 1.02, 1.0, 1.04, 0.99, 1.01, 0.97, 1.03, 1.0, 0.96];
-        return offsets.map((factor, idx) => ({
-            time: new Date(now - (offsets.length - idx) * 5000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-            hashrate: Math.round(base * factor),
-            temp: null,
-            power: 0
-        }));
-    }, [history, lastKnownHashrate]);
+    const chartData = useMemo(() => (
+        history.filter((point) => Number.isFinite(point?.hashrate) && point.hashrate >= 0)
+    ), [history]);
 
     // Load miner settings from localStorage/Electron on component mount
     useEffect(() => {
@@ -238,6 +292,21 @@ const Mining: React.FC = () => {
             mounted = false;
         };
     }, [loadSettings]);
+
+    useEffect(() => {
+        const storedElapsed = readStoredElapsed();
+        pausedElapsedRef.current = storedElapsed;
+        setElapsedTime(storedElapsed);
+
+        try {
+            const storedStartedAt = Number(localStorage.getItem('minebench_mining_started_at') || 0);
+            if (status === 'running' && Number.isFinite(storedStartedAt) && storedStartedAt > 0) {
+                miningStartedAtRef.current = storedStartedAt;
+            }
+        } catch {
+            // Ignore malformed timer state.
+        }
+    }, []);
 
     // Validate wallet address
     useEffect(() => {
@@ -317,7 +386,17 @@ const Mining: React.FC = () => {
                 }
             }
         });
-        return () => { if (offLog) offLog(); };
+        const offError = window.electron.on('miner-error', (msg: string) => {
+            const message = String(msg || '').trim();
+            if (message) {
+                setStatus('error');
+                addLog(`Miner error: ${message}`);
+            }
+        });
+        return () => {
+            if (offLog) offLog();
+            if (offError) offError();
+        };
     }, [setStatus, addLog, status]);
 
     useEffect(() => {
@@ -356,7 +435,17 @@ const Mining: React.FC = () => {
         const fetchPoolStats = async () => {
             try {
                 const stats = await p2poolAPI.getPoolStats();
-                setStratumStats(stats.stratum || null);
+                const newStratum = stats.stratum || null;
+                
+                // Trigger ASCII animation if a new share was found
+                if (newStratum && newStratum.shares_found !== undefined) {
+                    if (lastShareCountRef.current !== null && newStratum.shares_found > lastShareCountRef.current) {
+                        setShowShareAnimation(true);
+                    }
+                    lastShareCountRef.current = newStratum.shares_found;
+                }
+
+                setStratumStats(newStratum);
                 
                 if (stats && stats.poolDifficulty) {
                     // Calculate network hashrate from difficulty
@@ -384,13 +473,34 @@ const Mining: React.FC = () => {
     useEffect(() => {
         if (status !== 'running') {
             if (timeIntervalRef.current) clearInterval(timeIntervalRef.current);
+            timeIntervalRef.current = null;
             return;
         }
+
+        if (!miningStartedAtRef.current) {
+            miningStartedAtRef.current = Date.now();
+            persistMiningTimer(miningStartedAtRef.current, pausedElapsedRef.current);
+        }
+
+        const syncElapsed = () => {
+            const startedAt = miningStartedAtRef.current;
+            const nextElapsed = startedAt
+                ? pausedElapsedRef.current + Math.floor((Date.now() - startedAt) / 1000)
+                : pausedElapsedRef.current;
+            setElapsedTime(nextElapsed);
+            persistMiningTimer(startedAt, nextElapsed);
+        };
+
+        syncElapsed();
         timeIntervalRef.current = setInterval(() => {
-            setElapsedTime((t) => t + 1);
+            syncElapsed();
         }, 1000);
+
         return () => {
-            if (timeIntervalRef.current) clearInterval(timeIntervalRef.current);
+            if (timeIntervalRef.current) {
+                clearInterval(timeIntervalRef.current);
+                timeIntervalRef.current = null;
+            }
         };
     }, [status]);
 
@@ -398,8 +508,7 @@ const Mining: React.FC = () => {
     useEffect(() => {
         const fetchRates = async () => {
             try {
-                // Use relative URL for Vite proxy in development
-                const res = await fetch('/api/rates/current', { signal: AbortSignal.timeout(6000) });
+                const res = await fetch(getBackendApiUrl('/rates/current'), { signal: AbortSignal.timeout(6000) });
                 if (!res.ok) throw new Error(`rates/current HTTP ${res.status}`);
                 const data = await res.json();
 
@@ -419,10 +528,6 @@ const Mining: React.FC = () => {
                     data?.rate_xmr_bmt ?? data?.rateXmrBmt ?? data?.xmr_bmt_rate
                 );
 
-                setXmrUsd(Number.isFinite(nextXmrUsd) ? nextXmrUsd : 0);
-                setBmtUsd(Number.isFinite(nextBmtUsd) ? nextBmtUsd : 0);
-                setRateXmrBmt(Number.isFinite(nextRate) ? nextRate : 0);
-                
                 // Save to store for Layout component
                 setExchangeRates(
                     Number.isFinite(nextXmrUsd) ? nextXmrUsd : 0,
@@ -431,18 +536,7 @@ const Mining: React.FC = () => {
                 );
             } catch (err) {
                 console.warn('[Mining] Failed to fetch rates from backend:', err);
-                
-                // Use mock data for testing when backend is unavailable
-                const mockXmrUsd = 376.86;
-                const mockBmtUsd = 0.000003519;
-                const mockRate = 107092924;
-                
-                setXmrUsd(mockXmrUsd);
-                setBmtUsd(mockBmtUsd);
-                setRateXmrBmt(mockRate);
-                
-                // Save mock data to store
-                setExchangeRates(mockXmrUsd, mockBmtUsd, mockRate);
+                setExchangeRates(0, 0, 0);
             }
         };
 
@@ -456,33 +550,33 @@ const Mining: React.FC = () => {
         }
     }, [status]);
 
-    // Update balance based on current hashrate from P2Pool estimation
     useEffect(() => {
-        if (status === 'running' || status === 'paused') {
-            if (poolNetworkHashrate <= 0 || currentHashrate <= 0) {
-                setXmrBalance(0);
-                setBmtBalance(0);
-                return;
-            }
+        if (status !== 'running' || !user?.publicKey) return;
 
-            const secondsMined = elapsedTime;
-            const xmrEarned = estimateXmrReward({
+        const now = Date.now();
+        if (now - lastRewardReportAtRef.current < 15000) return;
+
+        const seq = ++rewardReportSeqRef.current;
+        lastRewardReportAtRef.current = now;
+
+        SolanaAuthService.getInstance()
+            .reportMiningStats({
                 hashrate: currentHashrate,
-                seconds: secondsMined,
-                networkHashrate: poolNetworkHashrate
+                shares: stratumStats?.total_stratum_shares || 0,
+                source: 'mining',
+                referenceId: `mining-${user.publicKey}-${now}-${seq}`,
+                metadata: {
+                    workerName,
+                    deviceType,
+                    elapsedTime,
+                    poolNetworkHashrate
+                }
+            })
+            .then(() => SolanaAuthService.getInstance().fetchMiningStats(user.publicKey))
+            .catch((err) => {
+                console.warn('[Mining] Failed to report mining stats:', err);
             });
-
-            setXmrBalance(xmrEarned);
-
-            const bmtEarned = estimateBmtReward({
-                hashrate: currentHashrate,
-                seconds: secondsMined,
-                networkHashrate: poolNetworkHashrate,
-                rateXmrBmt
-            });
-            setBmtBalance(Number.isFinite(bmtEarned) ? bmtEarned : 0);
-        }
-    }, [currentHashrate, rateXmrBmt, status, elapsedTime, poolNetworkHashrate]);
+    }, [status, user?.publicKey, currentHashrate, stratumStats?.total_stratum_shares, workerName, deviceType, elapsedTime, poolNetworkHashrate]);
 
     const formatTime = (seconds: number) => {
         const h = Math.floor(seconds / 3600);
@@ -498,16 +592,13 @@ const Mining: React.FC = () => {
         if (!shouldPoll) return;
         try {
             // Determine which xmrig API endpoint to use based on miner version
-            // Standard (v6.21) and Compat (v6.14) use /2/summary (or /api/v1/summary)
-            // Legacy (v5.11/v6.8) may use /api/stats or /summary
             let endpoints: string[] = [];
             if (deviceType === 'cpu') {
-                // Try endpoints in order of preference
                 endpoints = [
-                    'http://127.0.0.1:4077/2/summary',           // v6.14+
-                    'http://127.0.0.1:4077/api/v1/summary',      // Alternative v6.21
-                    'http://127.0.0.1:4077/api/stats',           // v5.11/legacy
-                    'http://127.0.0.1:4077/summary'              // Fallback
+                    'http://127.0.0.1:4077/2/summary',
+                    'http://127.0.0.1:4077/api/v1/summary',
+                    'http://127.0.0.1:4077/api/stats',
+                    'http://127.0.0.1:4077/summary'
                 ];
             } else {
                 endpoints = [
@@ -519,60 +610,34 @@ const Mining: React.FC = () => {
             let data = null;
             let successUrl = null;
 
-            // Try each endpoint until one succeeds
             for (const actualUrl of endpoints) {
                 try {
                     const controller = new AbortController();
                     const timeoutId = setTimeout(() => controller.abort(), 2000);
-
                     const res = await fetch(actualUrl, { signal: controller.signal }).catch(() => null);
                     clearTimeout(timeoutId);
 
                     if (res && res.ok) {
                         data = await res.json();
                         successUrl = actualUrl;
-
-                        // Log successful connection once
                         if (!window.__apiConnected || window.__apiConnected !== actualUrl) {
-                            console.log(`[Mining] ✅ Connected to xmrig API at ${actualUrl}`);
-                            window.electron.invoke('log-to-file', { level: 'info', message: `✅ Connected to xmrig API at ${actualUrl}`, source: 'Mining' });
                             window.__apiConnected = actualUrl;
-                            window.__apiErrorLogged = false;
                         }
                         break;
                     }
-                } catch (err) {
-                    // Try next endpoint
-                }
+                } catch { }
             }
 
-            if (!data) {
-                // All endpoints failed
-                if (!window.__apiErrorLogged) {
-                    const errMsg = `Could not connect to xmrig API. Tried: ${endpoints.join(', ')}`;
-                    console.warn(`[Mining] ${errMsg}`);
-                    window.electron.invoke('log-to-file', { level: 'warn', message: errMsg, source: 'Mining' });
-                    window.__apiErrorLogged = true;
-                }
-                return;
-            }
+            if (!data) return;
 
             let hr = 0;
             let temp: number | null = null;
             let power: number | null = null;
 
             if (deviceType === 'cpu') {
-                // Try different hashrate paths for different xmrig versions
-                hr = data.hashrate?.total?.[0] ??
-                    data.hashrate?.current ??
-                    data.hashrate ??
-                    0;
+                hr = data.hashrate?.total?.[0] ?? data.hashrate?.current ?? data.hashrate ?? 0;
+                if (hr > 0) setPeakHashrate((prev) => (hr > prev ? hr : prev));
 
-                // Update peak hashrate for CPU (use functional update to avoid stale closure)
-                if (hr > 0) {
-                    setPeakHashrate((prev) => (hr > prev ? hr : prev));
-                }
-                // Fetch CPU temp + power asynchronously without blocking
                 Promise.all([
                     window.electron.invoke('get-cpu-temp'),
                     window.electron.invoke('get-cpu-power')
@@ -580,124 +645,140 @@ const Mining: React.FC = () => {
                     const nextTemp = tempRes && tempRes.success ? tempRes.temp : null;
                     const nextPower = powerRes && powerRes.success ? powerRes.power : null;
                     updateStats(hr, nextTemp, nextPower ?? undefined);
+
+                    if (user?.publicKey) {
+                        const deviceId = localStorage.getItem('minebench_device_id');
+                        if (deviceId) {
+                            MultiDeviceSyncService.getInstance(user.publicKey).updateDevice(deviceId, {
+                                currentHashrate: hr,
+                                temperature: nextTemp || undefined,
+                                power: nextPower || undefined,
+                                uptime: elapsedTime,
+                                accumulatedRewards: Number(miningStats?.totalRewards || 0),
+                                mode: 'mining'
+                            });
+                        }
+                    }
                 }).catch(() => {
-                    // Still update with hashrate if temp/power fails
-                    updateStats(hr, null, power ?? undefined);
+                    updateStats(hr, null, undefined);
                 });
-                return; // Don't call updateStats again below
             } else if (data.gpus && data.gpus.length > 0) {
                 hr = data.gpus[0].hashrate ?? data.gpus[0].hash ?? 0;
                 temp = data.gpus[0].temperature ?? data.gpus[0].temp ?? 0;
                 power = data.gpus[0].power ?? 0;
-                window.electron.invoke('report-stats', { temp, power }).catch(() => { });
-            }
-
-            if (hr > 0) {
-                updateStats(hr, temp, power);
-                // Update peak hashrate for GPU / generic path
+                updateStats(hr, temp, power ?? undefined);
                 setPeakHashrate((prev) => (hr > prev ? hr : prev));
             }
-        } catch (err) {
-            const errMsg = `fetchStats error: ${err instanceof Error ? err.message : String(err)}`;
-            console.error(`[Mining] ${errMsg}`);
-            window.electron.invoke('log-to-file', { level: 'error', message: errMsg, source: 'Mining' });
-        }
+        } catch (err) { }
     };
 
     const startMining = async () => {
         if (status === 'running' || status === 'starting') return;
         if (!isSolanaConnected) {
-            addLog('⚠️ Connect Solana wallet before starting mining.');
+            addLog('Cannot start mining: connect Solana wallet first.');
             return;
         }
         if (!isNodeFullySynced) {
-            addLog('⏳ Node is not fully synced (100%). Mining is disabled until sync completes.');
+            addLog('Cannot start mining: pool node is not fully synced yet.');
+            return;
+        }
+        if (!walletValid) {
+            addLog('Cannot start mining: Monero wallet address is invalid.');
             return;
         }
         resetSession();
+        lastRewardReportAtRef.current = 0;
+        rewardReportSeqRef.current = 0;
+        pausedElapsedRef.current = 0;
+        miningStartedAtRef.current = Date.now();
         setElapsedTime(0);
         setPeakHashrate(0);
-
+        persistMiningTimer(miningStartedAtRef.current, 0);
         try {
             await window.electron.invoke('start-mining', {
                 type: deviceType,
                 wallet,
                 worker: workerName,
-                threads: deviceType === 'cpu' ? threads : undefined,
+                threads: deviceType === 'cpu' ? safeMiningThreads : undefined,
                 cpuPriority,
                 randomxMode,
                 hugePages,
                 donateLevel,
                 poolUrl,
                 manualPoolSelection,
-                solanaWallet: user!.publicKey, // Raw Solana address (no encoding)
+                solanaWallet: user!.publicKey,
             });
-
             setStatus('starting');
-            addLog(`⚙️ Starting mining with ${threads} threads...`);
             fetchStats();
         } catch (err: any) {
             setStatus('error');
-            addLog(`❌ Error: ${err.message}`);
+            addLog(`Failed to start mining: ${getErrorMessage(err)}`);
         }
     };
 
     const stopMining = async () => {
         if (statsIntervalRef.current) clearInterval(statsIntervalRef.current);
         if (timeIntervalRef.current) clearInterval(timeIntervalRef.current);
+        pausedElapsedRef.current = elapsedTime;
+        miningStartedAtRef.current = null;
+        persistMiningTimer(null, elapsedTime);
         setStatus('stopping');
         try {
-            // Save logs to disk before stopping
             const { logs: storeLogs } = useMinerStore.getState();
-            if (window.electron?.invoke) {
-                await window.electron.invoke('save-miner-logs', {
-                    systemLogs: storeLogs,
-                    minerLogs: storeLogs,
-                    sessionType: 'mining',
-                    device: deviceType
-                }).catch((err: any) => {
-                    console.warn('Failed to save logs:', err);
-                });
-            }
-
+            await window.electron.invoke('save-miner-logs', {
+                systemLogs: storeLogs,
+                minerLogs: storeLogs,
+                sessionType: 'mining',
+                device: deviceType
+            }).catch((err: any) => {
+                console.warn('Failed to save miner logs:', err);
+            });
             await window.electron.invoke('stop-mining', {});
             setStatus('completed');
-            addLog('⏹️ Mining stopped');
+            addLog('Mining stopped');
         } catch (err: any) {
             setStatus('error');
-            addLog(`❌ Error: ${err.message}`);
+            addLog(`Failed to stop mining: ${getErrorMessage(err)}`);
         }
     };
 
     const pauseMining = async () => {
         try {
             await window.electron.invoke('pause-mining', {});
+            pausedElapsedRef.current = elapsedTime;
+            miningStartedAtRef.current = null;
+            persistMiningTimer(null, elapsedTime);
             setStatus('paused');
             if (timeIntervalRef.current) clearInterval(timeIntervalRef.current);
-            addLog('⏸️ Mining paused');
+            addLog('Mining paused');
         } catch (err: any) {
             setStatus('error');
-            addLog(`❌ Error pausing: ${err.message}`);
+            addLog(`Failed to pause mining: ${getErrorMessage(err)}`);
         }
     };
 
     const resumeMining = async () => {
         try {
             await window.electron.invoke('resume-mining', {});
+            pausedElapsedRef.current = elapsedTime;
+            miningStartedAtRef.current = Date.now();
+            persistMiningTimer(miningStartedAtRef.current, elapsedTime);
             setStatus('running');
-            timeIntervalRef.current = setInterval(() => {
-                setElapsedTime((t) => t + 1);
-            }, 1000);
-            addLog('▶️ Mining resumed');
+            addLog('Mining resumed');
         } catch (err: any) {
             setStatus('error');
-            addLog(`❌ Error resuming: ${err.message}`);
+            addLog(`Failed to resume mining: ${getErrorMessage(err)}`);
         }
     };
 
     return (
         <div className="space-y-6">
-            {/* Header */}
+            {showShareAnimation && (
+                <ShareAnimation 
+                    theme={theme} 
+                    onComplete={() => setShowShareAnimation(false)} 
+                />
+            )}
             <div className="flex items-center justify-between">
                 <div>
                     <h1 className={cn("text-3xl font-light tracking-tight", theme === 'light' ? 'text-zinc-900' : 'text-white')}>
@@ -707,15 +788,11 @@ const Mining: React.FC = () => {
                         Track your hashrate and earnings in real-time
                     </p>
                 </div>
-
-                {/* Status Badge */}
                 <div className="flex items-center gap-2">
                     {isPremium && (
                         <div className={cn(
                             "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-[10px] font-bold uppercase tracking-wider shadow-sm transition-all",
-                            theme === 'light'
-                                ? "bg-amber-100 border-amber-200 text-amber-700 shadow-amber-100"
-                                : "bg-amber-500/10 border-amber-500/20 text-amber-400 shadow-[0_0_15px_rgba(245,158,11,0.1)]"
+                            theme === 'light' ? "bg-amber-100 border-amber-200 text-amber-700 shadow-amber-100" : "bg-amber-500/10 border-amber-500/20 text-amber-400 shadow-[0_0_15px_rgba(245,158,11,0.1)]"
                         )}>
                             <Flame size={12} className="animate-pulse" />
                             Premium Direct Mining
@@ -723,112 +800,64 @@ const Mining: React.FC = () => {
                     )}
                     <div className={cn('inline-flex items-center gap-2 px-4 py-2 rounded-full border text-xs font-medium transition-all',
                         status === 'running' ? (theme === 'light' ? 'border-emerald-300 bg-emerald-50 text-emerald-700 shadow-sm shadow-emerald-100' : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400') :
-                            status === 'starting' ? (theme === 'light' ? 'border-amber-300 bg-amber-50 text-amber-700' : 'border-amber-500/40 bg-amber-500/10 text-amber-400') :
-                                status === 'paused' ? (theme === 'light' ? 'border-blue-300 bg-blue-50 text-blue-700' : 'border-blue-500/40 bg-blue-500/10 text-blue-400') :
-                                    status === 'error' ? (theme === 'light' ? 'border-red-300 bg-red-50 text-red-700' : 'border-red-500/30 bg-red-500/10 text-red-400') :
-                                        (theme === 'light' ? 'border-zinc-200 bg-zinc-50 text-zinc-600' : 'border-white/10 bg-white/5 text-zinc-400')
+                        status === 'starting' ? (theme === 'light' ? 'border-amber-300 bg-amber-50 text-amber-700' : 'border-amber-500/40 bg-amber-500/10 text-amber-400') :
+                        status === 'paused' ? (theme === 'light' ? 'border-blue-300 bg-blue-50 text-blue-700' : 'border-blue-500/40 bg-blue-500/10 text-blue-400') :
+                        status === 'error' ? (theme === 'light' ? 'border-red-300 bg-red-50 text-red-700' : 'border-red-500/30 bg-red-500/10 text-red-400') :
+                        (theme === 'light' ? 'border-zinc-200 bg-zinc-50 text-zinc-600' : 'border-white/10 bg-white/5 text-zinc-400')
                     )}>
                         <span className={cn('w-2 h-2 rounded-full',
                             status === 'running' ? 'bg-emerald-500 animate-pulse' :
-                                status === 'starting' ? 'bg-amber-500 animate-pulse' :
-                                    status === 'paused' ? 'bg-blue-500' :
-                                        status === 'error' ? 'bg-red-500' : 'bg-zinc-400'
+                            status === 'starting' ? 'bg-amber-500 animate-pulse' :
+                            status === 'paused' ? 'bg-blue-500' :
+                            status === 'error' ? 'bg-red-500' : 'bg-zinc-400'
                         )}></span>
-                        <span>
-                            {status === 'running' ? 'Mining' :
-                                status === 'starting' ? 'Connecting' :
-                                    status === 'paused' ? 'Paused' :
-                                        status === 'completed' ? 'Completed' :
-                                            status === 'error' ? 'Error' : 'Idle'}
-                        </span>
+                        <span>{status === 'running' ? 'Mining' : status === 'starting' ? 'Connecting' : status === 'paused' ? 'Paused' : status === 'completed' ? 'Completed' : status === 'error' ? 'Error' : 'Idle'}</span>
                     </div>
                 </div>
             </div>
             <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-                {/* Chart */}
                 <div className="xl:col-span-2">
                     <HashRateChart data={chartData} theme={theme} />
                 </div>
-
-                {/* Right Panel */}
                 <div className="space-y-4">
-                    {/* CPU Info */}
                     {deviceType === 'cpu' && cpuName && (
-                        <div className={cn("border rounded-xl p-4 space-y-3",
-                            theme === 'light'
-                                ? 'bg-white border-zinc-200'
-                                : 'bg-zinc-900/50 border-white/10'
-                        )}>
-                            <div className={cn("flex items-center gap-2",
-                                theme === 'light' ? 'text-emerald-600' : 'text-emerald-400'
-                            )}>
+                        <div className={cn("border rounded-xl p-4 space-y-3", theme === 'light' ? 'bg-white border-zinc-200' : 'bg-zinc-900/50 border-white/10')}>
+                            <div className={cn("flex items-center gap-2", theme === 'light' ? 'text-emerald-600' : 'text-emerald-400')}>
                                 <Cpu size={16} />
                                 <span className="font-medium text-sm">CPU Information</span>
                             </div>
                             <div className="space-y-2 text-xs">
                                 <div className="flex justify-between">
                                     <span className={theme === 'light' ? 'text-zinc-600' : 'text-zinc-500'}>Processor:</span>
-                                    <span className={cn("font-mono text-right max-w-[120px] truncate", theme === 'light' ? 'text-zinc-900' : 'text-zinc-300')} title={cpuName}>
-                                        {cpuName}
-                                    </span>
+                                    <span className={cn("font-mono text-right max-w-[120px] truncate", theme === 'light' ? 'text-zinc-900' : 'text-zinc-300')} title={cpuName}>{cpuName}</span>
                                 </div>
                                 <div className="flex justify-between">
                                     <span className={theme === 'light' ? 'text-zinc-600' : 'text-zinc-500'}>Cores:</span>
                                     <span className={cn("font-mono", theme === 'light' ? 'text-zinc-900' : 'text-zinc-300')}>{cpuCores}</span>
                                 </div>
                             </div>
-
-                            {/* Threads Slider */}
                             <div className={cn("pt-2 space-y-2", theme === 'light' ? 'border-t border-zinc-200' : 'border-t border-white/5')}>
                                 <div className="flex justify-between items-center">
                                     <label className={cn("text-xs", theme === 'light' ? 'text-zinc-600' : 'text-zinc-500')}>Threads:</label>
-                                    <span className={cn("text-sm font-mono",
-                                        theme === 'light' ? 'text-emerald-600' : 'text-emerald-400'
-                                    )}>{threads} / {cpuCores}</span>
+                                    <span className={cn("text-sm font-mono", theme === 'light' ? 'text-emerald-600' : 'text-emerald-400')}>{safeMiningThreads} / {cpuCores}</span>
                                 </div>
-                                <input
-                                    type="range"
-                                    min="1"
-                                    max={cpuCores}
-                                    value={threads}
-                                    onChange={(e) => setThreads(Number(e.target.value))}
-                                    disabled={status === 'running' || status === 'starting'}
-                                    className={cn("w-full h-2 rounded-lg appearance-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-yellow-500 [&::-webkit-slider-thumb]:cursor-pointer [&::-moz-range-thumb]:w-4 [&::-moz-range-thumb]:h-4 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:bg-yellow-500 [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:cursor-pointer",
-                                        theme === 'light' ? 'bg-zinc-300' : 'bg-zinc-800'
-                                    )}
-                                />
+                                <input type="range" min="1" max={maxMiningThreads} value={safeMiningThreads} onChange={(e) => setThreads(Number(e.target.value))} disabled={status === 'running' || status === 'starting'} className={cn("w-full h-2 rounded-lg appearance-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed", theme === 'light' ? 'bg-zinc-300' : 'bg-zinc-800')} />
+                                <p className={cn("text-xs", theme === 'light' ? 'text-zinc-500' : 'text-zinc-600')}>
+                                    Keeps one logical thread free for the app and system responsiveness.
+                                </p>
                             </div>
-
-                            {/* CPU Priority - Limited to Normal */}
                             <div className={cn("pt-2 space-y-2", theme === 'light' ? 'border-t border-zinc-200' : 'border-t border-white/5')}>
                                 <div className="flex justify-between items-center">
-                                    <label className={cn("text-xs", theme === 'light' ? 'text-zinc-600' : 'text-zinc-500')}>
-                                        CPU Priority:
-                                    </label>
-                                    <span className={cn("text-sm font-mono",
-                                        theme === 'light' ? 'text-yellow-600' : 'text-yellow-400'
-                                    )}>
-                                        {cpuPriority === 0 ? 'Idle' :
-                                            cpuPriority === 1 ? 'Low' : 'Normal'}
+                                    <label className={cn("text-xs", theme === 'light' ? 'text-zinc-600' : 'text-zinc-500')}>CPU Priority:</label>
+                                    <span className={cn("text-sm font-mono", theme === 'light' ? 'text-yellow-600' : 'text-yellow-400')}>
+                                        {cpuPriority === 0 ? 'Idle' : cpuPriority === 1 ? 'Low' : 'Normal'}
                                     </span>
                                 </div>
-                                <input
-                                    type="range"
-                                    min="0"
-                                    max="2"
-                                    value={Math.min(cpuPriority, 2)}
-                                    onChange={(e) => setCpuPriority(Number(e.target.value))}
-                                    disabled={status === 'running' || status === 'starting'}
-                                    className={cn("w-full h-2 rounded-lg appearance-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-yellow-500 [&::-webkit-slider-thumb]:cursor-pointer [&::-moz-range-thumb]:w-4 [&::-moz-range-thumb]:h-4 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:bg-yellow-500 [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:cursor-pointer",
-                                        theme === 'light' ? 'bg-zinc-300' : 'bg-zinc-800'
-                                    )}
-                                />
+                                <input type="range" min="0" max="2" value={Math.min(cpuPriority, 2)} onChange={(e) => setCpuPriority(Number(e.target.value))} disabled={status === 'running' || status === 'starting'} className={cn("w-full h-2 rounded-lg appearance-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed", theme === 'light' ? 'bg-zinc-300' : 'bg-zinc-800')} />
                                 <p className={cn("text-xs", theme === 'light' ? 'text-zinc-500' : 'text-zinc-600')}>
                                     Idle · Low · Normal — balancing performance and system stability
                                 </p>
                             </div>
-
-                            {/* RandomX Mode */}
                             <div className={cn("pt-2 space-y-2", theme === 'light' ? 'border-t border-zinc-200' : 'border-t border-white/5')}>
                                 <label className={cn("text-xs block", theme === 'light' ? 'text-zinc-600' : 'text-zinc-500')}>
                                     RandomX Mode (RAM Usage):
@@ -837,12 +866,7 @@ const Mining: React.FC = () => {
                                     value={randomxMode}
                                     onChange={(e) => setRandomxMode(e.target.value as 'auto' | 'fast' | 'light')}
                                     disabled={status === 'running' || status === 'starting'}
-                                    className={cn(
-                                        "w-full px-3 py-2 rounded-lg text-xs border disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2",
-                                        theme === 'light'
-                                            ? 'bg-zinc-100 border-zinc-300 text-zinc-900 focus:ring-yellow-500'
-                                            : 'bg-zinc-950/50 border-white/10 text-zinc-300 focus:ring-yellow-500'
-                                    )}
+                                    className={cn("w-full px-3 py-2 rounded-lg text-xs border disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2", theme === 'light' ? 'bg-zinc-100 border-zinc-300 text-zinc-900 focus:ring-yellow-500' : 'bg-zinc-950/50 border-white/10 text-zinc-300 focus:ring-yellow-500')}
                                 >
                                     <option value="auto">Auto (~2GB RAM optimal)</option>
                                     <option value="fast">Fast (~2GB RAM high speed)</option>
@@ -852,8 +876,6 @@ const Mining: React.FC = () => {
                                     Fast uses more RAM but gives better hashrate
                                 </p>
                             </div>
-
-                            {/* Huge Pages */}
                             <div className={cn("pt-2", theme === 'light' ? 'border-t border-zinc-200' : 'border-t border-white/5')}>
                                 <label className="flex items-center gap-2 cursor-pointer">
                                     <input
@@ -861,12 +883,7 @@ const Mining: React.FC = () => {
                                         checked={hugePages}
                                         onChange={(e) => setHugePages(e.target.checked)}
                                         disabled={status === 'running' || status === 'starting'}
-                                        className={cn(
-                                            "w-4 h-4 rounded border disabled:opacity-50 disabled:cursor-not-allowed",
-                                            theme === 'light'
-                                                ? 'border-zinc-300 text-emerald-600 focus:ring-emerald-500'
-                                                : 'border-white/10 bg-zinc-950/50 text-emerald-500 focus:ring-emerald-500'
-                                        )}
+                                        className={cn("w-4 h-4 rounded border disabled:opacity-50 disabled:cursor-not-allowed", theme === 'light' ? 'border-zinc-300 text-emerald-600 focus:ring-emerald-500' : 'border-white/10 bg-zinc-950/50 text-emerald-500 focus:ring-emerald-500')}
                                     />
                                     <span className={cn("text-xs", theme === 'light' ? 'text-zinc-700' : 'text-zinc-300')}>
                                         Enable Huge Pages
@@ -884,7 +901,7 @@ const Mining: React.FC = () => {
                                     <div className={cn("text-xs mt-2 p-2 rounded border", theme === 'light' ? 'bg-yellow-50 border-yellow-200 text-yellow-800' : 'bg-yellow-500/10 border-yellow-500/20 text-yellow-300')}>
                                         <p className="font-semibold mb-1">What is Huge Pages?</p>
                                         <p className="opacity-90">
-                                            Huge Pages allows the system to use larger memory blocks instead of standard pages, which improves CPU cache performance. This is especially useful for mining, where large amounts of memory are processed continuously. Enabling Huge Pages can increase hash rate by 10-20%.
+                                            Huge Pages uses larger memory blocks to improve CPU cache performance. It can increase mining hash rate by 10-20% on supported systems.
                                         </p>
                                     </div>
                                 )}
@@ -894,17 +911,10 @@ const Mining: React.FC = () => {
                             </div>
                         </div>
                     )}
-
-                    {/* Stats - Live Metrics */}
-                    <div className={cn("border rounded-xl p-6 space-y-4",
-                        theme === 'light'
-                            ? 'bg-white border-zinc-200'
-                            : 'bg-zinc-900/50 border-white/10'
-                    )}>
+                    <div className={cn("border rounded-xl p-6 space-y-4", theme === 'light' ? 'bg-white border-zinc-200' : 'bg-zinc-900/50 border-white/10')}>
                         <div className="flex items-center justify-between">
                             <span className={cn("text-sm font-semibold", theme === 'light' ? 'text-zinc-700' : 'text-zinc-300')}>Live Metrics</span>
                         </div>
-
                         <div className="grid grid-cols-2 gap-2">
                             <MetricCard label="H/s" value={formatHashrate(currentHashrate)} icon={<Zap size={14} />} color="emerald" theme={theme} />
                             <MetricCard label="Peak" value={formatHashrate(peakHashrate)} icon={<TrendingUp size={14} />} color="yellow" theme={theme} />
@@ -913,89 +923,32 @@ const Mining: React.FC = () => {
                             )}
                             <MetricCard label="Time" value={formatTime(elapsedTime)} icon={<Clock size={14} />} color="emerald" theme={theme} />
                         </div>
-
-                        {/* Control Buttons */}
                         <div className="grid grid-cols-2 gap-2">
                             {!walletValid && status === 'idle' && (
-                                <div className={cn("col-span-2 p-3 rounded-lg text-xs text-center border",
-                                    theme === 'light'
-                                        ? 'bg-red-50 border-red-200 text-red-700'
-                                        : 'bg-red-500/10 border-red-500/20 text-red-400'
-                                )}>
-                                    ⚠️ Невалідна адреса Monero гаманця. Будь ласка, оновіть гаманець перед початком майнінгу.
+                                <div className={cn("col-span-2 p-3 rounded-lg text-xs text-center border", theme === 'light' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-red-500/10 border-red-500/20 text-red-400')}>
+                                    Invalid Monero wallet address. Please update the wallet before mining.
                                 </div>
                             )}
                             {!isSolanaConnected && status !== 'running' && status !== 'starting' && (
-                                <div className={cn(
-                                    "col-span-2 p-3 rounded-xl text-xs border flex items-center justify-center gap-2",
-                                    theme === 'light'
-                                        ? 'bg-emerald-50 border-emerald-300 text-zinc-500'
-                                        : 'bg-emerald-500/12 border-emerald-500/35 text-zinc-400'
-                                )}>
+                                <div className={cn("col-span-2 p-3 rounded-xl text-xs border flex items-center justify-center gap-2", theme === 'light' ? 'bg-emerald-50 border-emerald-300 text-zinc-500' : 'bg-emerald-500/12 border-emerald-500/35 text-zinc-400')}>
                                     <Shield size={14} className="shrink-0" />
                                     <span>Connect Solana wallet to start mining and receive rewards.</span>
                                 </div>
                             )}
                             {!isNodeFullySynced && status !== 'running' && status !== 'starting' && (
-                                <div className={cn("col-span-2 p-3 rounded-lg text-xs text-center border",
-                                    theme === 'light'
-                                        ? 'bg-yellow-50 border-yellow-200 text-yellow-700'
-                                        : 'bg-yellow-500/10 border-yellow-500/20 text-yellow-400'
-                                )}>
-                                    ⏳ Node sync must be 100% to start mining.
+                                <div className={cn("col-span-2 p-3 rounded-lg text-xs text-center border", theme === 'light' ? 'bg-yellow-50 border-yellow-200 text-yellow-700' : 'bg-yellow-500/10 border-yellow-500/20 text-yellow-400')}>
+                                    Node sync must be 100% to start mining.
                                 </div>
                             )}
-                            <button
-                                onClick={
-                                    status === 'paused'
-                                        ? resumeMining
-                                        : (status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping')
-                                            ? startMining
-                                            : pauseMining
-                                }
-                                disabled={status === 'starting' || (!walletValid && (status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping')) || (!isSolanaConnected && (status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping')) || (!isNodeFullySynced && (status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping'))}
-                                className={cn(
-                                    'py-3.5 px-4 rounded-xl font-semibold text-sm tracking-tight transition-all transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 cursor-pointer',
-                                    status === 'running' || status === 'paused'
-                                        ? 'bg-yellow-500/10 text-yellow-600 border-2 border-yellow-500/20 hover:bg-yellow-500/20 hover:border-yellow-500/30'
-                                        : (theme === 'light'
-                                            ? 'bg-emerald-600 text-white border-2 border-emerald-600 hover:bg-emerald-500 hover:shadow-lg hover:shadow-emerald-200'
-                                            : 'bg-emerald-500 text-zinc-950 border-2 border-emerald-500 hover:bg-emerald-400 hover:shadow-lg hover:shadow-emerald-500/20')
-                                )}
-                            >
-                                {status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping' ? (
-                                    <><Play size={16} className="fill-current" /> Start</>
-                                ) : status === 'paused' ? (
-                                    <><PlayIcon size={16} className="fill-current" /> Resume</>
-                                ) : status === 'starting' ? (
-                                    <><Hourglass size={16} className="animate-spin" /> Connecting</>
-                                ) : (
-                                    <><Pause size={16} className="fill-current" /> Pause</>
-                                )}
+                            <button onClick={status === 'paused' ? resumeMining : (status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping') ? startMining : pauseMining} disabled={status === 'starting' || ((!walletValid || !isSolanaConnected || !isNodeFullySynced) && (status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping'))} className={cn('py-3.5 px-4 rounded-xl font-semibold text-sm tracking-tight transition-all transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 cursor-pointer', status === 'running' || status === 'paused' ? 'bg-yellow-500/10 text-yellow-600 border-2 border-yellow-500/20 hover:bg-yellow-500/20' : (theme === 'light' ? 'bg-emerald-600 text-white border-2 border-emerald-600 hover:bg-emerald-500' : 'bg-emerald-500 text-zinc-950 border-2 border-emerald-500 hover:bg-emerald-400'))}>
+                                {status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping' ? <><Play size={16} /> Start</> : status === 'paused' ? <><PlayIcon size={16} /> Resume</> : status === 'starting' ? <><Hourglass size={16} className="animate-spin" /> Connecting</> : <><Pause size={16} /> Pause</>}
                             </button>
-
-                            <button
-                                onClick={status === 'running' || status === 'starting' || status === 'paused' ? stopMining : startMining}
-                                disabled={status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping'}
-                                className={cn(
-                                    'py-3.5 px-4 rounded-xl font-semibold text-sm tracking-tight transition-all transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 cursor-pointer',
-                                    status === 'running' || status === 'starting' || status === 'paused'
-                                        ? 'bg-red-500/10 text-red-500 border-2 border-red-500/20 hover:bg-red-500/20 hover:border-red-500/30'
-                                        : (theme === 'light'
-                                            ? 'bg-zinc-200 text-zinc-500 border-2 border-zinc-200'
-                                            : 'bg-zinc-800 text-zinc-600 border-2 border-zinc-800')
-                                )}
-                            >
-                                <><Square size={16} className="fill-current" /> Stop</>
+                            <button onClick={stopMining} disabled={status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping'} className={cn('py-3.5 px-4 rounded-xl font-semibold text-sm tracking-tight transition-all transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 cursor-pointer', status === 'running' || status === 'starting' || status === 'paused' ? 'bg-red-500/10 text-red-500 border-2 border-red-500/20 hover:bg-red-500/20' : (theme === 'light' ? 'bg-zinc-200 text-zinc-500 border-2 border-zinc-200' : 'bg-zinc-800 text-zinc-600 border-2 border-zinc-800'))}>
+                                <Square size={16} /> Stop
                             </button>
                         </div>
                     </div>
-
-                    <div className={cn("border rounded-xl p-5 space-y-4",
-                        theme === 'light'
-                            ? 'bg-white border-zinc-200'
-                            : 'bg-zinc-900/50 border-white/10'
-                    )}>
+                    <div className={cn("border rounded-xl p-5 space-y-4", theme === 'light' ? 'bg-white border-zinc-200' : 'bg-zinc-900/50 border-white/10')}>
                         <div className="flex items-center justify-between">
                             <span className={cn("text-sm font-semibold", theme === 'light' ? 'text-zinc-700' : 'text-zinc-300')}>Pool Stats</span>
                             <span className={cn("text-[10px] uppercase tracking-widest", theme === 'light' ? 'text-zinc-500' : 'text-zinc-500')}>
@@ -1019,132 +972,49 @@ const Mining: React.FC = () => {
                             <div>Reward Share: {(((stratumStats?.block_reward_share_percent || 0))).toFixed(3)}%</div>
                         </div>
                     </div>
-
-                    {/* System Resource Monitor */}
-                    {(systemStats.hasCpuData || systemStats.hasRamData) && (
-                        <div className={cn("border rounded-xl p-5 space-y-3",
-                            theme === 'light'
-                                ? 'bg-white border-zinc-200'
-                                : 'bg-zinc-900/50 border-white/10'
-                        )}>
-                            <div className={cn("flex items-center gap-2 text-xs font-semibold uppercase tracking-wider",
-                                theme === 'light' ? 'text-yellow-600' : 'text-yellow-400'
-                            )}>
-                                <HardDrive size={14} />
-                                System Resources
-                            </div>
-
-                            {/* CPU Usage (hide if no CPU data) */}
-                            {systemStats.hasCpuData && systemStats.cpuUsage !== null && (
-                                <div className="space-y-1">
-                                    <div className="flex justify-between items-center">
-                                        <div className={cn("text-xs uppercase tracking-wide", theme === 'light' ? 'text-zinc-600' : 'text-zinc-500')}>
-                                            CPU Load
-                                        </div>
-                                        <div className={cn("text-sm font-bold", theme === 'light' ? 'text-yellow-700' : 'text-yellow-300')}>
-                                            {systemStats.cpuUsage.toFixed(1)}%
-                                        </div>
-                                    </div>
-                                    <div className={cn("w-full h-1.5 rounded-full overflow-hidden",
-                                        theme === 'light' ? 'bg-zinc-200' : 'bg-zinc-800'
-                                    )}>
-                                        <div className="h-full bg-gradient-to-r from-yellow-500 to-yellow-400 transition-all"
-                                            style={{ width: `${Math.min(systemStats.cpuUsage, 100)}%` }} />
-                                    </div>
-                                </div>
-                            )}
-
-                            {/* RAM Usage */}
-                            {systemStats.hasRamData && systemStats.ramUsage !== null && systemStats.ramTotal !== null && (
-                                <div className="space-y-1">
-                                    <div className="flex justify-between items-center">
-                                        <div className={cn("text-xs uppercase tracking-wide", theme === 'light' ? 'text-zinc-600' : 'text-zinc-500')}>
-                                            RAM Usage
-                                        </div>
-                                        <div className={cn("text-sm font-bold", theme === 'light' ? 'text-emerald-700' : 'text-emerald-300')}>
-                                            {((systemStats.ramUsage / 1024 / 1024 / 1024).toFixed(1))} GB / {(systemStats.ramTotal / 1024 / 1024 / 1024).toFixed(1)} GB
-                                        </div>
-                                    </div>
-                                    <div className={cn("w-full h-1.5 rounded-full overflow-hidden",
-                                        theme === 'light' ? 'bg-zinc-200' : 'bg-zinc-800'
-                                    )}>
-                                        <div className="h-full bg-gradient-to-r from-emerald-500 to-emerald-400 transition-all"
-                                            style={{ width: `${Math.min((systemStats.ramUsage / systemStats.ramTotal) * 100, 100)}%` }} />
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-                    )}
-
-                    {/* Wallet Balance */}
-                    <div className={cn("border rounded-xl p-5 space-y-4",
-                        theme === 'light'
-                            ? 'bg-gradient-to-br from-emerald-50 via-white to-cyan-50 border-emerald-200'
-                            : 'bg-gradient-to-br from-emerald-500/10 via-zinc-900/50 to-cyan-500/10 border-emerald-500/20'
-                    )}>
-                        <div className={cn("flex items-center gap-2 text-xs font-semibold uppercase tracking-wider",
-                            theme === 'light' ? 'text-emerald-700' : 'text-emerald-400'
-                        )}>
+                    <div className={cn("border rounded-xl p-5 space-y-4", theme === 'light' ? 'bg-white border-zinc-200' : 'bg-zinc-900/50 border-white/10')}>
+                        <div className={cn("flex items-center gap-2 text-xs font-semibold uppercase tracking-wider", theme === 'light' ? 'text-sky-700' : 'text-sky-400')}>
                             <Shield size={14} />
-                            Estimated Wallet Balance
+                            Verified Shares
                         </div>
                         <div className={cn("text-xs mt-1", theme === 'light' ? 'text-zinc-500' : 'text-zinc-600')}>
-                            Calculated based on hashrate, mining time, Monero reward rate, and exchange rates
+                            Current Monero reward window share accounting from backend.
                         </div>
-
-                        {/* XMR Balance */}
-                        <div className="space-y-1">
-                            <div className={cn("text-xs uppercase tracking-wide", theme === 'light' ? 'text-zinc-600' : 'text-zinc-500')}>
-                                Estimated Monero (XMR)
+                        <div className="grid grid-cols-2 gap-2 text-xs">
+                            <div>
+                                <span className={cn(theme === 'light' ? 'text-zinc-600' : 'text-zinc-400')}>User shares: </span>
+                                <span className={cn("font-mono", theme === 'light' ? 'text-zinc-900' : 'text-white')}>{activeWindowUserShares.toLocaleString()}</span>
                             </div>
-                            <div className={cn("text-xl font-bold font-mono", theme === 'light' ? 'text-zinc-900' : 'text-white')}>
-                                {(Number.isFinite(xmrBalance) ? xmrBalance : 0).toFixed(8)} XMR
+                            <div>
+                                <span className={cn(theme === 'light' ? 'text-zinc-600' : 'text-zinc-400')}>Reward part: </span>
+                                <span className={cn("font-mono", theme === 'light' ? 'text-sky-800' : 'text-sky-400')}>{activeWindowRewardSharePercent.toFixed(4)}%</span>
                             </div>
-                            <div className={cn("text-xs", theme === 'light' ? 'text-zinc-500' : 'text-zinc-600')}>
-                                ≈ ${((Number.isFinite(xmrBalance) ? xmrBalance : 0) * (Number.isFinite(xmrUsd) ? xmrUsd : 0)).toFixed(2)} USD
+                            <div>
+                                <span className={cn(theme === 'light' ? 'text-zinc-600' : 'text-zinc-400')}>Total pool shares: </span>
+                                <span className={cn("font-mono", theme === 'light' ? 'text-zinc-900' : 'text-white')}>{activeWindowPoolShares.toLocaleString()}</span>
                             </div>
-                        </div>
-
-                        <div className={cn("border-t", theme === 'light' ? 'border-zinc-200' : 'border-white/5')} />
-
-                        {/* BMT Balance */}
-                        <div className="space-y-1">
-                            <div className={cn("text-xs uppercase tracking-wide", theme === 'light' ? 'text-emerald-600' : 'text-emerald-500')}>
-                                your estimated rewards in $BMT
-                            </div>
-                            <div className={cn("text-2xl font-bold", theme === 'light' ? 'text-emerald-900' : 'text-emerald-300')}>
-                                {(Number.isFinite(bmtBalance) ? bmtBalance : 0).toFixed(2)} BMT
+                            <div>
+                                <span className={cn(theme === 'light' ? 'text-zinc-600' : 'text-zinc-400')}>Paid shares: </span>
+                                <span className={cn("font-mono", theme === 'light' ? 'text-zinc-900' : 'text-white')}>{(miningStats?.paidShares ?? 0).toLocaleString()}</span>
                             </div>
                         </div>
-
-                        {/* Lifetime stats from backend (total XMR mined, total BMT earned) */}
-                        {(Number(miningStats?.totalXmrMined ?? 0) > 0 || Number(miningStats?.totalBmtEarned ?? 0) > 0) && (
+                        {(Number(miningStats?.totalXmrMined ?? 0) > 0 || Number(miningStats?.totalBmtEarned ?? 0) > 0 || Number(miningStats?.activeShares ?? 0) > 0) && (
                             <>
                                 <div className={cn("border-t", theme === 'light' ? 'border-zinc-200' : 'border-white/5')} />
-                                <div className={cn("text-xs uppercase tracking-wide pt-1", theme === 'light' ? 'text-zinc-500' : 'text-zinc-500')}>
-                                    Lifetime (from pool)
-                                </div>
+                                <div className={cn("text-xs uppercase tracking-wide pt-1", theme === 'light' ? 'text-zinc-500' : 'text-zinc-500')}>Lifetime (from pool)</div>
                                 <div className="grid grid-cols-2 gap-2 text-xs">
                                     <div>
                                         <span className={cn(theme === 'light' ? 'text-zinc-600' : 'text-zinc-400')}>XMR mined: </span>
-                                        <span className={cn("font-mono", theme === 'light' ? 'text-zinc-900' : 'text-white')}>
-                                            {(miningStats?.totalXmrMined ?? 0).toFixed(8)}
-                                        </span>
+                                        <span className={cn("font-mono", theme === 'light' ? 'text-zinc-900' : 'text-white')}>{(miningStats?.totalXmrMined ?? 0).toFixed(8)}</span>
                                     </div>
                                     <div>
-                                        <span className={cn(theme === 'light' ? 'text-zinc-600' : 'text-zinc-400')}>BMT earned: </span>
-                                        <span className={cn("font-mono", theme === 'light' ? 'text-emerald-800' : 'text-emerald-400')}>
-                                            {(miningStats?.totalBmtEarned ?? 0).toFixed(2)}
-                                        </span>
+                                        <span className={cn(theme === 'light' ? 'text-zinc-600' : 'text-zinc-400')}>Active shares: </span>
+                                        <span className={cn("font-mono", theme === 'light' ? 'text-zinc-900' : 'text-white')}>{(miningStats?.activeShares ?? 0).toLocaleString()}</span>
                                     </div>
-                                    {(Number(miningStats?.totalBmtWithdrawn ?? 0) > 0) && (
-                                        <div className="col-span-2">
-                                            <span className={cn(theme === 'light' ? 'text-zinc-600' : 'text-zinc-400')}>BMT withdrawn: </span>
-                                            <span className={cn("font-mono", theme === 'light' ? 'text-zinc-900' : 'text-white')}>
-                                                {(miningStats?.totalBmtWithdrawn ?? 0).toFixed(2)}
-                                            </span>
-                                        </div>
-                                    )}
+                                    <div>
+                                        <span className={cn(theme === 'light' ? 'text-zinc-600' : 'text-zinc-400')}>BMT credited: </span>
+                                        <span className={cn("font-mono", theme === 'light' ? 'text-zinc-900' : 'text-white')}>{(miningStats?.totalBmtEarned ?? 0).toFixed(2)}</span>
+                                    </div>
                                 </div>
                             </>
                         )}
@@ -1155,19 +1025,7 @@ const Mining: React.FC = () => {
     );
 };
 
-const StatCard = ({
-    label,
-    value,
-    icon,
-    tone = 'blue',
-    theme
-}: {
-    label: string;
-    value: string;
-    icon: React.ReactNode;
-    tone?: 'blue' | 'emerald' | 'violet' | 'sky' | 'cyan' | 'teal' | 'rose' | 'amber';
-    theme: string;
-}) => {
+const StatCard = ({ label, value, icon, tone = 'blue', theme }: { label: string; value: string; icon: React.ReactNode; tone?: 'blue' | 'emerald' | 'violet' | 'sky' | 'cyan' | 'teal' | 'rose' | 'amber'; theme: string }) => {
     const tones = {
         blue: { light: 'border-l-blue-500 text-zinc-700', dark: 'border-l-blue-400 text-zinc-300' },
         emerald: { light: 'border-l-emerald-500 text-zinc-700', dark: 'border-l-emerald-400 text-zinc-300' },
@@ -1178,20 +1036,17 @@ const StatCard = ({
         rose: { light: 'border-l-rose-500 text-zinc-700', dark: 'border-l-rose-400 text-zinc-300' },
         amber: { light: 'border-l-amber-500 text-zinc-700', dark: 'border-l-amber-400 text-zinc-300' }
     } as const;
-    const palette = tones[tone];
+
     return (
-    <div className={cn("rounded-lg border border-l-2 p-3 flex flex-col gap-1",
-        theme === 'light'
-            ? `bg-zinc-50 border-zinc-200 ${palette.light}`
-            : `bg-zinc-900/70 border-zinc-700/70 ${palette.dark}`
-    )}>
-        <div className={cn("flex items-center gap-2 text-xs uppercase tracking-widest", theme === 'light' ? 'text-zinc-600' : 'text-zinc-500')}>
-            {icon}
-            <span>{label}</span>
+        <div className={cn(
+            "rounded-lg border border-l-2 p-3 flex flex-col gap-1",
+            theme === 'light' ? 'bg-zinc-50 border-zinc-200' : 'bg-zinc-900/70 border-zinc-700/70',
+            tones[tone][theme === 'light' ? 'light' : 'dark']
+        )}>
+            <div className={cn("flex items-center gap-2 text-xs uppercase tracking-widest", theme === 'light' ? 'text-zinc-600' : 'text-zinc-500')}>{icon} <span>{label}</span></div>
+            <div className={cn("text-lg font-mono", theme === 'light' ? 'text-zinc-900' : 'text-white')}>{value}</div>
         </div>
-        <div className={cn("text-lg font-mono", theme === 'light' ? 'text-zinc-900' : 'text-white')}>{value}</div>
-    </div>
-);
+    );
 };
 
 const MetricCard = React.memo(({ label, value, icon, color, theme }: { label: string; value: string; icon: React.ReactNode; color: 'emerald' | 'yellow' | 'blue'; theme: string }) => {
@@ -1203,17 +1058,10 @@ const MetricCard = React.memo(({ label, value, icon, color, theme }: { label: st
     const colorClass = colorMap[color][theme === 'light' ? 'light' : 'dark'];
     return (
         <div className={cn("rounded-lg border p-3 flex flex-col gap-2", colorClass)}>
-            <div className="flex items-center gap-1.5">
-                {icon}
-                <div className="text-xs uppercase tracking-widest">{label}</div>
-            </div>
+            <div className="flex items-center gap-1.5">{icon} <div className="text-xs uppercase tracking-widest">{label}</div></div>
             <div className="text-lg font-bold font-mono">{value}</div>
         </div>
     );
 });
 
-MetricCard.displayName = 'MetricCard';
-
 export default Mining;
-
-

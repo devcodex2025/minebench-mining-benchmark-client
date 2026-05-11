@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Download, RefreshCw, Info, Settings as SettingsIcon, CheckCircle, Lock, ExternalLink } from 'lucide-react';
+import { Download, RefreshCw, Info, Settings as SettingsIcon, CheckCircle, Lock, ExternalLink } from '../components/icons';
 import { useTheme } from '../contexts/ThemeContext';
 import { cn } from '../lib/utils';
 import { useMinerStore } from '../store/useMinerStore';

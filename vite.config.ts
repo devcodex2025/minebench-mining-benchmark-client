@@ -28,7 +28,9 @@ export default defineConfig({
       '/api': {
         target: 'https://backend.minebench.cloud',
         changeOrigin: true,
-        secure: true,
+        // Local dev runs through Node's TLS stack, which may not trust the
+        // backend certificate chain even when browsers do.
+        secure: false,
         rewrite: (path) => path.replace(/^\/api/, '/api')
       }
     }

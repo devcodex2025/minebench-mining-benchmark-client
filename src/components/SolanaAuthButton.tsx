@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Wallet, LogOut, Loader, AlertCircle, CheckCircle } from 'lucide-react';
+import { Wallet, LogOut, Loader, AlertCircle, CheckCircle } from './icons';
 import { useSolanaAuth, SolanaAuthService } from '../services/solanaAuth';
 import { useTheme } from '../contexts/ThemeContext';
 import { useWalletAuthUrl } from '../hooks/useEnvironment';
@@ -14,15 +14,19 @@ export const SolanaAuthButton: React.FC = () => {
   const [bmtBalance, setBmtBalance] = useState<number | null>(null);
   const [balLoading, setBalLoading] = useState(false);
   const [balError, setBalError] = useState<string | null>(null);
+  const [rewardBalance, setRewardBalance] = useState(0);
+  const [walletTokenBalance, setWalletTokenBalance] = useState<number | null>(null);
   const tokenMint = getEnvironmentConfig().bmtTokenMint;
   const authService = SolanaAuthService.getInstance();
   const dbTotalBMT = useMinerStore(state => state.dbTotalBMT);
 
   useEffect(() => {
     if (isConnected && user?.publicKey && Number.isFinite(dbTotalBMT)) {
-      setBmtBalance(dbTotalBMT);
+      const nextRewardBalance = Number(dbTotalBMT) || 0;
+      setRewardBalance(nextRewardBalance);
+      setBmtBalance(walletTokenBalance !== null ? walletTokenBalance : nextRewardBalance);
     }
-  }, [dbTotalBMT, isConnected, user?.publicKey]);
+  }, [dbTotalBMT, isConnected, user?.publicKey, walletTokenBalance]);
 
   // Fetch SPL token balance for BMT mint on Solana mainnet
   useEffect(() => {
@@ -34,8 +38,9 @@ export const SolanaAuthButton: React.FC = () => {
 
         try {
           const stats = await authService.fetchMiningStats(user.publicKey);
-          setBmtBalance(Number.isFinite(stats.totalRewards) ? stats.totalRewards : 0);
-          return;
+          const nextRewardBalance = Number.isFinite(stats.totalRewards) ? stats.totalRewards : 0;
+          setRewardBalance(nextRewardBalance);
+          setBmtBalance(nextRewardBalance);
         } catch (e: any) {
           console.warn('[BMT] DB reward balance failed, falling back to token balance:', e?.message);
         }
@@ -50,7 +55,9 @@ export const SolanaAuthButton: React.FC = () => {
             const res = await ipc.invoke('solana-get-token-balance', { owner, mint: tokenMint });
             if (res?.success) {
               const val = typeof res.balance === 'number' ? res.balance : Number(res.balance || 0);
-              setBmtBalance(isFinite(val) ? val : 0);
+              const nextTokenBalance = isFinite(val) ? val : 0;
+              setWalletTokenBalance(nextTokenBalance);
+              setBmtBalance(nextTokenBalance);
               resolved = true;
             } else if (res?.error) {
               console.warn('[BMT] IPC balance error:', res.error);
@@ -118,6 +125,7 @@ export const SolanaAuthButton: React.FC = () => {
               if (found) break;
             }
           }
+          setWalletTokenBalance(total);
           setBmtBalance(total);
         }
       } catch (e: any) {
@@ -128,7 +136,7 @@ export const SolanaAuthButton: React.FC = () => {
       }
     };
     fetchBalance();
-  }, [user?.publicKey]);
+  }, [user?.publicKey, tokenMint]);
 
   const isDark = theme === 'dark';
   const btnGradient = isDark
@@ -190,6 +198,11 @@ export const SolanaAuthButton: React.FC = () => {
           >
             {user.publicKey}
           </code>
+          {walletTokenBalance !== null && rewardBalance > 0 && Math.abs(walletTokenBalance - rewardBalance) > 0.000001 && (
+            <div className={cn('text-[10px]', isDark ? 'text-amber-200/60' : 'text-yellow-700/60')}>
+              rewards {rewardBalance.toFixed(4)} BMT
+            </div>
+          )}
           <div className={cn('text-xs font-mono', isDark ? 'text-amber-200/90' : 'text-yellow-700')}>
             {balLoading ? 'Loading…' : (bmtBalance !== null ? `${bmtBalance.toFixed(4)} BMT` : (balError ? '—' : '0.0000 BMT'))}
           </div>

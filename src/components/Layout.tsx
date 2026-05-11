@@ -1,6 +1,6 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { Activity, Hammer, Settings, BarChart3, Terminal, TrendingUp, type LucideIcon } from 'lucide-react';
+import { Activity, Flame, Hammer, Settings, BarChart3, Terminal, TrendingUp, type LucideIcon } from './icons';
 import { cn } from '../lib/utils';
 import { useTheme } from '../contexts/ThemeContext';
 import { useMinerStore } from '../store/useMinerStore';
@@ -55,6 +55,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
               <NavItem to="/" icon={BarChart3} label="Dashboard" />
               <NavItem to="/benchmark" icon={Activity} label="Benchmarks" />
               <NavItem to="/mining" icon={Hammer} label="Mining Mode" />
+              <NavItem to="/stress-test" icon={Flame} label="Stress Test" />
               <NavItem to="/statistics" icon={TrendingUp} label="Statistics" />
               <NavItem to="/logs" icon={Terminal} label="System Logs" />
            </nav>

@@ -22,23 +22,37 @@ import {
   Calendar,
   TrendingDown,
   AlertCircle,
-  Loader
-} from 'lucide-react';
-import { useSolanaAuth } from '../services/solanaAuth';
+  Loader,
+  Database
+} from '../components/icons';
+import { SolanaAuthService, useSolanaAuth } from '../services/solanaAuth';
 import { useTheme } from '../contexts/ThemeContext';
 import { useMinerStore } from '../store/useMinerStore';
 import { cn, formatHashrate } from '../lib/utils';
+import { p2poolAPI } from '../services/p2poolAPI';
 
 interface RewardData {
   date: string;
   rewards: number;
+  source: string;
+  type: string;
 }
 
 interface DeviceStats {
+  id: string;
   name: string;
+  type: 'cpu' | 'gpu';
   hashrate: number;
-  uptime: number;
-  shares: number;
+  lastSeen: number;
+  isActive: boolean;
+  rewards: number;
+}
+
+interface PoolRewardStats {
+  totalBmtRewards: number;
+  totalBmtPayouts: number;
+  availableBmtRewards: number;
+  rewardEntries: number;
 }
 
 const StatCard: React.FC<{
@@ -115,42 +129,110 @@ export const MiningStatistics: React.FC = () => {
   const history = useMinerStore(state => state.history);
   const poolHashrateTotal = useMinerStore(state => state.poolHashrateTotal);
   const poolMinersCount = useMinerStore(state => state.poolMinersCount);
+  const cpuName = useMinerStore(state => state.cpuName);
+  const workerName = useMinerStore(state => state.workerName);
+  const deviceType = useMinerStore(state => state.deviceType);
+  const status = useMinerStore(state => state.status);
+  const [rewardHistory, setRewardHistory] = useState<RewardData[]>([]);
+  const [rewardHistoryLoading, setRewardHistoryLoading] = useState(false);
+  const [poolRewardStats, setPoolRewardStats] = useState<PoolRewardStats | null>(null);
   const safeTotalRewards = Number.isFinite(miningStats?.totalRewards)
     ? Number(miningStats?.totalRewards)
     : (Number.isFinite(dbTotalBMT) ? dbTotalBMT : 0);
-
-  // Build reward history from live miner history (no mocks)
-  const rewardHistory = useMemo<RewardData[]>(() => {
-    if (!history || history.length === 0) return [];
-    // Map each tick to an approximate reward increment using same formula as store
-    // rewardTick = (hashrate / 1000) * 0.00001
-    const last = history.slice(-20); // keep last 20 points
-    return last.map((p) => ({
-      date: p.time,
-      rewards: (p.hashrate / 1000) * 0.00001,
-    }));
-  }, [history]);
-
-  const [deviceStats, setDeviceStats] = useState<DeviceStats[]>([
-    {
-      name: 'Desktop CPU',
-      hashrate: currentHashrate,
-      uptime: 12.5,
-      shares: 245
-    }
-  ]);
+  const totalBmtEarned = Number(miningStats?.totalBmtEarned || 0);
+  const totalBmtWithdrawn = Number(miningStats?.totalBmtWithdrawn || 0);
+  const totalXmrMined = Number(miningStats?.totalXmrMined || 0);
 
   useEffect(() => {
-    // Оновити статистику пристроєм
-    if (miningStats?.devices) {
-      setDeviceStats(miningStats.devices.map(d => ({
-        name: d.name,
-        hashrate: d.totalHashrate,
-        uptime: Math.random() * 24,
-        shares: Math.floor(Math.random() * 500)
-      })));
+    let cancelled = false;
+    const loadPoolRewards = async () => {
+      try {
+        const stats = await p2poolAPI.getPoolStats();
+        if (!cancelled) setPoolRewardStats(stats.rewards || null);
+      } catch (err) {
+        console.warn('[Statistics] Failed to load pool reward stats:', err);
+        if (!cancelled) setPoolRewardStats(null);
+      }
+    };
+
+    loadPoolRewards();
+    const interval = setInterval(loadPoolRewards, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!user?.publicKey) return;
+
+    let cancelled = false;
+    const loadRewardHistory = async () => {
+      setRewardHistoryLoading(true);
+      try {
+        const entries = await SolanaAuthService.getInstance().fetchRewardHistory(50);
+        if (cancelled) return;
+        setRewardHistory(entries
+          .filter((entry) => entry.currency === 'BMT' && Number(entry.amount) > 0)
+          .slice(0, 20)
+          .reverse()
+          .map((entry) => ({
+            date: new Date(entry.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            rewards: Number(entry.amount),
+            source: entry.metadata?.source || 'pool',
+            type: entry.type || 'MINING_REWARD'
+          })));
+      } catch (err) {
+        console.warn('[Statistics] Failed to load reward history:', err);
+        if (!cancelled) setRewardHistory([]);
+      } finally {
+        if (!cancelled) setRewardHistoryLoading(false);
+      }
+    };
+
+    loadRewardHistory();
+    const interval = setInterval(loadRewardHistory, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [user?.publicKey]);
+
+  const deviceStats = useMemo<DeviceStats[]>(() => {
+    const devices = (miningStats?.devices || []).map((device) => ({
+      id: device.id,
+      name: device.name || `${device.deviceType.toUpperCase()} device`,
+      type: device.deviceType,
+      hashrate: Number(device.totalHashrate || 0),
+      lastSeen: Number(device.lastSeen || Date.now()),
+      isActive: !!device.isActive,
+      rewards: Number(device.totalRewards || 0)
+    }));
+
+    if (currentHashrate > 0) {
+      const localName = deviceType === 'cpu'
+        ? (cpuName || workerName || 'Local CPU')
+        : (workerName || 'Local GPU');
+      const hasLocal = devices.some((device) =>
+        device.name === localName || (device.isActive && device.type === deviceType)
+      );
+
+      if (!hasLocal) {
+        devices.unshift({
+          id: 'local-current-device',
+          name: localName,
+          type: deviceType,
+          hashrate: currentHashrate,
+          lastSeen: Date.now(),
+          isActive: status === 'running' || status === 'starting',
+          rewards: safeTotalRewards
+        });
+      }
     }
-  }, [miningStats]);
+
+    return devices;
+  }, [miningStats?.devices, currentHashrate, cpuName, workerName, deviceType, status, safeTotalRewards]);
+
 
   if (!user) {
     return (
@@ -212,41 +294,35 @@ export const MiningStatistics: React.FC = () => {
           icon={<Award className="w-5 h-5" />}
           title="Available BMT"
           value={`${safeTotalRewards.toFixed(4)} $BMT`}
-          subtitle="From backend"
-          trend={12.5}
+          subtitle="Confirmed database balance"
           theme={theme}
         />
-        {(Number(miningStats?.totalXmrMined ?? 0) > 0 || Number(miningStats?.totalBmtEarned ?? 0) > 0) && (
-          <>
-            <StatCard
-              icon={<Zap className="w-5 h-5" />}
-              title="Total XMR Mined"
-              value={`${(miningStats?.totalXmrMined ?? 0).toFixed(6)} XMR`}
-              subtitle="Lifetime from pool"
-              theme={theme}
-            />
-            <StatCard
-              icon={<Award className="w-5 h-5" />}
-              title="Total BMT Earned"
-              value={`${(miningStats?.totalBmtEarned ?? 0).toFixed(2)} BMT`}
-              subtitle="Lifetime credited"
-              theme={theme}
-            />
-          </>
-        )}
+        <StatCard
+          icon={<Database className="w-5 h-5" />}
+          title="Pool Rewards"
+          value={`${(poolRewardStats?.totalBmtRewards ?? totalBmtEarned).toFixed(4)} BMT`}
+          subtitle={`Available ${(poolRewardStats?.availableBmtRewards ?? safeTotalRewards).toFixed(4)} / paid ${(poolRewardStats?.totalBmtPayouts ?? totalBmtWithdrawn).toFixed(4)}`}
+          theme={theme}
+        />
+        <StatCard
+          icon={<Zap className="w-5 h-5" />}
+          title="Total XMR Mined"
+          value={`${totalXmrMined.toFixed(6)} XMR`}
+          subtitle="Lifetime from pool"
+          theme={theme}
+        />
         <StatCard
           icon={<TrendingUp className="w-5 h-5" />}
           title="This Session"
           value={`${(history.length).toString()} samples`}
           subtitle="Live data"
-          trend={8.3}
           theme={theme}
         />
         <StatCard
           icon={<Zap className="w-5 h-5" />}
           title="Current Hashrate"
           value={formatHashrate(currentHashrate)}
-          subtitle={`${(miningStats?.devices.length || 0)} devices`}
+          subtitle={`${deviceStats.length} devices`}
           theme={theme}
         />
         <StatCard
@@ -254,7 +330,6 @@ export const MiningStatistics: React.FC = () => {
           title="Pool Sync"
           value={`${useMinerStore.getState().pools['cpu']?.progress.toFixed(1) || 0}%`}
           subtitle={useMinerStore.getState().pools['cpu']?.isSynced ? 'Ready' : 'Syncing'}
-          trend={-2.1}
           theme={theme}
         />
         <StatCard
@@ -281,22 +356,37 @@ export const MiningStatistics: React.FC = () => {
           )}>
             Reward History (live)
           </h2>
-          <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={rewardHistory}>
-              <CartesianGrid strokeDasharray="3 3" stroke={theme === 'light' ? '#e4e4e7' : '#27272a'} />
-              <XAxis dataKey="date" tick={{ fontSize: 12 }} stroke={theme === 'light' ? '#71717a' : '#a1a1aa'} />
-              <YAxis tick={{ fontSize: 12 }} stroke={theme === 'light' ? '#71717a' : '#a1a1aa'} />
-              <Tooltip
-                contentStyle={{
-                  backgroundColor: theme === 'light' ? '#fafafa' : '#18181b',
-                  border: `1px solid ${theme === 'light' ? '#e4e4e7' : '#27272a'}`,
-                  borderRadius: '8px'
-                }}
-                formatter={(value: any) => [`${Number(value).toFixed(6)} $BMT`, 'Rewards (tick)']}
-              />
-              <Bar dataKey="rewards" fill="#facc15" radius={[8, 8, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
+          {rewardHistory.length > 0 ? (
+            <ResponsiveContainer width="100%" height={300}>
+              <BarChart data={rewardHistory}>
+                <CartesianGrid strokeDasharray="3 3" stroke={theme === 'light' ? '#e4e4e7' : '#27272a'} />
+                <XAxis dataKey="date" tick={{ fontSize: 12 }} stroke={theme === 'light' ? '#71717a' : '#a1a1aa'} />
+                <YAxis tick={{ fontSize: 12 }} stroke={theme === 'light' ? '#71717a' : '#a1a1aa'} />
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: theme === 'light' ? '#fafafa' : '#18181b',
+                    border: `1px solid ${theme === 'light' ? '#e4e4e7' : '#27272a'}`,
+                    borderRadius: '8px'
+                  }}
+                  formatter={(value: any) => [`${Number(value).toFixed(6)} $BMT`, 'Reward']}
+                  labelFormatter={(_, payload) => {
+                    const entry = payload?.[0]?.payload as RewardData | undefined;
+                    return entry ? `${entry.date} - ${entry.source}` : '';
+                  }}
+                />
+                <Bar dataKey="rewards" fill="#facc15" radius={[8, 8, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className={cn(
+              'h-[300px] rounded-lg border border-dashed flex items-center justify-center text-sm',
+              theme === 'light'
+                ? 'border-zinc-200 bg-zinc-50 text-zinc-500'
+                : 'border-white/10 bg-white/[0.03] text-zinc-500'
+            )}>
+              {rewardHistoryLoading ? 'Loading reward history...' : 'No confirmed BMT rewards yet'}
+            </div>
+          )}
         </div>
 
         {/* Device Performance */}
@@ -312,21 +402,71 @@ export const MiningStatistics: React.FC = () => {
           )}>
             Device Performance
           </h2>
-          <ResponsiveContainer width="100%" height={300}>
-            <LineChart data={deviceStats}>
-              <CartesianGrid strokeDasharray="3 3" stroke={theme === 'light' ? '#e4e4e7' : '#27272a'} />
-              <XAxis dataKey="name" tick={{ fontSize: 12 }} stroke={theme === 'light' ? '#71717a' : '#a1a1aa'} />
-              <YAxis tick={{ fontSize: 12 }} stroke={theme === 'light' ? '#71717a' : '#a1a1aa'} />
-              <Tooltip
-                contentStyle={{
-                  backgroundColor: theme === 'light' ? '#fafafa' : '#18181b',
-                  border: `1px solid ${theme === 'light' ? '#e4e4e7' : '#27272a'}`,
-                  borderRadius: '8px'
-                }}
-              />
-              <Line type="monotone" dataKey="hashrate" stroke="#3b82f6" strokeWidth={2} />
-            </LineChart>
-          </ResponsiveContainer>
+          <div className="space-y-3 min-h-[300px]">
+            {deviceStats.length > 0 ? (
+              deviceStats.map((device) => {
+                const maxHashrate = Math.max(...deviceStats.map((item) => item.hashrate), 1);
+                const width = Math.max(4, Math.min(100, (device.hashrate / maxHashrate) * 100));
+                return (
+                  <div
+                    key={device.id}
+                    className={cn(
+                      'p-4 rounded-lg border',
+                      theme === 'light'
+                        ? 'bg-zinc-50 border-zinc-200'
+                        : 'bg-white/[0.04] border-white/10'
+                    )}
+                  >
+                    <div className="flex items-start justify-between gap-4 mb-3">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className={cn(
+                          'p-2 rounded-lg shrink-0',
+                          device.isActive
+                            ? 'bg-emerald-500/10 text-emerald-500'
+                            : theme === 'light'
+                              ? 'bg-zinc-100 text-zinc-500'
+                              : 'bg-zinc-800 text-zinc-400'
+                        )}>
+                          {device.type === 'cpu' ? <Cpu className="w-5 h-5" /> : <Zap className="w-5 h-5" />}
+                        </div>
+                        <div className="min-w-0">
+                          <p className={cn('font-semibold truncate', theme === 'light' ? 'text-zinc-900' : 'text-white')}>
+                            {device.name}
+                          </p>
+                          <p className={cn('text-xs', theme === 'light' ? 'text-zinc-500' : 'text-zinc-400')}>
+                            {device.isActive ? 'Active' : 'Offline'} - {device.type.toUpperCase()}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <p className={cn('font-mono font-semibold', theme === 'light' ? 'text-zinc-900' : 'text-white')}>
+                          {formatHashrate(device.hashrate)}
+                        </p>
+                        <p className={cn('text-xs', theme === 'light' ? 'text-zinc-500' : 'text-zinc-400')}>
+                          {device.rewards.toFixed(4)} BMT
+                        </p>
+                      </div>
+                    </div>
+                    <div className={cn('h-2 rounded-full overflow-hidden', theme === 'light' ? 'bg-zinc-200' : 'bg-zinc-800')}>
+                      <div
+                        className="h-full rounded-full bg-emerald-500"
+                        style={{ width: `${width}%` }}
+                      />
+                    </div>
+                  </div>
+                );
+              })
+            ) : (
+              <div className={cn(
+                'h-[300px] rounded-lg border border-dashed flex items-center justify-center text-sm',
+                theme === 'light'
+                  ? 'border-zinc-200 bg-zinc-50 text-zinc-500'
+                  : 'border-white/10 bg-white/[0.03] text-zinc-500'
+              )}>
+                No connected devices yet
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -344,8 +484,8 @@ export const MiningStatistics: React.FC = () => {
           Connected Devices
         </h2>
         <div className="space-y-3">
-          {miningStats?.devices && miningStats.devices.length > 0 ? (
-            miningStats.devices.map((device) => (
+          {deviceStats.length > 0 ? (
+            deviceStats.map((device) => (
               <div
                 key={device.id}
                 className={cn(
@@ -366,7 +506,7 @@ export const MiningStatistics: React.FC = () => {
                         ? 'bg-zinc-100 text-zinc-500'
                         : 'bg-zinc-800 text-zinc-400'
                   )}>
-                    {device.deviceType === 'cpu' ? (
+                    {device.type === 'cpu' ? (
                       <Cpu className="w-5 h-5" />
                     ) : (
                       <Zap className="w-5 h-5" />
@@ -383,7 +523,7 @@ export const MiningStatistics: React.FC = () => {
                       'text-xs',
                       theme === 'light' ? 'text-zinc-500' : 'text-zinc-400'
                     )}>
-                      {formatHashrate(device.totalHashrate)} • Last seen: {new Date(device.lastSeen).toLocaleString()}
+                      {formatHashrate(device.hashrate)} - Last seen: {new Date(device.lastSeen).toLocaleString()}
                     </p>
                   </div>
                 </div>
@@ -396,13 +536,13 @@ export const MiningStatistics: React.FC = () => {
                         ? 'text-zinc-500'
                         : 'text-zinc-400'
                   )}>
-                    {device.isActive ? '🟢 Active' : '🔴 Offline'}
+                    {device.isActive ? 'Active' : 'Offline'}
                   </p>
                   <p className={cn(
                     'text-xs',
                     theme === 'light' ? 'text-zinc-500' : 'text-zinc-400'
                   )}>
-                    {(Number.isFinite(device.totalRewards) ? device.totalRewards : 0).toFixed(4)} XMR
+                    {device.rewards.toFixed(4)} BMT
                   </p>
                 </div>
               </div>

@@ -1,16 +1,23 @@
-﻿import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useMinerStore, DeviceType } from '../store/useMinerStore';
-import { useSolanaAuth } from '../services/solanaAuth';
+import { SolanaAuthService, useSolanaAuth } from '../services/solanaAuth';
+import { MultiDeviceSyncService } from '../services/multiDeviceSync';
 import { useTheme } from '../contexts/ThemeContext';
-import { Play, Square, Cpu, Monitor, Timer, Zap } from 'lucide-react';
+import { Play, Square, Cpu, Monitor, Timer, Zap } from '../components/icons';
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip } from 'recharts';
-import { cn, formatHashrate } from '../lib/utils'; // Assumes formatHashrate is in utils
+import { cn, formatHashrate } from '../lib/utils';
 import { getEnvironmentConfig } from '../config/environment';
-import { estimateDailyBmtReward } from '../lib/rewards';
-// import { ipcRenderer } from 'electron'; 
 
-// Adding IPC type safety shim for development if needed, 
-// strictly speaking we use window.electron.invoke defined in preload
+const getErrorMessage = (err: any) => {
+    if (!err) return 'Unknown error';
+    if (typeof err === 'string') return err;
+    if (err.message) return err.message;
+    try {
+        return JSON.stringify(err);
+    } catch {
+        return String(err);
+    }
+};
 
 const Benchmark = () => {
     const { theme } = useTheme();
@@ -30,8 +37,6 @@ const Benchmark = () => {
     const currentPower = useMinerStore(state => state.currentPower);
     const resetSession = useMinerStore(state => state.resetSession);
     const pools = useMinerStore(state => state.pools);
-    const poolNetworkHashrate = useMinerStore(state => state.poolNetworkHashrate);
-    const rateXmrBmt = useMinerStore(state => state.rateXmrBmt);
 
 
     const [duration, setDuration] = useState<number>(60);
@@ -51,12 +56,50 @@ const Benchmark = () => {
     const timerRef = useRef<NodeJS.Timeout | null>(null);
     const statsIntervalRef = useRef<NodeJS.Timeout | null>(null);
     const isBenchmarkPollingRef = useRef(false);
+    const lastBenchmarkRewardReportAtRef = useRef(0);
+    const benchmarkRewardSeqRef = useRef(0);
     // Keep local tracks for final calculation to avoid dependency on store sampling rate
     const localStatsRef = useRef<number[]>([]); 
     const benchmarkApiStateRef = useRef<{ connectedUrl: string | null; errorLogged: boolean }>({
         connectedUrl: null,
         errorLogged: false
     });
+
+    const isSolanaConnected = !!user?.publicKey;
+
+    // Multi-Device Sync initialization
+    useEffect(() => {
+        if (!isSolanaConnected || !user?.publicKey) return;
+
+        const syncService = MultiDeviceSyncService.getInstance(user.publicKey);
+        
+        // Register this device if not already registered
+        let deviceId = localStorage.getItem('minebench_device_id');
+        if (!deviceId) {
+            deviceId = `device-${Math.random().toString(36).substring(2, 15)}`;
+            localStorage.setItem('minebench_device_id', deviceId);
+        }
+
+        syncService.registerDevice({
+            deviceId,
+            deviceName: `${sysInfo?.cpu || 'Unknown CPU'} (${workerName})`,
+            walletPublicKey: user.publicKey,
+            currentHashrate: 0,
+            totalHashesComputed: 0,
+            totalShares: 0,
+            accumulatedRewards: 0,
+            uptime: 0,
+            lastUpdate: Date.now(),
+            mode: status === 'running' ? 'benchmark' : 'idle'
+        });
+
+        // Start sync loop
+        syncService.startSyncLoop();
+
+        return () => {
+            syncService.stopSyncLoop();
+        };
+    }, [isSolanaConnected, user?.publicKey, sysInfo?.cpu, workerName, status]);
 
     // Load System Info
     useEffect(() => {
@@ -101,6 +144,34 @@ const Benchmark = () => {
         };
     }, []);
 
+    useEffect(() => {
+        if (status !== 'running' || !user?.publicKey) return;
+
+        const now = Date.now();
+        if (now - lastBenchmarkRewardReportAtRef.current < 15000) return;
+
+        const seq = ++benchmarkRewardSeqRef.current;
+        lastBenchmarkRewardReportAtRef.current = now;
+
+        SolanaAuthService.getInstance()
+            .reportMiningStats({
+                hashrate: currentHashrate,
+                shares: localStatsRef.current.length,
+                source: 'benchmark',
+                referenceId: `benchmark-${user.publicKey}-${now}-${seq}`,
+                metadata: {
+                    deviceType,
+                    workerName,
+                    duration,
+                    samples: localStatsRef.current.length
+                }
+            })
+            .then(() => SolanaAuthService.getInstance().fetchMiningStats(user.publicKey))
+            .catch((err) => {
+                console.warn('[Benchmark] Failed to report mining stats:', err);
+            });
+    }, [status, user?.publicKey, currentHashrate, deviceType, workerName, duration]);
+
     // Listen for miner events
     useEffect(() => {
         if (!window.electron.on) {
@@ -109,9 +180,9 @@ const Benchmark = () => {
         }
 
         const cleanupLog = window.electron.on('miner-log', (msg) => {
-            // Filter heartbeat logs if needed, or just push to console
-            console.log(`Miner: ${msg}`);
-            // Optional: addLog(msg.trim()); // Only if you want verbose logs in UI
+            const message = String(msg || '').trim();
+            console.log(`Miner: ${message}`);
+            if (message) addLog(message);
         });
         
         const cleanupError = window.electron.on('miner-error', (msg) => {
@@ -162,6 +233,8 @@ const Benchmark = () => {
         resetSession();
         isBenchmarkPollingRef.current = true;
         localStatsRef.current = [];
+        lastBenchmarkRewardReportAtRef.current = 0;
+        benchmarkRewardSeqRef.current = 0;
         benchmarkApiStateRef.current = { connectedUrl: null, errorLogged: false };
         setFinalResults(null);
         setTimeLeft(duration);
@@ -196,7 +269,7 @@ const Benchmark = () => {
             isBenchmarkPollingRef.current = false;
             console.error(err);
             setStatus('error');
-            addLog(`Error starting: ${err.message}`);
+            addLog(`Error starting benchmark: ${getErrorMessage(err)}`);
         }
     };
 
@@ -222,6 +295,50 @@ const Benchmark = () => {
         }
     };
 
+    const averagePositive = (values: Array<number | null | undefined>) => {
+        const positive = values.filter((value): value is number =>
+            typeof value === 'number' && Number.isFinite(value) && value > 0
+        );
+        if (positive.length === 0) return null;
+        return positive.reduce((sum, value) => sum + value, 0) / positive.length;
+    };
+
+    const submitBenchmarkResult = async (avg: number, max: number) => {
+        if (!Number.isFinite(avg) || avg <= 0) {
+            addLog('Benchmark result was not submitted: no positive hashrate samples were captured.');
+            return;
+        }
+
+        const state = useMinerStore.getState();
+        const deviceId = localStorage.getItem('minebench_device_id') || undefined;
+        const elapsedSeconds = Math.max(1, duration - (timeLeft ?? duration));
+        const avgTemp = averagePositive(state.history.map((point) => point.temp));
+        const avgPower = averagePositive(state.history.map((point) => point.power));
+        const record = {
+            avg_hashrate: avg,
+            max_hashrate: Number.isFinite(max) && max > 0 ? max : avg,
+            duration_seconds: elapsedSeconds,
+            device_type: deviceType.toUpperCase(),
+            device_name: deviceType === 'cpu' ? (sysInfo?.cpu || 'Unknown CPU') : 'Unknown GPU',
+            avg_temp: avgTemp,
+            avg_power: avgPower,
+            algorithm: deviceType === 'cpu' ? 'RandomX' : 'KawPow',
+            coin_name: deviceType === 'cpu' ? 'XMR' : 'RVN',
+            solana_wallet_address: user?.publicKey || null,
+            device_uid: deviceId || `${deviceType}-${sysInfo?.cpu || workerName}`,
+            created_at: new Date().toISOString()
+        };
+
+        const result = await window.electron.invoke('submit-benchmark-result', record) as any;
+        const submittedId = result?.benchmark?.id;
+        const submittedBenchmark = { ...record, ...(result?.benchmark || {}) };
+        localStorage.setItem('minebench_latest_benchmark', JSON.stringify(submittedBenchmark));
+        window.dispatchEvent(new CustomEvent('minebench:benchmark-submitted', {
+            detail: submittedBenchmark
+        }));
+        addLog(`Benchmark result submitted${submittedId ? ` (#${submittedId})` : ''}.`);
+    };
+
     const stopBenchmark = async () => {
         await fetchStats(true);
         isBenchmarkPollingRef.current = false;
@@ -231,7 +348,11 @@ const Benchmark = () => {
         setStatus('stopping');
         
         // Calculate Results
-        const samples = localStatsRef.current.filter((value) => Number.isFinite(value) && value > 0);
+        const storeHistory = useMinerStore.getState().history || [];
+        const samples = [
+            ...localStatsRef.current,
+            ...storeHistory.map((point) => point.hashrate)
+        ].filter((value) => Number.isFinite(value) && value > 0);
         let avg = 0;
         let max = 0;
         
@@ -268,7 +389,12 @@ const Benchmark = () => {
                 max_hashrate: max,
                 wallet: user?.publicKey || null
             };
-            
+
+            await submitBenchmarkResult(avg, max).catch((err: any) => {
+                console.error('[Benchmark] Submit failed:', err);
+                addLog(`Benchmark finished, but submit failed: ${getErrorMessage(err)}`);
+            });
+             
             console.log('[Benchmark] Sending to stop-benchmark:', payload);
             const result = await window.electron.invoke("stop-benchmark", payload);
             console.log('[Benchmark] stop-benchmark result:', result);
@@ -276,7 +402,7 @@ const Benchmark = () => {
             addLog(`Benchmark finished. Avg: ${formatHashrate(avg)}`);
         } catch (err: any) {
             console.error('[Benchmark] Error stopping:', err);
-            addLog(`Error stopping: ${err.message}`);
+            addLog(`Error stopping benchmark: ${getErrorMessage(err)}`);
             setStatus('error');
         }
     };
@@ -349,12 +475,40 @@ const Benchmark = () => {
                 if (powerRes && powerRes.success) power = powerRes.power;
 
                 window.electron.invoke('report-stats', { temp, power }).catch(() => { });
+
+                // Update multi-device sync
+                if (user?.publicKey) {
+                    const deviceId = localStorage.getItem('minebench_device_id');
+                    if (deviceId) {
+                        MultiDeviceSyncService.getInstance(user.publicKey).updateDevice(deviceId, {
+                            currentHashrate: hr,
+                            temperature: temp || undefined,
+                            power: power || undefined,
+                            accumulatedRewards: 0,
+                            mode: 'benchmark'
+                        });
+                    }
+                }
             } else if (data.gpus && data.gpus.length > 0) {
                 const sensorFallback = await window.electron.invoke('get-gpu-sensors').catch(() => null);
                 hr = data.gpus[0].hashrate ?? data.gpus[0].hash ?? 0;
                 temp = data.gpus[0].temperature ?? data.gpus[0].temp ?? sensorFallback?.temp ?? null;
                 power = data.gpus[0].power ?? sensorFallback?.power ?? null;
                 window.electron.invoke('report-stats', { temp, power }).catch(() => { });
+
+                // Update multi-device sync
+                if (user?.publicKey) {
+                    const deviceId = localStorage.getItem('minebench_device_id');
+                    if (deviceId) {
+                        MultiDeviceSyncService.getInstance(user.publicKey).updateDevice(deviceId, {
+                            currentHashrate: hr,
+                            temperature: temp || undefined,
+                            power: power || undefined,
+                            accumulatedRewards: 0,
+                            mode: 'benchmark'
+                        });
+                    }
+                }
             }
 
             if (hr > 0) {
@@ -367,14 +521,6 @@ const Benchmark = () => {
         }
     };
 
-    const estimatedDailyBenchmarkBmt = finalResults
-        ? estimateDailyBmtReward({
-            hashrate: finalResults.avg,
-            networkHashrate: poolNetworkHashrate,
-            rateXmrBmt
-        })
-        : 0;
-
     return (
         <div className="space-y-6 max-w-5xl mx-auto">
             <div className="flex items-center justify-between">
@@ -384,34 +530,22 @@ const Benchmark = () => {
                 </div>
 
                 <div className="flex flex-col items-end gap-2">
-                                        <div className={cn("p-1 rounded-lg border flex gap-1",
-                                            theme === 'light'
-                                                ? 'bg-white border-zinc-200'
-                                                : 'bg-zinc-900 border-white/5'
-                                        )}>
+                    <div className={cn("p-1 rounded-lg border flex gap-1",
+                        theme === 'light'
+                            ? 'bg-white border-zinc-200'
+                            : 'bg-zinc-900 border-white/5'
+                    )}>
                         <button 
                             onClick={() => status !== 'running' && setDeviceType('cpu')}
                             className={cn(
                                 "px-4 py-2 rounded-md text-sm font-medium flex items-center gap-2 transition-all",
                                 deviceType === 'cpu'
-                                                                    ? (theme === 'light' ? "bg-white text-zinc-900 border border-zinc-300 shadow-sm" : "bg-zinc-800 text-white shadow-sm")
-                                                                    : (theme === 'light' ? "text-zinc-600 hover:bg-zinc-100" : "text-zinc-500 hover:text-zinc-300")
+                                    ? (theme === 'light' ? "bg-white text-zinc-900 border border-zinc-300 shadow-sm" : "bg-zinc-800 text-white shadow-sm")
+                                    : (theme === 'light' ? "text-zinc-600 hover:bg-zinc-100" : "text-zinc-500 hover:text-zinc-300")
                             )}
                         >
                             <Cpu size={16} /> Monero (CPU)
                         </button>
-                        {/* GPU Disabled for v1.0 XMR Focus */}
-                        {false && (
-                            <button 
-                                onClick={() => status !== 'running' && setDeviceType('gpu')}
-                                className={cn(
-                                    "px-4 py-2 rounded-md text-sm font-medium flex items-center gap-2 transition-all",
-                                    deviceType === 'gpu' ? "bg-zinc-800 text-white shadow-sm" : "text-zinc-500 hover:text-zinc-300"
-                                )}
-                            >
-                                <Monitor size={16} /> GPU (KawPow)
-                            </button>
-                        )}
                     </div>
                 </div>
             </div>
@@ -656,41 +790,41 @@ const Benchmark = () => {
 
             {/* Results Section */}
             {finalResults && status !== 'running' && (
-                                <div className={cn("border rounded-xl p-6 animate-in slide-in-from-bottom-2",
-                                    theme === 'light'
-                                        ? 'border-emerald-400/30 bg-emerald-500/5'
-                                        : 'border-emerald-500/20 bg-emerald-500/5'
-                                )}>
-                                        <h3 className={cn("font-medium mb-4 flex items-center gap-2",
-                                            theme === 'light' ? 'text-emerald-600' : 'text-emerald-400'
-                                        )}>
+                <div className={cn("border rounded-xl p-6 animate-in slide-in-from-bottom-2",
+                    theme === 'light'
+                        ? 'border-emerald-400/30 bg-emerald-500/5'
+                        : 'border-emerald-500/20 bg-emerald-500/5'
+                )}>
+                    <h3 className={cn("font-medium mb-4 flex items-center gap-2",
+                        theme === 'light' ? 'text-emerald-600' : 'text-emerald-400'
+                    )}>
                         Included in 1.0 DB Report
                     </h3>
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-8">
                         <div>
-                                                        <div className={cn("text-xs uppercase tracking-widest",
-                                                            theme === 'light' ? 'text-emerald-700/70' : 'text-emerald-500/60'
-                                                        )}>Average Speed</div>
-                                                        <div className={cn("text-2xl font-mono mt-1",
-                                                            theme === 'light' ? 'text-zinc-900' : 'text-white'
-                                                        )}>{formatHashrate(finalResults.avg)}</div>
+                            <div className={cn("text-xs uppercase tracking-widest",
+                                theme === 'light' ? 'text-emerald-700/70' : 'text-emerald-500/60'
+                            )}>Average Speed</div>
+                            <div className={cn("text-2xl font-mono mt-1",
+                                theme === 'light' ? 'text-zinc-900' : 'text-white'
+                            )}>{formatHashrate(finalResults.avg)}</div>
                         </div>
                         <div>
-                                                        <div className={cn("text-xs uppercase tracking-widest",
-                                                            theme === 'light' ? 'text-emerald-700/70' : 'text-emerald-500/60'
-                                                        )}>Max Peak</div>
-                                                        <div className={cn("text-2xl font-mono mt-1",
-                                                            theme === 'light' ? 'text-zinc-900' : 'text-white'
-                                                        )}>{formatHashrate(finalResults.max)}</div>
+                            <div className={cn("text-xs uppercase tracking-widest",
+                                theme === 'light' ? 'text-emerald-700/70' : 'text-emerald-500/60'
+                            )}>Max Peak</div>
+                            <div className={cn("text-2xl font-mono mt-1",
+                                theme === 'light' ? 'text-zinc-900' : 'text-white'
+                            )}>{formatHashrate(finalResults.max)}</div>
                         </div>
                         <div>
                             <div className="text-xs text-emerald-500/60 uppercase tracking-widest">Algorithm</div>
                             <div className="text-2xl font-mono text-white mt-1">{deviceType === 'cpu' ? 'RandomX' : 'XMR-GPU'}</div>
                         </div>
                         <div>
-                             <div className="text-xs text-emerald-500/60 uppercase tracking-widest">Est. Daily $BMT</div>
+                             <div className="text-xs text-emerald-500/60 uppercase tracking-widest">Reported Shares</div>
                              <div className="text-2xl font-mono text-white mt-1">
-                                {estimatedDailyBenchmarkBmt.toFixed(2)}
+                                {localStatsRef.current.length.toLocaleString()}
                              </div>
                         </div>
                     </div>
@@ -755,4 +889,3 @@ const Benchmark = () => {
 };
 
 export default Benchmark;
-

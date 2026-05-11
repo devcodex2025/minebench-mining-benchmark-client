@@ -7,7 +7,7 @@ import { create } from 'zustand';
 import { PublicKey } from '@solana/web3.js';
 import { useMinerStore } from '../store/useMinerStore';
 
-const API_BASE_URL = import.meta.env.DEV ? '/api' : (import.meta.env.VITE_API_BASE_URL || 'https://backend.minebench.cloud/api');
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://backend.minebench.cloud/api';
 
 export interface SolanaUser {
   publicKey: string;
@@ -34,12 +34,29 @@ export interface UserMiningStats {
   totalXmrMined?: number; // total XMR earned from pool
   totalBmtEarned?: number; // total BMT ever credited
   totalBmtWithdrawn?: number; // total BMT withdrawn
+  activeBmt?: number;
+  paidBmt?: number;
+  activeShares?: number;
+  paidShares?: number;
+  activeWindowUserShares?: number;
+  activeWindowPoolShares?: number;
+  activeWindowRewardSharePercent?: number;
   thisMonth: number;
   thisWeek: number;
   today: number;
   devices: MiningDevice[];
   poolBalance: number; // XMR in pool
   totalBlocks: number; // blocks found
+}
+
+export interface RewardHistoryEntry {
+  id?: string;
+  amount: number;
+  currency: 'XMR' | 'BMT';
+  type: string;
+  reference_id?: string | null;
+  metadata?: any;
+  created_at: string;
 }
 
 interface SolanaAuthState {
@@ -358,6 +375,13 @@ export class SolanaAuthService {
       const totalXmrMined = toNum(balanceData?.total_xmr_mined ?? balanceData?.xmr_total_earned ?? 0);
       const totalBmtEarned = toNum(balanceData?.total_bmt_earned ?? balanceData?.bmt_total_earned ?? 0);
       const totalBmtWithdrawn = toNum(balanceData?.total_bmt_withdrawn ?? balanceData?.bmt_total_withdrawn ?? 0);
+      const activeBmt = toNum(balanceData?.active_bmt ?? bmtBalance);
+      const paidBmt = toNum(balanceData?.paid_bmt ?? totalBmtWithdrawn);
+      const activeShares = toNum(balanceData?.active_shares ?? 0);
+      const paidShares = toNum(balanceData?.paid_shares ?? 0);
+      const activeWindowUserShares = toNum(balanceData?.active_window_user_shares ?? 0);
+      const activeWindowPoolShares = toNum(balanceData?.active_window_pool_shares ?? 0);
+      const activeWindowRewardSharePercent = toNum(balanceData?.active_window_reward_share_percent ?? 0);
 
       // Update miner store with confirmed balance and totals
       const { setDbTotalBMT, setIsPremium, setPremiumXmrWallet } = useMinerStore.getState();
@@ -383,6 +407,13 @@ export class SolanaAuthService {
         totalXmrMined,
         totalBmtEarned,
         totalBmtWithdrawn,
+        activeBmt,
+        paidBmt,
+        activeShares,
+        paidShares,
+        activeWindowUserShares,
+        activeWindowPoolShares,
+        activeWindowRewardSharePercent,
         thisMonth: 0,
         thisWeek: 0,
         today: 0,
@@ -426,12 +457,70 @@ export class SolanaAuthService {
     return response.json();
   }
 
+  async reportMiningStats(params: {
+    hashrate?: number;
+    shares?: number;
+    source: 'mining' | 'benchmark' | 'stress-test';
+    referenceId: string;
+    metadata?: any;
+  }): Promise<void> {
+    const storedToken = localStorage.getItem('minebench_auth_token');
+    if (!storedToken) return;
+
+    const response = await fetch(`${API_BASE_URL}/miner/report`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${storedToken}`
+      },
+      body: JSON.stringify({
+        hashrate: Number(params.hashrate || 0),
+        shares: Number(params.shares || 0),
+        timestamp: Date.now(),
+        source: params.source,
+        referenceId: params.referenceId,
+        metadata: params.metadata || {}
+      })
+    });
+
+    if (!response.ok) {
+      let message = `Reward report failed (${response.status})`;
+      try {
+        const payload = await response.json();
+        message = payload?.message || payload?.error || message;
+      } catch {}
+      throw new Error(message);
+    }
+  }
+
+  async fetchRewardHistory(limit = 30): Promise<RewardHistoryEntry[]> {
+    const storedToken = localStorage.getItem('minebench_auth_token');
+    if (!storedToken) return [];
+
+    const response = await fetch(`${API_BASE_URL}/rewards/history?limit=${limit}`, {
+      headers: {
+        'Authorization': `Bearer ${storedToken}`
+      }
+    });
+
+    if (!response.ok) return [];
+    const payload = await response.json();
+    return Array.isArray(payload) ? payload : [];
+  }
+
   private getEmptyStats(): UserMiningStats {
     return {
       totalRewards: 0,
       totalXmrMined: 0,
       totalBmtEarned: 0,
       totalBmtWithdrawn: 0,
+      activeBmt: 0,
+      paidBmt: 0,
+      activeShares: 0,
+      paidShares: 0,
+      activeWindowUserShares: 0,
+      activeWindowPoolShares: 0,
+      activeWindowRewardSharePercent: 0,
       thisMonth: 0,
       thisWeek: 0,
       today: 0,

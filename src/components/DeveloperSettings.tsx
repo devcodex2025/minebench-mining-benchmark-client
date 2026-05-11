@@ -4,7 +4,7 @@
  */
 
 import React, { useState } from 'react';
-import { Settings, Loader } from 'lucide-react';
+import { Settings, Loader } from './icons';
 import { useEnvironment, useIsDevelopment } from '../hooks/useEnvironment';
 import { useTheme } from '../contexts/ThemeContext';
 import { cn } from '../lib/utils';

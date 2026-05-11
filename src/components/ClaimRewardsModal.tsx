@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { AlertCircle, CheckCircle, Loader } from 'lucide-react';
+import { AlertCircle, CheckCircle, Loader } from './icons';
 import { cn } from '../lib/utils';
 import { SolanaAuthService } from '../services/solanaAuth';
 

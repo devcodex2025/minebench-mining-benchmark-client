@@ -5,18 +5,19 @@
   "supabaseAnonKey": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1td3R1eWxscHRrZWxjZnVqYW9kIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA5NDA2ODIsImV4cCI6MjA3NjUxNjY4Mn0.CGVlOAFfRWR9MyRpYW99gppLgVMcrG8sz83bO3YEhoA",
   "poolConfigAllowlist": [
     "xmr.minebench.cloud",
-    "xmr2.minebench.cloud"
+    "xmr2.minebench.cloud",
+    "152.53.15.22"
   ],
   "defaults": {
     "primaryPoolHost": "xmr.minebench.cloud",
-    "primaryRpcHost": "xmr.minebench.cloud",
+    "primaryRpcHost": "152.53.15.22",
     "backupPoolHost": "xmr2.minebench.cloud",
     "backupRpcHost": "xmr2.minebench.cloud",
     "primaryHost": "xmr.minebench.cloud",
     "backupHost": "xmr2.minebench.cloud",
     "stratumPort": 3333,
     "moneroP2pPort": 18080,
-    "moneroRpcPort": 18081,
+    "moneroRpcPort": 18089,
     "p2poolP2pPort": 37889,
     "enableBackupPool": false
   }

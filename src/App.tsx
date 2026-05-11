@@ -10,10 +10,9 @@ import { ThemeProvider } from './contexts/ThemeContext';
 import { useTheme } from './contexts/ThemeContext';
 import { useMinerStore } from './store/useMinerStore';
 import { cn, formatHashrate } from './lib/utils';
-import { Activity, Coins, TrendingUp, AlertTriangle, X } from 'lucide-react';
+import { Activity, Coins, TrendingUp, AlertTriangle, X } from './components/icons';
 import { getEnvironmentConfig } from './config/environment';
 import { useSolanaAuth, SolanaAuthService } from './services/solanaAuth';
-import { estimateDailyBmtReward } from './lib/rewards';
 import { ClaimRewardsModal } from './components/ClaimRewardsModal';
 
 const PoolMonitor = () => {
@@ -23,23 +22,47 @@ const PoolMonitor = () => {
     const addLog = useMinerStore(state => state.addLog);
     const setGlobalPoolStats = useMinerStore(state => state.setGlobalPoolStats);
     const manualPoolSelection = useMinerStore(state => state.manualPoolSelection);
+    const dynamicRpcHost = useMinerStore(state => state.rpcHost);
+    const dynamicRpcPort = useMinerStore(state => state.rpcPort);
+    
     const env = getEnvironmentConfig();
     const primaryPoolUrl = env.poolStratumUrl;
     const reservePoolUrl = env.enableBackupPool ? env.poolStratumUrlBackup : '';
 
     useEffect(() => {
         const checkSync = async () => {
+            if (!window.electron?.invoke) return;
+
             // Check primary and backup CPU pools - GPU pool not deployed yet
             const poolIds = env.enableBackupPool ? ['cpu', 'cpu-backup'] : ['cpu'];
             for (const id of poolIds) {
                 try {
-                    const res = await window.electron.invoke('get-pool-sync', id);
-                    updatePoolStatus(id, res);
+                    // Use dynamic host/port for primary pool, fallback for backup
+                    const host = id === 'cpu' ? dynamicRpcHost : env.poolRpcHostBackup;
+                    const port = id === 'cpu' ? dynamicRpcPort : env.poolRpcPortBackup;
+                    
+                    const data = await window.electron.invoke('get-pool-sync', host, port);
+                    
+                    if (data) {
+                        const height = data.height || 0;
+                        const targetHeight = data.target_height || data.targetHeight || height;
+                        const isSynced = data.synchronized || (height >= targetHeight && height > 0);
+                        const progress = isSynced ? 100 : (targetHeight > 0 ? (height / targetHeight) * 100 : 0);
+                        
+                        updatePoolStatus(id, {
+                            height,
+                            targetHeight,
+                            isSynced,
+                            progress,
+                            connected: true,
+                            message: isSynced ? "Synced" : "Syncing..."
+                        });
+                    }
                 } catch (e) {
                     console.error(`[PoolMonitor] IPC Error for ${id}:`, e);
                     updatePoolStatus(id, {
                         connected: false,
-                        message: "IPC Failed"
+                        message: "Connection Failed"
                     });
                 }
             }
@@ -68,6 +91,8 @@ const PoolMonitor = () => {
         };
 
         const fetchPoolStats = async () => {
+            if (!window.electron?.invoke) return;
+
             try {
                 const { p2poolAPI } = await import('./services/p2poolAPI');
                 const stats = await p2poolAPI.getPoolStats();
@@ -88,7 +113,7 @@ const PoolMonitor = () => {
             clearInterval(interval);
             clearInterval(statsInterval);
         };
-    }, [updatePoolStatus, setPoolUrl, poolUrl, addLog, primaryPoolUrl, reservePoolUrl, setGlobalPoolStats, manualPoolSelection]);
+    }, [updatePoolStatus, setPoolUrl, poolUrl, addLog, primaryPoolUrl, reservePoolUrl, setGlobalPoolStats, manualPoolSelection, dynamicRpcHost, dynamicRpcPort]);
 
     return null;
 };
@@ -154,6 +179,7 @@ const DisplayWarningBanner = () => {
 };
 
 const MiningPage = lazy(() => import('./pages/Mining'));
+const StressTestPage = lazy(() => import('./pages/StressTest'));
 
 const Dashboard = () => {
     const {
@@ -193,7 +219,10 @@ const Dashboard = () => {
     useEffect(() => {
         const fetchRates = async () => {
             try {
-                const res = await fetch('https://backend.minebench.cloud/api/rates/current', { signal: AbortSignal.timeout(6000) });
+                const ratesUrl = window.electron?.invoke
+                    ? 'https://backend.minebench.cloud/api/rates/current'
+                    : '/api/rates/current';
+                const res = await fetch(ratesUrl, { signal: AbortSignal.timeout(6000) });
                 if (!res.ok) throw new Error(`rates/current HTTP ${res.status}`);
                 const data = await res.json();
 
@@ -222,29 +251,56 @@ const Dashboard = () => {
         'cpu-backup': 'CPU Reserve'
     };
     const navigate = useNavigate();
-    const [estimatedHashrate, setEstimatedHashrate] = useState<number>(0);
+    const [benchmarkHashrate, setBenchmarkHashrate] = useState<number>(0);
     const [lastBenchmarkDate, setLastBenchmarkDate] = useState<Date | null>(null);
-    const [estimatedDeviceName, setEstimatedDeviceName] = useState('');
+    const [benchmarkDeviceName, setBenchmarkDeviceName] = useState('');
     const [showClaimModal, setShowClaimModal] = useState(false);
+    const [benchmarkRefreshKey, setBenchmarkRefreshKey] = useState(0);
+
+    const applyEstimatedBenchmark = (benchmark: any) => {
+        const avgHashrate = Number(benchmark?.avg_hashrate || 0);
+        if (!Number.isFinite(avgHashrate) || avgHashrate <= 0) return false;
+
+        const benchmarkDeviceType = String(benchmark?.device_type || '').toLowerCase();
+        if (benchmarkDeviceType && benchmarkDeviceType !== deviceType.toLowerCase()) return false;
+
+        setBenchmarkHashrate(avgHashrate);
+        setBenchmarkDeviceName(benchmark.device_name || '');
+        setLastBenchmarkDate(benchmark.created_at ? new Date(benchmark.created_at) : new Date());
+        return true;
+    };
+
+    useEffect(() => {
+        const handleBenchmarkSubmitted = (event: Event) => {
+            applyEstimatedBenchmark((event as CustomEvent).detail || {});
+            setBenchmarkRefreshKey((key) => key + 1);
+        };
+        window.addEventListener('minebench:benchmark-submitted', handleBenchmarkSubmitted);
+        return () => window.removeEventListener('minebench:benchmark-submitted', handleBenchmarkSubmitted);
+    }, [deviceType]);
 
     // Load latest benchmark from the benchmark API on mount, device changes, and completed runs.
     useEffect(() => {
         let cancelled = false;
+        let hasCachedBenchmark = false;
+
+        try {
+            const cachedBenchmark = JSON.parse(localStorage.getItem('minebench_latest_benchmark') || 'null');
+            hasCachedBenchmark = applyEstimatedBenchmark(cachedBenchmark);
+        } catch {
+            localStorage.removeItem('minebench_latest_benchmark');
+        }
 
         const fetchLatestBenchmark = async () => {
+            if (!window.electron?.invoke) return;
+
             try {
                 const result = await window.electron.invoke('get-latest-benchmark', deviceType);
                 if (cancelled) return;
 
-                if (result?.avg_hashrate) {
-                    setEstimatedHashrate(result.avg_hashrate);
-                    setEstimatedDeviceName(result.device_name || '');
-                    if (result.created_at) {
-                        setLastBenchmarkDate(new Date(result.created_at));
-                    }
-                } else {
-                    setEstimatedHashrate(0);
-                    setEstimatedDeviceName('');
+                if (!applyEstimatedBenchmark(result) && !hasCachedBenchmark) {
+                    setBenchmarkHashrate(0);
+                    setBenchmarkDeviceName('');
                     setLastBenchmarkDate(null);
                 }
             } catch (e) {
@@ -257,7 +313,7 @@ const Dashboard = () => {
             cancelled = true;
             window.clearTimeout(timeoutId);
         };
-    }, [deviceType, status]);
+    }, [deviceType, status, benchmarkRefreshKey]);
 
     const safeDbTotalBMT = Number.isFinite(miningStats?.totalRewards)
         ? Number(miningStats?.totalRewards)
@@ -266,16 +322,6 @@ const Dashboard = () => {
     const canClaim = safeDbTotalBMT >= MIN_CLAIM_AMOUNT;
     const claimProgress = Math.min((safeDbTotalBMT / MIN_CLAIM_AMOUNT) * 100, 100);
     const [claiming, setClaiming] = useState(false);
-    const estimatedEcosystemDailyBmt = estimateDailyBmtReward({
-        hashrate: poolHashrateTotal,
-        networkHashrate: poolNetworkHashrate,
-        rateXmrBmt
-    });
-
-    // Convert $BMT to XMR (example rate: 1000 BMT = 1 XMR)
-    const BMT_TO_XMR_RATE = 1000;
-    const xmrEquivalent = safeDbTotalBMT / BMT_TO_XMR_RATE;
-
     const refreshConfirmedRewards = async () => {
         if (!user?.publicKey) return null;
         return SolanaAuthService.getInstance().fetchMiningStats(user.publicKey);
@@ -342,10 +388,10 @@ const Dashboard = () => {
                             ? 'bg-gradient-to-br from-emerald-300/30 to-transparent'
                             : 'bg-gradient-to-br from-emerald-500/10 to-transparent'
                     )} />
-                    <h3 className={cn("text-sm font-medium uppercase tracking-wider", theme === 'light' ? 'text-zinc-600' : 'text-zinc-400')}>Estimated Hashrate</h3>
-                    <p className={cn("text-3xl font-mono mt-2", theme === 'light' ? 'text-zinc-900' : 'text-white')}>{formatHashrate(estimatedHashrate)}</p>
+                    <h3 className={cn("text-sm font-medium uppercase tracking-wider", theme === 'light' ? 'text-zinc-600' : 'text-zinc-400')}>Last Benchmark Hashrate</h3>
+                    <p className={cn("text-3xl font-mono mt-2", theme === 'light' ? 'text-zinc-900' : 'text-white')}>{formatHashrate(benchmarkHashrate)}</p>
                     <p className={cn("text-xs mt-1 font-mono uppercase tracking-wide", theme === 'light' ? 'text-zinc-600' : 'text-zinc-500')}>
-                        {estimatedDeviceName || `${deviceType.toUpperCase()} device`}
+                        {benchmarkDeviceName || `${deviceType.toUpperCase()} device`}
                     </p>
                     <p className={cn("text-xs mt-1 font-mono", theme === 'light' ? 'text-zinc-600' : 'text-zinc-600')}>
                         {lastBenchmarkDate
@@ -366,20 +412,19 @@ const Dashboard = () => {
                     )} />
                     <div className="flex justify-between items-start">
                         <div>
-                            <h3 className={cn("text-sm font-medium uppercase tracking-wider", theme === 'light' ? 'text-zinc-600' : 'text-zinc-400')}>Mining Ecosystem Rewards</h3>
+                            <h3 className={cn("text-sm font-medium uppercase tracking-wider", theme === 'light' ? 'text-zinc-600' : 'text-zinc-400')}>Verified Rewards</h3>
                             <p className={cn("text-4xl font-mono mt-2", theme === 'light' ? 'text-zinc-900' : 'text-white')}>
-                                {(estimatedEcosystemDailyBmt || 0).toFixed(2)} <span className={cn("text-lg", theme === 'light' ? 'text-zinc-600' : 'text-zinc-500')}>$BMT/day</span>
+                                {safeDbTotalBMT.toFixed(2)} <span className={cn("text-lg", theme === 'light' ? 'text-zinc-600' : 'text-zinc-500')}>$BMT</span>
                             </p>
                             <p className={cn("text-xs mt-1 font-mono", theme === 'light' ? 'text-zinc-600' : 'text-zinc-600')}>
-                                Based on {poolMinersCount} live nodes and the current pool hashrate
+                                Confirmed from backend reward windows and accepted shares
                             </p>
                         </div>
                         <div className="text-right">
-                            <h3 className={cn("text-[10px] font-bold uppercase tracking-widest text-emerald-500", theme === 'light' ? 'text-emerald-600' : '')}>Available Rewards</h3>
+                            <h3 className={cn("text-[10px] font-bold uppercase tracking-widest text-emerald-500", theme === 'light' ? 'text-emerald-600' : '')}>Paid Rewards</h3>
                             <p className={cn("text-xl font-mono mt-1", theme === 'light' ? 'text-zinc-900' : 'text-white')}>
-                                {safeDbTotalBMT.toFixed(2)} <span className="text-xs text-zinc-500">$BMT</span>
+                                {(miningStats?.paidBmt ?? miningStats?.totalBmtWithdrawn ?? 0).toFixed(2)} <span className="text-xs text-zinc-500">$BMT</span>
                             </p>
-                            <p className={cn("text-[10px] mt-0.5", theme === 'light' ? 'text-zinc-600' : 'text-zinc-500')}>~ {xmrEquivalent.toFixed(6)} XMR</p>
                         </div>
                     </div>
                 </div>
@@ -447,7 +492,7 @@ const Dashboard = () => {
                             </div>
                             <div>
                                 <h4 className={cn("font-medium", theme === 'light' ? 'text-zinc-900' : 'text-white')}>Confirmed for Payout</h4>
-                                <p className={cn("text-xs", theme === 'light' ? 'text-zinc-600' : 'text-zinc-500')}>Verified rewards from the blockchain</p>
+                                <p className={cn("text-xs", theme === 'light' ? 'text-zinc-600' : 'text-zinc-500')}>Verified rewards from backend reward accounting</p>
                             </div>
                         </div>
 
@@ -455,7 +500,6 @@ const Dashboard = () => {
                             <div className="flex justify-between items-baseline">
                                 <div>
                                     <div className={cn("text-3xl font-mono", theme === 'light' ? 'text-zinc-900' : 'text-white')}>{safeDbTotalBMT.toFixed(2)} <span className={cn("text-sm", theme === 'light' ? 'text-zinc-600' : 'text-zinc-500')}>$BMT</span></div>
-                                    <div className={cn("text-xs font-mono mt-0.5", theme === 'light' ? 'text-zinc-600' : 'text-zinc-600')}>~ {xmrEquivalent.toFixed(6)} XMR</div>
                                 </div>
                             </div>
 
@@ -521,6 +565,13 @@ const Dashboard = () => {
 const Placeholder = ({ name }: { name: string }) => <div className="text-2xl font-bold p-6">{name} (Under Construction)</div>;
 
 const App: React.FC = () => {
+    // Fetch public configuration on mount
+    useEffect(() => {
+        if (!window.electron?.invoke) return;
+        const { fetchPublicConfig } = useMinerStore.getState();
+        fetchPublicConfig();
+    }, []);
+
     return (
         <ThemeProvider>
             <Router>
@@ -533,6 +584,7 @@ const App: React.FC = () => {
                             <Route path="/" element={<Dashboard />} />
                             <Route path="/benchmark" element={<BenchmarkPage />} />
                             <Route path="/mining" element={<MiningPage />} />
+                            <Route path="/stress-test" element={<StressTestPage />} />
                             <Route path="/statistics" element={<MiningStatistics />} />
                             <Route path="/logs" element={<Logs />} />
                             <Route path="/settings" element={<Settings />} />

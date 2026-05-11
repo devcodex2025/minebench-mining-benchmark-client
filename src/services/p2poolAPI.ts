@@ -29,6 +29,12 @@ export interface P2PoolStats {
   networkHashrate?: number;
   networkDifficulty?: number;
   lastBlockTime?: number;
+  rewards?: {
+    totalBmtRewards: number;
+    totalBmtPayouts: number;
+    availableBmtRewards: number;
+    rewardEntries: number;
+  };
   stratum?: P2PoolStratumSnapshot;
 }
 
@@ -144,7 +150,12 @@ class P2PoolService {
       }
 
       // Fetch global pool stats from MineBench backend
-      let poolExtra: { poolHashrate: number; miners: number; stratum: P2PoolStratumSnapshot | null } = {
+      let poolExtra: {
+        poolHashrate: number;
+        miners: number;
+        rewards?: P2PoolStats['rewards'];
+        stratum: P2PoolStratumSnapshot | null;
+      } = {
         poolHashrate: 0,
         miners: 0,
         stratum: null
@@ -161,6 +172,7 @@ class P2PoolService {
           const data = await res.json();
           poolExtra.poolHashrate = data.poolHashrate || 0;
           poolExtra.miners = data.miners || 0;
+          poolExtra.rewards = data.rewards || undefined;
           poolExtra.stratum = (data && typeof data.stratum === 'object') ? data.stratum : null;
         } else {
           console.warn(`[P2PoolAPI] Backend returned status ${res.status} for pool stats`);
@@ -177,6 +189,7 @@ class P2PoolService {
         networkHashrate: info.difficulty / 120,
         networkDifficulty: info.difficulty || 0,
         lastBlockTime: Date.now() - 30000, // Mock last block since get_info doesn't have it directly
+        rewards: poolExtra.rewards,
         stratum: poolExtra.stratum || undefined
       };
     } catch (err) {

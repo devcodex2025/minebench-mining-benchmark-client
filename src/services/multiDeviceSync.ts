@@ -15,6 +15,7 @@ export interface DeviceSyncData {
   uptime: number;
   temperature?: number;
   power?: number;
+  mode: 'mining' | 'benchmark' | 'idle';
 }
 
 export interface SyncMessage {
@@ -70,7 +71,7 @@ export class MultiDeviceSyncService {
   /**
    * Оновити дані пристрою
    */
-  updateDevice(deviceId: string, updates: Partial<DeviceSyncData>): void {
+  async updateDevice(deviceId: string, updates: Partial<DeviceSyncData>): Promise<void> {
     const existing = this.syncedDevices.get(deviceId);
     if (!existing) {
       console.warn(`[MultiDeviceSync] Device not found: ${deviceId}`);
@@ -88,7 +89,35 @@ export class MultiDeviceSyncService {
     this.notifyListeners();
 
     // Синхронізувати з сервером/IPFS
-    this.syncWithServer(updated);
+    await this.syncWithServer(updated);
+  }
+
+  /**
+   * Підписати дані синхронізації через Solana гаманець
+   */
+  private async signSyncData(data: DeviceSyncData): Promise<string> {
+    try {
+      // @ts-ignore - Phantom/Solana injection
+      const wallet = window.solana || window.phantom?.solana;
+      
+      if (!wallet?.signMessage) {
+        console.warn('[MultiDeviceSync] Wallet does not support signing or not connected');
+        return '';
+      }
+
+      const message = new TextEncoder().encode(
+        `MineBench Sync: ${data.deviceId} | ${data.lastUpdate} | ${data.currentHashrate}`
+      );
+      
+      const signedMessage = await wallet.signMessage(message);
+      
+      // Handle both raw Uint8Array and { signature: Uint8Array } formats
+      const signature = signedMessage.signature || signedMessage;
+      return btoa(String.fromCharCode.apply(null, Array.from(signature)));
+    } catch (err) {
+      console.error('[MultiDeviceSync] Signing failed:', err);
+      return '';
+    }
   }
 
   /**
@@ -258,15 +287,29 @@ export class MultiDeviceSyncService {
 
   private async syncWithServer(data: DeviceSyncData): Promise<void> {
     try {
-      // TODO: Запустити POST на server/backend
-      // POST /api/sync/device-update
-      // {
-      //   walletPublicKey: string,
-      //   deviceData: DeviceSyncData,
-      //   signature: string (Solana signed)
-      // }
+      const signature = await this.signSyncData(data);
+      const { getEnvironmentConfig } = await import('../config/environment');
+      const env = getEnvironmentConfig();
+      const apiUrl = env.apiBaseUrl.replace(/\/+$/, '') + '/sync/device-update';
 
-      console.log('[MultiDeviceSync] Server sync (TODO):', data.deviceName);
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('minebench_auth_token') || ''}`
+        },
+        body: JSON.stringify({
+          walletPublicKey: this.walletPublicKey,
+          deviceData: data,
+          signature
+        })
+      });
+
+      if (!response.ok) {
+        console.warn(`[MultiDeviceSync] Server sync failed (${response.status})`);
+      } else {
+        console.log(`[MultiDeviceSync] Synced ${data.deviceName} with server`);
+      }
     } catch (err) {
       console.error('[MultiDeviceSync] Failed to sync with server:', err);
     }
