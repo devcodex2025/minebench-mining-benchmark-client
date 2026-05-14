@@ -248,6 +248,7 @@ pub struct OAuthCallbackParams {
     #[serde(rename = "publicKey")]
     public_key: String,
     signature: String,
+    message: Option<String>,
     state: Option<String>,
 }
 
@@ -256,6 +257,7 @@ pub struct OAuthResult {
     #[serde(rename = "publicKey")]
     public_key: String,
     signature: String,
+    message: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -318,6 +320,7 @@ async fn oauth_callback(
     let result = OAuthResult {
         public_key: params.public_key,
         signature: params.signature,
+        message: params.message,
     };
 
     if let Some(tx) = state.tx.lock().unwrap().take() {
