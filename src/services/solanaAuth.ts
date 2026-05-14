@@ -23,6 +23,15 @@ const getSignatureBytes = (signature: any): Uint8Array => {
   throw new Error('Wallet returned unsupported signature format');
 };
 
+const decodeBase64 = (value: string): Uint8Array | null => {
+  try {
+    const binary = atob(value);
+    return new Uint8Array(Array.from(binary, (char) => char.charCodeAt(0)));
+  } catch {
+    return null;
+  }
+};
+
 const encodeBase58 = (bytes: Uint8Array): string => {
   const digits = [0];
 
@@ -48,6 +57,11 @@ const encodeBase58 = (bytes: Uint8Array): string => {
     output += BASE58_ALPHABET[digits[i]];
   }
   return output;
+};
+
+const normalizeSignature = (signature: string) => {
+  const decoded = decodeBase64(signature);
+  return decoded?.length === 64 ? encodeBase58(decoded) : signature;
 };
 
 export interface SolanaUser {
@@ -212,8 +226,12 @@ export class SolanaAuthService {
           isVerified: true
         };
 
-        authStorage.setSignature(result.signature);
-        await this.login(result.publicKey, result.signature, result.message || buildAuthMessage(result.publicKey));
+        if (!result.message) {
+          throw new Error('Wallet callback did not include signed message. Refresh minebench.cloud and try again.');
+        }
+        const signature = normalizeSignature(result.signature);
+        authStorage.setSignature(signature);
+        await this.login(result.publicKey, signature, result.message);
 
         // Store user after backend auth succeeds so reward/report calls have a JWT.
         useSolanaAuth.getState().setUser(user);
