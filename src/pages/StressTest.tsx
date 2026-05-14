@@ -6,6 +6,7 @@ import { cn, formatHashrate } from '../lib/utils';
 import { p2poolAPI } from '../services/p2poolAPI';
 import { useMinerStore } from '../store/useMinerStore';
 import { SolanaAuthService, useSolanaAuth } from '../services/solanaAuth';
+import { nativeApi } from '../lib/native-api';
 
 type StressSample = {
     time: string;
@@ -36,7 +37,7 @@ const getErrorMessage = (err: any) => {
 const formatDuration = (seconds: number) => {
     const safeSeconds = Math.max(0, Math.floor(seconds));
     const h = Math.floor(safeSeconds / 3600);
-    const m = Math.floor((safeSeconds % 3600) / 60);
+    const m = Math.floor((seconds % 3600) / 60);
     const s = safeSeconds % 60;
     if (h > 0) return `${h}h ${m}m ${s}s`;
     if (m > 0) return `${m}m ${s}s`;
@@ -95,11 +96,9 @@ const StressTest: React.FC = () => {
     useEffect(() => {
         const loadCpuInfo = async () => {
             try {
-                const [name, cores] = await Promise.all([
-                    window.electron.invoke('get-cpu-name'),
-                    window.electron.invoke('get-cpu-cores')
-                ]);
-                setCpuInfo(name, cores);
+                if (!(window as any).__TAURI_INTERNALS__) return;
+                const info = await nativeApi.system.getCpuInfo();
+                setCpuInfo(info.name, info.cores);
             } catch {
                 // CPU info is helpful but not required to run the stress test.
             }
@@ -170,10 +169,8 @@ const StressTest: React.FC = () => {
             0
         );
 
-        const [tempRes, powerRes] = await Promise.all([
-            window.electron.invoke('get-cpu-temp').catch(() => null),
-            window.electron.invoke('get-cpu-power').catch(() => null)
-        ]);
+        const tempRes = await nativeApi.invoke<any>('get_cpu_temp').catch(() => null);
+        const powerRes = await nativeApi.invoke<any>('get_cpu_power').catch(() => null);
 
         const temp = tempRes?.success && Number.isFinite(tempRes.temp) ? Number(tempRes.temp) : null;
         const power = powerRes?.success && Number.isFinite(powerRes.power) ? Number(powerRes.power) : null;
@@ -217,7 +214,7 @@ const StressTest: React.FC = () => {
         const duration = startedAtRef.current ? Math.max(1, Math.floor((Date.now() - startedAtRef.current) / 1000)) : elapsed;
 
         try {
-            await window.electron.invoke('save-miner-logs', {
+            await nativeApi.miner.saveLogs({
                 systemLogs: useMinerStore.getState().logs,
                 minerLogs: currentSamples.map((sample) =>
                     `${sample.time} | ${formatHashrate(sample.hashrate)} | ${sample.temp ?? 'N/A'} C | ${sample.power ?? 'N/A'} W`
@@ -226,11 +223,7 @@ const StressTest: React.FC = () => {
                 device: 'cpu'
             }).catch(() => {});
 
-            await window.electron.invoke('stop-benchmark', {
-                avg_hashrate: hashrates.length ? hashrates.reduce((sum, value) => sum + value, 0) / hashrates.length : 0,
-                max_hashrate: hashrates.length ? Math.max(...hashrates) : 0,
-                wallet
-            });
+            await nativeApi.miner.stopBenchmark();
             if (user?.publicKey) {
                 await SolanaAuthService.getInstance().reportMiningStats({
                     hashrate: hashrates.length ? hashrates.reduce((sum, value) => sum + value, 0) / hashrates.length : 0,
@@ -280,10 +273,8 @@ const StressTest: React.FC = () => {
         stopRequestedRef.current = false;
 
         try {
-            const [tempRes, powerRes] = await Promise.all([
-                window.electron.invoke('get-cpu-temp').catch(() => null),
-                window.electron.invoke('get-cpu-power').catch(() => null)
-            ]);
+            const tempRes = await nativeApi.invoke<any>('get_cpu_temp').catch(() => null);
+            const powerRes = await nativeApi.invoke<any>('get_cpu_power').catch(() => null);
             const temp = tempRes?.success && Number.isFinite(tempRes.temp) ? Number(tempRes.temp) : null;
             const power = powerRes?.success && Number.isFinite(powerRes.power) ? Number(powerRes.power) : null;
             if (!isPositiveNumber(temp) || !isPositiveNumber(power)) {
@@ -293,7 +284,18 @@ const StressTest: React.FC = () => {
                 return;
             }
 
-            await window.electron.invoke('start-benchmark', {
+            // Ensure we have the latest config
+            console.log("Invalidating pool config cache...");
+            p2poolAPI.invalidateCache();
+            console.log("Fetching latest pool config...");
+            try {
+                const config = await nativeApi.pool.getRuntimeConfig();
+                console.log("Pool config fetched successfully:", config);
+            } catch (configErr) {
+                console.error("Failed to fetch pool config:", configErr);
+            }
+
+            await nativeApi.miner.startBenchmark({
                 type: 'cpu',
                 wallet,
                 worker: `${workerName}-stress`,

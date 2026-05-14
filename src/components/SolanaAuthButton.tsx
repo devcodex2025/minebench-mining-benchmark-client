@@ -6,6 +6,7 @@ import { useWalletAuthUrl } from '../hooks/useEnvironment';
 import { getEnvironmentConfig } from '../config/environment';
 import { cn } from '../lib/utils';
 import { useMinerStore } from '../store/useMinerStore';
+import { nativeApi } from '../lib/native-api';
 
 export const SolanaAuthButton: React.FC = () => {
   const { theme } = useTheme();
@@ -48,11 +49,11 @@ export const SolanaAuthButton: React.FC = () => {
         const owner = user.publicKey;
         let resolved = false;
 
-        // Prefer Electron IPC proxy (no CORS, fewer 403s)
-        const ipc = (window as any)?.electron?.ipcRenderer;
-        if (ipc?.invoke) {
+        const isNative = (window as any).__TAURI_INTERNALS__;
+        if (isNative) {
           try {
-            const res = await ipc.invoke('solana-get-token-balance', { owner, mint: tokenMint });
+            // Use native bridge proxy (no CORS, fewer 403s)
+            const res = await nativeApi.invoke<any>('solana_get_token_balance', { owner, mint: tokenMint });
             if (res?.success) {
               const val = typeof res.balance === 'number' ? res.balance : Number(res.balance || 0);
               const nextTokenBalance = isFinite(val) ? val : 0;
@@ -60,10 +61,10 @@ export const SolanaAuthButton: React.FC = () => {
               setBmtBalance(nextTokenBalance);
               resolved = true;
             } else if (res?.error) {
-              console.warn('[BMT] IPC balance error:', res.error);
+              console.warn('[BMT] Native balance error:', res.error);
             }
           } catch (e: any) {
-            console.warn('[BMT] IPC balance exception:', e?.message);
+            console.warn('[BMT] Native balance exception:', e?.message);
           }
         }
 

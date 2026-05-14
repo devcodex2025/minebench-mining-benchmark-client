@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 import { getEnvironmentConfig } from '../config/environment';
+import { nativeApi } from '../lib/native-api';
+import { backendJson } from '../lib/backend-api';
 
 export type AppMode = 'benchmark' | 'mining';
 export type DeviceType = 'cpu' | 'gpu';
@@ -20,6 +22,7 @@ interface MiningState {
     solanaPublicKey?: string; // User's Solana public key for multi-device sync
     workerName: string;
     threads: number;
+    threadsManuallySet: boolean;
     cpuName: string;
     cpuCores: number;
 
@@ -43,6 +46,8 @@ interface MiningState {
     // xmrig Settings
     donateLevel: number;
     poolUrl: string;
+    backendPrimaryPoolUrl: string;
+    backendBackupPoolUrl: string;
     cpuPriority: number; // 0-5, higher = more aggressive
     randomxMode: 'auto' | 'fast' | 'light'; // fast uses 2GB RAM, light uses 256MB
     hugePages: boolean;
@@ -88,6 +93,7 @@ interface MiningState {
     setWalletVerified: (verified: boolean, solanaKey?: string) => void;
     setStatus: (status: MiningState['status']) => void;
     setThreads: (threads: number) => void;
+    setThreadsManuallySet: (value: boolean) => void;
     setCpuInfo: (name: string, cores: number) => void;
     setDonateLevel: (level: number) => void;
     setPoolUrl: (url: string) => void;
@@ -126,6 +132,7 @@ interface MinerSettings {
     updatedAt?: number;
 }
 
+const defaultThreadCount = (cores: number): number => Math.max(1, Math.floor(Math.max(1, cores) / 2));
 const env = getEnvironmentConfig();
 const initialPools = {
     'cpu': { isSynced: false, height: 0, targetHeight: 0, progress: 0, connected: false, coin: 'XMR' },
@@ -142,6 +149,7 @@ export const useMinerStore = create<MiningState>((set, get) => ({
     solanaPublicKey: undefined,
     workerName: 'Miner-v1',
     threads: 1,
+    threadsManuallySet: false,
     cpuName: '',
     cpuCores: 1,
 
@@ -161,6 +169,8 @@ export const useMinerStore = create<MiningState>((set, get) => ({
 
     donateLevel: 1,
     poolUrl: env.poolStratumUrl,
+    backendPrimaryPoolUrl: env.poolStratumUrl,
+    backendBackupPoolUrl: env.poolStratumUrlBackup,
     cpuPriority: 2, // Default: balanced (0=lowest, 5=highest)
     randomxMode: 'auto', // auto-detect best mode
     hugePages: true, // Enable huge pages for better performance
@@ -202,20 +212,22 @@ export const useMinerStore = create<MiningState>((set, get) => ({
         const safeMiningMax = Math.max(1, safeCores - 1);
         const requested = Number.isFinite(threads) ? Math.floor(threads) : state.threads;
         return {
-            threads: Math.min(Math.max(1, requested), safeMiningMax)
+            threads: Math.min(Math.max(1, requested), safeMiningMax),
+            threadsManuallySet: true
         };
     }),
+    setThreadsManuallySet: (value) => set({ threadsManuallySet: value }),
     setCpuInfo: (cpuName, cpuCores) => set((state) => {
         const safeCores = Math.max(1, cpuCores || 1);
         const safeMiningMax = Math.max(1, safeCores - 1);
-        const currentThreads = Number.isFinite(state.threads) && state.threads > 0
-            ? state.threads
-            : safeMiningMax;
+        const defaultThreads = defaultThreadCount(safeCores);
+        const desiredThreads = state.threadsManuallySet
+            ? (Number.isFinite(state.threads) && state.threads > 0 ? state.threads : defaultThreads)
+            : defaultThreads;
         return {
             cpuName,
             cpuCores: safeCores,
-            // Leave one logical thread free for the UI, OS, and Tauri IPC.
-            threads: Math.min(currentThreads, safeMiningMax)
+            threads: Math.min(Math.max(1, desiredThreads), safeMiningMax)
         };
     }),
     setDonateLevel: (donateLevel) => set({ donateLevel }),
@@ -302,10 +314,10 @@ export const useMinerStore = create<MiningState>((set, get) => ({
             // Save to localStorage
             localStorage.setItem('minerSettings', JSON.stringify(settings));
 
-            // Also save to Electron app data for persistence
-            if (window.electron?.invoke) {
-                window.electron.invoke('save-miner-settings', settings).catch((err: any) => {
-                    console.error('Failed to save settings to Electron:', err);
+            // Also save to Native app data for persistence
+            if ((window as any).__TAURI_INTERNALS__) {
+                nativeApi.miner.saveSettings(settings).catch((err: any) => {
+                    console.error('Failed to save settings to Native:', err);
                 });
             }
 
@@ -317,18 +329,18 @@ export const useMinerStore = create<MiningState>((set, get) => ({
 
     loadSettings: async () => {
         const state = get();
-        let electronSettings: MinerSettings | null = null;
+        let nativeSettings: MinerSettings | null = null;
         let localSettings: MinerSettings | null = null;
 
         try {
-            if (window.electron?.invoke) {
-                const res = await window.electron.invoke('load-miner-settings');
+            if ((window as any).__TAURI_INTERNALS__) {
+                const res = await nativeApi.miner.loadSettings();
                 if (res?.success && res.settings) {
-                    electronSettings = res.settings as MinerSettings;
+                    nativeSettings = res.settings as MinerSettings;
                 }
             }
         } catch (err) {
-            console.error('Failed to load miner settings from Electron:', err);
+            console.error('Failed to load miner settings from Native:', err);
         }
 
         try {
@@ -338,11 +350,11 @@ export const useMinerStore = create<MiningState>((set, get) => ({
             console.error('Failed to load miner settings from localStorage:', err);
         }
 
-        const electronUpdatedAt = Number(electronSettings?.updatedAt || 0);
+        const nativeUpdatedAt = Number(nativeSettings?.updatedAt || 0);
         const localUpdatedAt = Number(localSettings?.updatedAt || 0);
-        const settings = localUpdatedAt >= electronUpdatedAt
-            ? (localSettings || electronSettings)
-            : (electronSettings || localSettings);
+        const settings = localUpdatedAt >= nativeUpdatedAt
+            ? (localSettings || nativeSettings)
+            : (nativeSettings || localSettings);
 
         if (!settings) return;
 
@@ -350,49 +362,64 @@ export const useMinerStore = create<MiningState>((set, get) => ({
             settings.poolUrl &&
             settings.poolUrl.includes('xmr2.minebench.cloud')
         );
-        const nextPoolUrl = (!env.enableBackupPool && (legacyBackupHostSelected || (settings.poolUrl && settings.poolUrl.includes(env.poolStratumUrlBackup))))
-            ? env.poolStratumUrl
+        const settingsManualPoolSelection = settings.manualPoolSelection ?? state.manualPoolSelection;
+        const backendPoolUrl = state.backendPrimaryPoolUrl || env.poolStratumUrl;
+        const savedPoolUrl = (!env.enableBackupPool && (legacyBackupHostSelected || (settings.poolUrl && settings.poolUrl.includes(env.poolStratumUrlBackup))))
+            ? backendPoolUrl
             : (settings.poolUrl || state.poolUrl);
+        const nextPoolUrl = settingsManualPoolSelection ? savedPoolUrl : backendPoolUrl;
+
+        const requestedThreads = settings.threads ?? state.threads;
+        const currentMaxThreads = state.cpuCores > 1 ? Math.max(1, state.cpuCores - 1) : requestedThreads;
+        const hasManualThreadSelection = settings.threads !== undefined && settings.threads !== null;
 
         set({
             wallet: settings.wallet || state.wallet,
             workerName: settings.workerName || state.workerName,
-            threads: Math.min(settings.threads || state.threads, Math.max(1, state.cpuCores - 1)),
+            threads: Math.min(Math.max(1, requestedThreads), currentMaxThreads),
+            threadsManuallySet: hasManualThreadSelection,
             donateLevel: settings.donateLevel ?? state.donateLevel,
             poolUrl: nextPoolUrl,
             cpuPriority: settings.cpuPriority ?? state.cpuPriority,
             randomxMode: settings.randomxMode || state.randomxMode,
             hugePages: settings.hugePages ?? state.hugePages,
             deviceType: settings.deviceType || state.deviceType,
-            manualPoolSelection: settings.manualPoolSelection ?? state.manualPoolSelection
+            manualPoolSelection: settingsManualPoolSelection
         });
     },
 
     fetchPublicConfig: async () => {
         try {
-            const configUrl = 'https://backend.minebench.cloud/public/config';
-            const response = await fetch(configUrl);
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            
-            const data = await response.json();
+            const data = await backendJson<any>('/public/config');
             console.log('🌐 Public configuration loaded from backend');
 
             if (data.pool?.primary) {
                 const { rpcHost, rpcPort, stratumHost, stratumPort } = data.pool.primary;
-                
-                // Update rpc config in store
-                set({ rpcHost, rpcPort });
+                const newPrimaryPoolUrl = `${stratumHost}:${stratumPort}`;
+                const backupPrimaryPoolUrl = data.pool.backup ? `${data.pool.backup.stratumHost}:${data.pool.backup.stratumPort}` : env.poolStratumUrlBackup;
+
+                // Update runtime config in store
+                set({
+                    rpcHost,
+                    rpcPort,
+                    backendPrimaryPoolUrl: newPrimaryPoolUrl,
+                    backendBackupPoolUrl: backupPrimaryPoolUrl
+                });
                 console.log(`📡 Updated RPC node to ${rpcHost}:${rpcPort}`);
-                
+                console.log(`📡 Backend primary pool URL is ${newPrimaryPoolUrl}`);
+                if (backupPrimaryPoolUrl) {
+                    console.log(`📡 Backend backup pool URL is ${backupPrimaryPoolUrl}`);
+                }
+
                 const currentStore = get();
-                
-                // If user hasn't manually selected a pool, update to the latest from backend
-                if (!currentStore.manualPoolSelection) {
-                    const newPoolUrl = `${stratumHost}:${stratumPort}`;
-                    if (currentStore.poolUrl !== newPoolUrl) {
-                        set({ poolUrl: newPoolUrl });
-                        console.log(`📡 Updated mining pool to ${newPoolUrl}`);
-                    }
+
+                // If the user is in auto mode, always follow backend primary pool URL.
+                if (!currentStore.manualPoolSelection && currentStore.poolUrl !== newPrimaryPoolUrl) {
+                    set({ poolUrl: newPrimaryPoolUrl });
+                    console.log(`📡 Updated mining pool to backend primary pool URL ${newPrimaryPoolUrl}`);
+
+                    // Persist backend-backed pool selection so the next app start also uses current backend config.
+                    get().saveSettings();
                 }
             }
 

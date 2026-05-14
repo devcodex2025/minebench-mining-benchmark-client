@@ -6,9 +6,10 @@
 import { create } from 'zustand';
 import { PublicKey } from '@solana/web3.js';
 import { useMinerStore } from '../store/useMinerStore';
-
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://backend.minebench.cloud/api';
-
+import { nativeApi } from '../lib/native-api';
+import { authStorage } from '../lib/auth-storage';
+import { BackendApiError, backendJson } from '../lib/backend-api';
+// ... (interfaces remain same)
 export interface SolanaUser {
   publicKey: string;
   displayName?: string;
@@ -149,40 +150,32 @@ export class SolanaAuthService {
   }
 
   /**
-   * Підключити Solana гаманець через системний браузер (для Electron) або напряму (для web)
+   * Підключити Solana гаманець через системний браузер (для native) або напряму (для web)
    */
   async connectWallet(): Promise<SolanaUser> {
     try {
       useSolanaAuth.getState().setConnecting(true);
 
       console.log('[SolanaAuth] Starting wallet connection...');
-      console.log('[SolanaAuth] window.electron exists:', !!window.electron);
-      console.log('[SolanaAuth] window.electron.ipcRenderer exists:', !!window.electron?.ipcRenderer);
 
-      // Для Electron - використовуємо IPC для відкриття браузера
-      // @ts-ignore - Electron IPC
-      if (window.electron?.ipcRenderer) {
-        console.log('[SolanaAuth] Using Electron IPC flow');
-        const result = await window.electron.ipcRenderer.invoke('solana-connect-wallet');
-
-        console.log('[SolanaAuth] Received result from IPC:', result);
-
-        if (!result.publicKey || !result.signature) {
-          throw new Error('Invalid authentication response from browser');
-        }
+      // Check if running in Tauri
+      if ((window as any).__TAURI_INTERNALS__) {
+        console.log('[SolanaAuth] Using Native browser flow');
+        const result = await nativeApi.invoke<any>('solana_connect_wallet');
+        console.log('[SolanaAuth] Wallet connected:', result.publicKey);
 
         const user: SolanaUser = {
           publicKey: result.publicKey,
           displayName: result.publicKey.slice(0, 8) + '...',
           createdAt: Date.now(),
-          walletType: 'browser',
+          walletType: 'phantom',
           isVerified: true
         };
 
         // Store user
         useSolanaAuth.getState().setUser(user);
         localStorage.setItem('minebench_user', JSON.stringify(user));
-        localStorage.setItem('minebench_signature', result.signature);
+        authStorage.setSignature(result.signature);
 
         // Sync premium status to MinerStore
         const { setIsPremium, setPremiumXmrWallet } = useMinerStore.getState();
@@ -245,51 +238,37 @@ export class SolanaAuthService {
    * Відключити гаманець
    */
   async disconnectWallet(): Promise<void> {
-    try {
-      // Для Electron - викликаємо IPC
-      // @ts-ignore
-      if (window.electron?.ipcRenderer) {
-        await window.electron.ipcRenderer.invoke('solana-disconnect-wallet');
-      } else {
+      try {
+        // Відключаємо напряму через localStorage
+        useSolanaAuth.getState().disconnect();
+        localStorage.removeItem('minebench_user');
+        authStorage.clearSecrets();
+
         // Для web - відключаємо напряму
         // @ts-ignore
         const wallet = window.solana || window.phantom?.solana;
         if (wallet?.disconnect) {
           await wallet.disconnect();
         }
+      } catch (err) {
+        console.error('Failed to disconnect wallet:', err);
       }
-
-      useSolanaAuth.getState().disconnect();
-      localStorage.removeItem('minebench_user');
-      localStorage.removeItem('minebench_signature');
-    } catch (err) {
-      console.error('Failed to disconnect wallet:', err);
     }
-  }
 
   /**
    * Login with backend using wallet signature
    */
   async login(walletAddress: string, signature: string, message: string): Promise<string> {
     try {
-      const response = await fetch(`${API_BASE_URL}/auth/login`, {
+      const { token } = await backendJson<{ token: string }>('/api/auth/login', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
+        body: {
           walletAddress,
           signature,
           message
-        })
+        }
       });
-
-      if (!response.ok) {
-        throw new Error(`Login failed: ${response.statusText}`);
-      }
-
-      const { token } = await response.json();
-      localStorage.setItem('minebench_auth_token', token);
+      authStorage.setToken(token);
 
       // Fetch stats immediately after login
       await this.fetchMiningStats(walletAddress);
@@ -344,7 +323,7 @@ export class SolanaAuthService {
    */
   async fetchMiningStats(publicKey: string): Promise<UserMiningStats> {
     try {
-      const storedToken = localStorage.getItem('minebench_auth_token');
+      const storedToken = authStorage.getToken();
 
       // If we don't have a token, we might need to login
       if (!storedToken) {
@@ -352,26 +331,21 @@ export class SolanaAuthService {
         return this.getEmptyStats();
       }
 
-      const response = await fetch(`${API_BASE_URL}/rewards/balance`, {
-        headers: {
-          'Authorization': `Bearer ${storedToken}`
-        }
-      });
-
-      if (!response.ok) {
-        if (response.status === 401) {
+      let balanceData: any;
+      try {
+        balanceData = await backendJson('/api/rewards/balance', { token: storedToken });
+      } catch (err) {
+        if (err instanceof BackendApiError && err.status === 401) {
           console.warn('[SolanaAuth] Session expired');
-          localStorage.removeItem('minebench_auth_token');
+          authStorage.removeToken();
         }
         return this.getEmptyStats();
       }
-
-      const balanceData = await response.json();
       const toNum = (v: any) => {
         const n = Number(v);
         return Number.isFinite(n) ? n : 0;
       };
-      const bmtBalance = toNum(balanceData?.bmt_available ?? balanceData?.balance ?? 0);
+      const bmtBalance = toNum(balanceData?.bmt_available ?? balanceData?.available_bmt ?? balanceData?.balance ?? 0);
       const totalXmrMined = toNum(balanceData?.total_xmr_mined ?? balanceData?.xmr_total_earned ?? 0);
       const totalBmtEarned = toNum(balanceData?.total_bmt_earned ?? balanceData?.bmt_total_earned ?? 0);
       const totalBmtWithdrawn = toNum(balanceData?.total_bmt_withdrawn ?? balanceData?.bmt_total_withdrawn ?? 0);
@@ -387,20 +361,16 @@ export class SolanaAuthService {
       const { setDbTotalBMT, setIsPremium, setPremiumXmrWallet } = useMinerStore.getState();
       setDbTotalBMT(bmtBalance);
 
-      // Check premium status via IPC
-      if (window.electron?.ipcRenderer) {
-        try {
-          const premiumData = await window.electron.ipcRenderer.invoke('get-premium-status', publicKey);
-          if (premiumData) {
-            setIsPremium(!!premiumData.isPremium);
-            if (premiumData.xmrWallet) {
-              setPremiumXmrWallet(premiumData.xmrWallet);
+      // Check premium status via direct fetch
+            try {
+              const premiumData = await backendJson<any>('/api/user/premium-status', { token: storedToken });
+              setIsPremium(!!premiumData.isPremium);
+              if (premiumData.xmrWallet) {
+                setPremiumXmrWallet(premiumData.xmrWallet);
+              }
+            } catch (e) {
+              console.warn('[SolanaAuth] Failed to fetch premium status:', e);
             }
-          }
-        } catch (e) {
-          console.error('[SolanaAuth] Failed to sync premium status via IPC:', e);
-        }
-      }
 
       const stats: UserMiningStats = {
         totalRewards: bmtBalance,
@@ -431,30 +401,16 @@ export class SolanaAuthService {
   }
 
   async requestPayout(amount: number): Promise<any> {
-    const storedToken = localStorage.getItem('minebench_auth_token');
+    const storedToken = authStorage.getToken();
     if (!storedToken) {
       throw new Error('Authentication required');
     }
 
-    const response = await fetch(`${API_BASE_URL}/rewards/claim`, {
+    return backendJson('/api/rewards/claim', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${storedToken}`
-      },
-      body: JSON.stringify({ amount })
+      token: storedToken,
+      body: { amount }
     });
-
-    if (!response.ok) {
-      let message = `Claim failed (${response.status})`;
-      try {
-        const payload = await response.json();
-        message = payload?.message || payload?.error || message;
-      } catch {}
-      throw new Error(message);
-    }
-
-    return response.json();
   }
 
   async reportMiningStats(params: {
@@ -464,47 +420,28 @@ export class SolanaAuthService {
     referenceId: string;
     metadata?: any;
   }): Promise<void> {
-    const storedToken = localStorage.getItem('minebench_auth_token');
+    const storedToken = authStorage.getToken();
     if (!storedToken) return;
 
-    const response = await fetch(`${API_BASE_URL}/miner/report`, {
+    await backendJson('/api/miner/report', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${storedToken}`
-      },
-      body: JSON.stringify({
+      token: storedToken,
+      body: {
         hashrate: Number(params.hashrate || 0),
         shares: Number(params.shares || 0),
         timestamp: Date.now(),
         source: params.source,
         referenceId: params.referenceId,
         metadata: params.metadata || {}
-      })
+      }
     });
-
-    if (!response.ok) {
-      let message = `Reward report failed (${response.status})`;
-      try {
-        const payload = await response.json();
-        message = payload?.message || payload?.error || message;
-      } catch {}
-      throw new Error(message);
-    }
   }
 
   async fetchRewardHistory(limit = 30): Promise<RewardHistoryEntry[]> {
-    const storedToken = localStorage.getItem('minebench_auth_token');
+    const storedToken = authStorage.getToken();
     if (!storedToken) return [];
 
-    const response = await fetch(`${API_BASE_URL}/rewards/history?limit=${limit}`, {
-      headers: {
-        'Authorization': `Bearer ${storedToken}`
-      }
-    });
-
-    if (!response.ok) return [];
-    const payload = await response.json();
+    const payload = await backendJson(`/api/rewards/history?limit=${limit}`, { token: storedToken }).catch(() => []);
     return Array.isArray(payload) ? payload : [];
   }
 
@@ -535,11 +472,11 @@ export class SolanaAuthService {
    */
   async verifyConnection(): Promise<boolean> {
     try {
-      // Для Electron flow - перевіряємо наявність збереженого user та signature
-      // @ts-ignore
-      if (window.electron?.ipcRenderer) {
-        const storedUser = localStorage.getItem('minebench_user');
-        const storedSignature = localStorage.getItem('minebench_signature');
+      // Перевіряємо наявність збереженого user та signature
+      const storedUser = localStorage.getItem('minebench_user');
+      const storedSignature = authStorage.getSignature();
+
+      if ((window as any).__TAURI_INTERNALS__) {
         return !!(storedUser && storedSignature);
       }
 
@@ -591,12 +528,6 @@ export class SolanaAuthService {
   ): Promise<void> {
     try {
       // TODO: Надіслати на backend для верифікації та зберігання
-      // POST /api/devices/register
-      // {
-      //   publicKey,
-      //   device,
-      //   signature
-      // }
       console.log('[SolanaAuth] Syncing device with server (TODO)');
     } catch (err) {
       console.error('Failed to sync device with server:', err);

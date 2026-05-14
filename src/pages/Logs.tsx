@@ -4,6 +4,7 @@ import { useMinerStore } from '../store/useMinerStore';
 import { useTheme } from '../contexts/ThemeContext';
 import { cn } from '../lib/utils';
 import { getEnvironmentConfig } from '../config/environment';
+import { nativeApi } from '../lib/native-api';
 
 interface LogEntry {
   time: string;
@@ -22,29 +23,30 @@ export const Logs: React.FC = () => {
   const env = getEnvironmentConfig();
 
   useEffect(() => {
-    const handleMinerLog = (_: any, data: string) => {
-      setMinerLogs(prev => [...prev.slice(-200), data.trim()].filter(Boolean));
+    let unlisten: (() => void) | undefined;
+
+    const setupListener = async () => {
+      if (!(window as any).__TAURI_INTERNALS__) return;
+
+      unlisten = await nativeApi.listen<string>('miner-log', (data) => {
+        setMinerLogs(prev => [...prev.slice(-200), data.trim()].filter(Boolean));
+      });
+
+      // Load logs directory path
+      try {
+        const result = await nativeApi.invoke<any>('get_logs_directory');
+        if (result?.path) {
+          setLogsDir(result.path);
+        }
+      } catch (err) {
+        console.warn('Failed to get logs directory:', err);
+      }
     };
 
-    if (window.electron) {
-      window.electron.onMinerLog(handleMinerLog);
-    }
-
-    // Load logs directory path
-    if (window.electron?.invoke) {
-      window.electron.invoke('get-logs-directory')
-        .then((result: any) => {
-          if (result?.path) {
-            setLogsDir(result.path);
-          }
-        })
-        .catch((err: any) => {
-          console.warn('Failed to get logs directory:', err);
-        });
-    }
+    setupListener();
 
     return () => {
-      // Cleanup if needed
+      if (unlisten) unlisten();
     };
   }, []);
 
@@ -59,8 +61,8 @@ export const Logs: React.FC = () => {
   };
 
   const openLogsFolder = () => {
-    if (logsDir && window.electron?.invoke) {
-      window.electron.invoke('open-folder', logsDir).catch((err: any) => {
+    if (logsDir && (window as any).__TAURI_INTERNALS__) {
+      nativeApi.system.openLogsDirectory().catch((err: any) => {
         console.warn('Failed to open folder:', err);
       });
     }

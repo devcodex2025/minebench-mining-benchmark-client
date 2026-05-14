@@ -7,8 +7,38 @@ import { Play, Square, Cpu, Monitor, Timer, Zap } from '../components/icons';
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip } from 'recharts';
 import { cn, formatHashrate } from '../lib/utils';
 import { getEnvironmentConfig } from '../config/environment';
+import { nativeApi } from '../lib/native-api';
+import { p2poolAPI } from '../services/p2poolAPI';
+
+// Tauri: fetch pool config directly
+const fetchPoolConfig = async () => {
+    try {
+        const env = getEnvironmentConfig();
+        const primaryPool = env.poolStratumHost; // Corrected environment key
+        if (!primaryPool) {
+            throw new Error('Pool configuration not found in environment');
+        }
+        const response = await fetch(`http://${env.poolRpcHost}:${env.poolRpcPort}/json_rpc`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                jsonrpc: '2.0',
+                id: '0',
+                method: 'get_info',
+                params: []
+            })
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        return data.result || null;
+    } catch (err) {
+        console.warn('[Benchmark] Failed to fetch pool config:', err);
+        return null;
+    }
+};
 
 const getErrorMessage = (err: any) => {
+
     if (!err) return 'Unknown error';
     if (typeof err === 'string') return err;
     if (err.message) return err.message;
@@ -41,8 +71,8 @@ const Benchmark = () => {
 
     const [duration, setDuration] = useState<number>(60);
     const [timeLeft, setTimeLeft] = useState<number | null>(null);
-    const [finalResults, setFinalResults] = useState<{avg: number, max: number} | null>(null);
-    const [sysInfo, setSysInfo] = useState<{cpu: string, cores: number, ram: string} | null>(null);
+    const [finalResults, setFinalResults] = useState<{ avg: number, max: number } | null>(null);
+    const [sysInfo, setSysInfo] = useState<{ cpu: string, cores: number, ram: string } | null>(null);
     const [showAuthWarning, setShowAuthWarning] = useState(false);
     const [pendingStart, setPendingStart] = useState(false);
     const env = getEnvironmentConfig();
@@ -59,7 +89,7 @@ const Benchmark = () => {
     const lastBenchmarkRewardReportAtRef = useRef(0);
     const benchmarkRewardSeqRef = useRef(0);
     // Keep local tracks for final calculation to avoid dependency on store sampling rate
-    const localStatsRef = useRef<number[]>([]); 
+    const localStatsRef = useRef<number[]>([]);
     const benchmarkApiStateRef = useRef<{ connectedUrl: string | null; errorLogged: boolean }>({
         connectedUrl: null,
         errorLogged: false
@@ -72,7 +102,7 @@ const Benchmark = () => {
         if (!isSolanaConnected || !user?.publicKey) return;
 
         const syncService = MultiDeviceSyncService.getInstance(user.publicKey);
-        
+
         // Register this device if not already registered
         let deviceId = localStorage.getItem('minebench_device_id');
         if (!deviceId) {
@@ -105,14 +135,14 @@ const Benchmark = () => {
     useEffect(() => {
         const loadSysInfo = async () => {
             try {
-                if (!window.electron?.invoke) return;
-                
-                const cpu = await window.electron.invoke('get-cpu-name');
-                const cores = await window.electron.invoke('get-cpu-cores');
-                const stats = await window.electron.invoke('get-system-stats');
-                
+                if (!(window as any).__TAURI_INTERNALS__) return;
+
+                const cpu = await nativeApi.invoke<string>('get_cpu_name');
+                const cores = await nativeApi.invoke<number>('get_cpu_cores');
+                const stats = await nativeApi.system.getSystemStats();
+
                 // Format RAM to GB
-                const ramGB = stats && stats.ramTotal 
+                const ramGB = stats && stats.ramTotal
                     ? (stats.ramTotal / (1024 * 1024 * 1024)).toFixed(1) + ' GB'
                     : 'N/A';
 
@@ -174,40 +204,44 @@ const Benchmark = () => {
 
     // Listen for miner events
     useEffect(() => {
-        if (!window.electron.on) {
-            console.warn("window.electron.on is not defined. Restart Electron to apply preload changes.");
-            return;
-        }
+        if (!(window as any).__TAURI_INTERNALS__) return;
 
-        const cleanupLog = window.electron.on('miner-log', (msg) => {
-            const message = String(msg || '').trim();
-            console.log(`Miner: ${message}`);
-            if (message) addLog(message);
-        });
-        
-        const cleanupError = window.electron.on('miner-error', (msg) => {
-            console.error(`Miner Error: ${msg}`);
-            addLog(`Error: ${msg}`);
-            // If critical error, stop
-            if (msg.includes('CuDa') || msg.includes('error') || msg.includes('exited')) {
-               setStatus('error');
-            }
-        });
+        let unlistenLog: () => void;
+        let unlistenError: () => void;
+        let unlistenExit: () => void;
 
-        const cleanupExit = window.electron.on('miner-exit', ({ code, signal }) => {
-            console.log(`Miner exited with code ${code}`);
-            if (code !== 0 && status === 'running') {
-                 setStatus('error');
-                 addLog(`Miner exited unexpectedly (Code: ${code})`);
-            } else if (status === 'stopping') {
-                 setStatus('completed');
-            }
-        });
+        const setupListeners = async () => {
+            unlistenLog = await nativeApi.listen<string>('miner-log', (msg) => {
+                const message = String(msg || '').trim();
+                console.log(`Miner: ${message}`);
+                if (message) addLog(message);
+            });
+
+            unlistenError = await nativeApi.listen<string>('miner-error', (msg) => {
+                console.error(`Miner Error: ${msg}`);
+                addLog(`Error: ${msg}`);
+                if (msg.includes('CuDa') || msg.includes('error') || msg.includes('exited')) {
+                    setStatus('error');
+                }
+            });
+
+            unlistenExit = await nativeApi.listen<{ code: number; signal: any }>('miner-exit', ({ code }) => {
+                console.log(`Miner exited with code ${code}`);
+                if (code !== 0 && status === 'running') {
+                    setStatus('error');
+                    addLog(`Miner exited unexpectedly (Code: ${code})`);
+                } else if (status === 'stopping') {
+                    setStatus('completed');
+                }
+            });
+        };
+
+        setupListeners();
 
         return () => {
-            if (cleanupLog) cleanupLog();
-            if (cleanupError) cleanupError();
-            if (cleanupExit) cleanupExit();
+            if (unlistenLog) unlistenLog();
+            if (unlistenError) unlistenError();
+            if (unlistenExit) unlistenExit();
         };
     }, [status, setStatus, addLog]);
 
@@ -239,18 +273,29 @@ const Benchmark = () => {
         setFinalResults(null);
         setTimeLeft(duration);
         setShowAuthWarning(false);
-        
+
+        // Ensure we have the latest config
+        console.log("Invalidating pool config cache...");
+        p2poolAPI.invalidateCache();
+        console.log("Fetching latest pool config...");
         try {
-            const res = await window.electron.invoke("start-benchmark", { 
-                type: deviceType, 
-                wallet, 
+            const config = await fetchPoolConfig();
+            console.log("Pool config fetched successfully:", config);
+        } catch (configErr) {
+            console.error("Failed to fetch pool config:", configErr);
+        }
+
+        try {
+            await nativeApi.miner.startBenchmark({
+                type: deviceType,
+                wallet,
                 worker: workerName,
                 solanaWallet: user?.publicKey // Raw Solana address (no encoding)
             });
-            
+
             setStatus('running');
             addLog(`Benchmark started: ${deviceType.toUpperCase()} | ${duration}s`);
-            
+
             // Start Countdown
             timerRef.current = setInterval(() => {
                 setTimeLeft(prev => {
@@ -281,19 +326,17 @@ const Benchmark = () => {
     };
 
     const handleAuthWarningConnect = async () => {
-        // User chose to connect wallet
-        setShowAuthWarning(false);
-        setPendingStart(false);
-        // Trigger wallet connection (assuming there's an IPC method or similar)
-        try {
-            await window.electron.ipcRenderer.invoke('solana-connect-wallet');
-            // After successful connection, auto-start benchmark
-            await runBenchmark();
-        } catch (err) {
-            console.error('Wallet connection failed:', err);
-            addLog('Wallet connection cancelled');
-        }
-    };
+            setShowAuthWarning(false);
+            setPendingStart(false);
+            try {
+                await SolanaAuthService.getInstance().connectWallet();
+                // After successful connection, auto-start benchmark
+                await runBenchmark();
+            } catch (err) {
+                console.error('Wallet connection failed:', err);
+                addLog('Wallet connection cancelled');
+            }
+        };
 
     const averagePositive = (values: Array<number | null | undefined>) => {
         const positive = values.filter((value): value is number =>
@@ -329,7 +372,7 @@ const Benchmark = () => {
             created_at: new Date().toISOString()
         };
 
-        const result = await window.electron.invoke('submit-benchmark-result', record) as any;
+        const result = await nativeApi.miner.submitBenchmark(record) as any;
         const submittedId = result?.benchmark?.id;
         const submittedBenchmark = { ...record, ...(result?.benchmark || {}) };
         localStorage.setItem('minebench_latest_benchmark', JSON.stringify(submittedBenchmark));
@@ -344,9 +387,9 @@ const Benchmark = () => {
         isBenchmarkPollingRef.current = false;
         if (timerRef.current) clearInterval(timerRef.current);
         if (statsIntervalRef.current) clearInterval(statsIntervalRef.current);
-        
+
         setStatus('stopping');
-        
+
         // Calculate Results
         const storeHistory = useMinerStore.getState().history || [];
         const samples = [
@@ -355,26 +398,26 @@ const Benchmark = () => {
         ].filter((value) => Number.isFinite(value) && value > 0);
         let avg = 0;
         let max = 0;
-        
+
         if (samples.length > 0) {
-             const sum = samples.reduce((a, b) => a + b, 0);
-             avg = sum / samples.length;
-             max = Math.max(...samples);
+            const sum = samples.reduce((a, b) => a + b, 0);
+            avg = sum / samples.length;
+            max = Math.max(...samples);
         } else {
-             const latestHashrate = useMinerStore.getState().currentHashrate;
-             if (latestHashrate > 0) {
-                 avg = latestHashrate;
-                 max = latestHashrate;
-             }
+            const latestHashrate = useMinerStore.getState().currentHashrate;
+            if (latestHashrate > 0) {
+                avg = latestHashrate;
+                max = latestHashrate;
+            }
         }
-        
+
         setFinalResults({ avg, max });
 
         try {
             // Save logs to disk before stopping
             const { logs: storeLogs } = useMinerStore.getState();
-            if (window.electron?.invoke) {
-                await window.electron.invoke('save-miner-logs', {
+            if ((window as any).__TAURI_INTERNALS__) {
+                await nativeApi.invoke('save_miner_logs', {
                     systemLogs: storeLogs,
                     minerLogs: [],
                     sessionType: 'benchmark',
@@ -394,10 +437,9 @@ const Benchmark = () => {
                 console.error('[Benchmark] Submit failed:', err);
                 addLog(`Benchmark finished, but submit failed: ${getErrorMessage(err)}`);
             });
-             
+
             console.log('[Benchmark] Sending to stop-benchmark:', payload);
-            const result = await window.electron.invoke("stop-benchmark", payload);
-            console.log('[Benchmark] stop-benchmark result:', result);
+            await nativeApi.miner.stopBenchmark();
             setStatus('completed');
             addLog(`Benchmark finished. Avg: ${formatHashrate(avg)}`);
         } catch (err: any) {
@@ -466,15 +508,13 @@ const Benchmark = () => {
                     data.hashrate ??
                     0;
 
-                const [tempRes, powerRes] = await Promise.all([
-                    window.electron.invoke('get-cpu-temp'),
-                    window.electron.invoke('get-cpu-power')
-                ]);
+                const tempRes = await nativeApi.invoke<any>('get_cpu_temp');
+                const powerRes = await nativeApi.invoke<any>('get_cpu_power');
 
                 if (tempRes && tempRes.success) temp = tempRes.temp;
                 if (powerRes && powerRes.success) power = powerRes.power;
 
-                window.electron.invoke('report-stats', { temp, power }).catch(() => { });
+                nativeApi.invoke('report_stats', { temp, power }).catch(() => { });
 
                 // Update multi-device sync
                 if (user?.publicKey) {
@@ -490,11 +530,11 @@ const Benchmark = () => {
                     }
                 }
             } else if (data.gpus && data.gpus.length > 0) {
-                const sensorFallback = await window.electron.invoke('get-gpu-sensors').catch(() => null);
+                const sensorFallback = await nativeApi.system.getGpuSensors().catch(() => null);
                 hr = data.gpus[0].hashrate ?? data.gpus[0].hash ?? 0;
                 temp = data.gpus[0].temperature ?? data.gpus[0].temp ?? sensorFallback?.temp ?? null;
                 power = data.gpus[0].power ?? sensorFallback?.power ?? null;
-                window.electron.invoke('report-stats', { temp, power }).catch(() => { });
+                nativeApi.invoke('report_stats', { temp, power }).catch(() => { });
 
                 // Update multi-device sync
                 if (user?.publicKey) {
@@ -535,7 +575,7 @@ const Benchmark = () => {
                             ? 'bg-white border-zinc-200'
                             : 'bg-zinc-900 border-white/5'
                     )}>
-                        <button 
+                        <button
                             onClick={() => status !== 'running' && setDeviceType('cpu')}
                             className={cn(
                                 "px-4 py-2 rounded-md text-sm font-medium flex items-center gap-2 transition-all",
@@ -552,31 +592,31 @@ const Benchmark = () => {
 
             {/* Main Stats Area */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                
+
                 {/* Control Card */}
                 <div className="lg:col-span-1 space-y-4">
                     <div className={cn("border rounded-xl p-6",
-                      theme === 'light'
-                        ? 'bg-white border-zinc-200'
-                        : 'bg-zinc-900/50 border-white/5'
+                        theme === 'light'
+                            ? 'bg-white border-zinc-200'
+                            : 'bg-zinc-900/50 border-white/5'
                     )}>
                         {/* System Info Block */}
                         {sysInfo && (
-                            <div className={cn("mb-6 pb-6 border-b border-dashed", 
+                            <div className={cn("mb-6 pb-6 border-b border-dashed",
                                 theme === 'light' ? 'border-zinc-200' : 'border-white/5'
                             )}>
                                 <div className="space-y-3">
                                     <div className="flex items-start gap-3">
-                                        <div className={cn("p-2 rounded-md", 
+                                        <div className={cn("p-2 rounded-md",
                                             theme === 'light' ? "bg-zinc-100/80" : "bg-white/5"
                                         )}>
                                             <Cpu className={cn("w-4 h-4", theme === 'light' ? "text-zinc-600" : "text-zinc-400")} />
                                         </div>
                                         <div>
-                                            <div className={cn("text-xs font-medium uppercase tracking-wider mb-1", 
+                                            <div className={cn("text-xs font-medium uppercase tracking-wider mb-1",
                                                 theme === 'light' ? "text-zinc-500" : "text-zinc-500"
                                             )}>Processor</div>
-                                            <div className={cn("text-sm font-medium leading-tight", 
+                                            <div className={cn("text-sm font-medium leading-tight",
                                                 theme === 'light' ? "text-zinc-800" : "text-zinc-200"
                                             )}>
                                                 {sysInfo.cpu}
@@ -588,16 +628,16 @@ const Benchmark = () => {
                                     </div>
 
                                     <div className="flex items-start gap-3">
-                                        <div className={cn("p-2 rounded-md", 
+                                        <div className={cn("p-2 rounded-md",
                                             theme === 'light' ? "bg-zinc-100/80" : "bg-white/5"
                                         )}>
                                             <Zap className={cn("w-4 h-4", theme === 'light' ? "text-zinc-600" : "text-zinc-400")} />
                                         </div>
                                         <div>
-                                            <div className={cn("text-xs font-medium uppercase tracking-wider mb-1", 
+                                            <div className={cn("text-xs font-medium uppercase tracking-wider mb-1",
                                                 theme === 'light' ? "text-zinc-500" : "text-zinc-500"
                                             )}>Memory</div>
-                                            <div className={cn("text-sm font-medium", 
+                                            <div className={cn("text-sm font-medium",
                                                 theme === 'light' ? "text-zinc-800" : "text-zinc-200"
                                             )}>
                                                 {sysInfo.ram} RAM
@@ -610,14 +650,14 @@ const Benchmark = () => {
 
                         <div className="flex justify-between items-center mb-6">
                             <span className={cn("text-sm font-medium", theme === 'light' ? 'text-zinc-700' : 'text-zinc-400')}>Session Duration</span>
-                            <select 
+                            <select
                                 value={duration}
                                 onChange={(e) => setDuration(Number(e.target.value))}
                                 disabled={status === 'running'}
                                 className={cn("border rounded px-2 py-1 text-sm outline-none focus:border-emerald-500/50",
-                                  theme === 'light'
-                                    ? 'bg-zinc-100 border-zinc-300 text-zinc-900'
-                                    : 'bg-zinc-950 border-zinc-800 text-zinc-300'
+                                    theme === 'light'
+                                        ? 'bg-zinc-100 border-zinc-300 text-zinc-900'
+                                        : 'bg-zinc-950 border-zinc-800 text-zinc-300'
                                 )}>
                                 <option value={60}>1 Minute</option>
                                 <option value={180}>3 Minutes</option>
@@ -626,17 +666,17 @@ const Benchmark = () => {
                         </div>
 
                         <div className={cn("mb-8 flex flex-col items-center justify-center py-6 border-b border-dashed",
-                          theme === 'light' ? 'border-zinc-200' : 'border-white/5'
+                            theme === 'light' ? 'border-zinc-200' : 'border-white/5'
                         )}>
-                             <div className={cn("text-5xl font-mono font-light tracking-tighter",
-                               theme === 'light' ? 'text-zinc-900' : 'text-white'
-                             )}>
+                            <div className={cn("text-5xl font-mono font-light tracking-tighter",
+                                theme === 'light' ? 'text-zinc-900' : 'text-white'
+                            )}>
                                 {status === 'running' && timeLeft !== null ? timeLeft : duration}
                                 <span className={cn("text-lg ml-1", theme === 'light' ? 'text-zinc-500' : 'text-zinc-600')}> s</span>
-                             </div>
-                             <span className="text-xs text-zinc-500 mt-2 uppercase tracking-widest">
+                            </div>
+                            <span className="text-xs text-zinc-500 mt-2 uppercase tracking-widest">
                                 {status === 'running' ? 'Time Remaining' : 'Duration'}
-                             </span>
+                            </span>
                         </div>
 
                         <button
@@ -644,7 +684,7 @@ const Benchmark = () => {
                             disabled={status === 'stopping' || (!isNodeFullySynced && status !== 'running')}
                             className={cn(
                                 "w-full py-4 rounded-lg font-bold text-sm tracking-wide transition-all transform active:scale-[0.98] cursor-pointer disabled:cursor-not-allowed",
-                                status === 'running' 
+                                status === 'running'
                                     ? "bg-red-500/10 text-red-500 border border-red-500/20 hover:bg-red-500/20"
                                     : (theme === 'light'
                                         ? "bg-emerald-600 text-white hover:bg-emerald-500 hover:shadow-[0_0_20px_rgba(16,185,129,0.25)]"
@@ -682,7 +722,7 @@ const Benchmark = () => {
                                     <span className="font-semibold">Benchmark Running</span>
                                 </div>
                                 <p className="text-xs opacity-75">
-                                    {currentHashrate > 0 
+                                    {currentHashrate > 0
                                         ? `Mining at ${formatHashrate(currentHashrate)} - Check chart for updates`
                                         : `Waiting for miner to start... (checking port ${deviceType === 'cpu' ? '4077' : '4067'})`
                                     }
@@ -745,27 +785,27 @@ const Benchmark = () => {
 
                 {/* Chart Area */}
                 <div className={cn("lg:col-span-2 border rounded-xl p-6 flex flex-col",
-                  theme === 'light'
-                    ? 'bg-white border-zinc-200'
-                    : 'bg-zinc-900/50 border-white/5'
+                    theme === 'light'
+                        ? 'bg-white border-zinc-200'
+                        : 'bg-zinc-900/50 border-white/5'
                 )}>
-                     <h3 className={cn("text-sm font-medium mb-6 flex justify-between",
-                       theme === 'light' ? 'text-zinc-700' : 'text-zinc-400'
-                     )}>
+                    <h3 className={cn("text-sm font-medium mb-6 flex justify-between",
+                        theme === 'light' ? 'text-zinc-700' : 'text-zinc-400'
+                    )}>
                         <span>Real-time Hashrate</span>
                         <span className={cn("font-mono", theme === 'light' ? 'text-emerald-600' : 'text-emerald-400')}>{formatHashrate(currentHashrate)}</span>
-                     </h3>
-                     
-                     <div className="flex-1 w-full min-h-[300px]">
+                    </h3>
+
+                    <div className="flex-1 w-full min-h-[300px]">
                         <ResponsiveContainer width="100%" height="100%">
                             <AreaChart data={history}>
                                 <defs>
                                     <linearGradient id="colorHr" x1="0" y1="0" x2="0" y2="1">
-                                        <stop offset="5%" stopColor="#10b981" stopOpacity={0.3}/>
-                                        <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
+                                        <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
+                                        <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
                                     </linearGradient>
                                 </defs>
-                                <Tooltip 
+                                <Tooltip
                                     contentStyle={{ backgroundColor: '#09090b', borderColor: '#27272a', borderRadius: '8px' }}
                                     itemStyle={{ color: '#10b981', fontFamily: 'monospace' }}
                                     labelStyle={{ color: '#71717a', fontSize: '12px' }}
@@ -773,18 +813,18 @@ const Benchmark = () => {
                                 />
                                 <XAxis dataKey="time" hide />
                                 <YAxis hide domain={['auto', 'auto']} />
-                                <Area 
-                                    type="monotone" 
-                                    dataKey="hashrate" 
-                                    stroke="#10b981" 
-                                    fillOpacity={1} 
-                                    fill="url(#colorHr)" 
+                                <Area
+                                    type="monotone"
+                                    dataKey="hashrate"
+                                    stroke="#10b981"
+                                    fillOpacity={1}
+                                    fill="url(#colorHr)"
                                     strokeWidth={2}
                                     animationDuration={500}
                                 />
                             </AreaChart>
                         </ResponsiveContainer>
-                     </div>
+                    </div>
                 </div>
             </div>
 
@@ -822,10 +862,10 @@ const Benchmark = () => {
                             <div className="text-2xl font-mono text-white mt-1">{deviceType === 'cpu' ? 'RandomX' : 'XMR-GPU'}</div>
                         </div>
                         <div>
-                             <div className="text-xs text-emerald-500/60 uppercase tracking-widest">Reported Shares</div>
-                             <div className="text-2xl font-mono text-white mt-1">
+                            <div className="text-xs text-emerald-500/60 uppercase tracking-widest">Reported Shares</div>
+                            <div className="text-2xl font-mono text-white mt-1">
                                 {localStatsRef.current.length.toLocaleString()}
-                             </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -853,7 +893,7 @@ const Benchmark = () => {
                         </div>
 
                         <p className={cn("mb-6 text-sm leading-relaxed", theme === 'light' ? 'text-zinc-600' : 'text-zinc-300')}>
-                            Benchmarks run without wallet authentication will not be counted for reward calculations. 
+                            Benchmarks run without wallet authentication will not be counted for reward calculations.
                             Would you like to connect your Solana wallet now?
                         </p>
 

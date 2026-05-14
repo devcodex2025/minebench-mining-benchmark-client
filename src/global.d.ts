@@ -1,47 +1,43 @@
 declare module "recharts";
 
-interface DisplayStatus {
-  platform: string;
-  isLinux: boolean;
-  hasDisplay: boolean;
-  displayWarnings: string[];
-  displayInfo?: string;
-  isRunningWithSudo?: boolean;
-}
-
-interface RuntimePoolEndpoint {
-  stratumHost: string;
-  rpcHost: string;
-  stratumPort: number;
-  rpcPort: number;
-}
-
-interface RuntimePoolConfig {
-  source: 'backend-runtime' | 'local-fallback';
-  primary: RuntimePoolEndpoint;
-  backup: RuntimePoolEndpoint | null;
-}
-
 // Add Three.js JSX types
 import { ThreeElements } from '@react-three/fiber'
 
+/**
+ * Native API for Tauri v2
+ */
+export interface NativeApi {
+  invoke<T>(command: string, args?: Record<string, any>): Promise<T>;
+  listen<T>(event: string, handler: (payload: T) => void): Promise<() => void>;
+  openExternal(url: string): Promise<void>;
+  system: {
+    getCpuInfo(): Promise<{ name: string; cores: number }>;
+    getSystemStats(): Promise<any>;
+    getGpuSensors(): Promise<any>;
+    getAutoStart(): Promise<boolean>;
+    setAutoStart(enabled: boolean): Promise<void>;
+    getProcessStats(): Promise<any>;
+    getDisplayStatus(): Promise<any>;
+    openLogsDirectory(): Promise<void>;
+  };
+  miner: {
+    startMining(config: any): Promise<void>;
+    stopMining(): Promise<void>;
+    startBenchmark(config: any): Promise<void>;
+    stopBenchmark(): Promise<void>;
+    getLatestBenchmark(deviceType: string): Promise<any>;
+    submitBenchmark(record: any): Promise<any>;
+    saveSettings(settings: any): Promise<void>;
+    loadSettings(): Promise<{ success: boolean; settings: any }>;
+  };
+  pool: {
+    getSyncStatus(host: string, port: number): Promise<any>;
+    rpcCall(method: string, params: any, host: string, port: number): Promise<any>;
+    getRuntimeConfig(): Promise<any>;
+  };
+}
+
 declare global {
-  interface Window {
-    electron: {
-      invoke: (channel: string, ...args: any[]) => Promise<any>;
-      on: (channel: string, func: (...args: any[]) => void) => () => void;
-      onMinerLog: (callback: (event: any, data: string) => void) => () => void;
-      getDisplayStatus: () => Promise<DisplayStatus>;
-      logToFile: (level: string, message: string, source?: string) => void;
-      openExternal: (url: string) => Promise<{ success: boolean; error?: string }>;
-      ipcRenderer: {
-        invoke: (channel: string, ...args: any[]) => Promise<any>;
-        on: (channel: string, func: (...args: any[]) => void) => () => void;
-      };
-      getRuntimePoolConfig?: () => Promise<RuntimePoolConfig>;
-    };
-  }
-  
   namespace JSX {
     interface IntrinsicElements extends ThreeElements {}
   }

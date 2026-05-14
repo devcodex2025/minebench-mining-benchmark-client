@@ -8,13 +8,17 @@ pub struct MinerState {
     pub child: Arc<Mutex<Option<Child>>>,
 }
 
+fn lock_child(child: &Mutex<Option<Child>>) -> std::sync::MutexGuard<'_, Option<Child>> {
+    child.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub async fn spawn_miner(
     app: AppHandle,
     miner_path: String,
     args: Vec<String>,
     miner_state: tauri::State<'_, MinerState>,
 ) -> Result<(), String> {
-    let mut lock = miner_state.child.lock().unwrap();
+    let mut lock = lock_child(&miner_state.child);
     if lock.is_some() {
         return Err("Miner is already running".to_string());
     }
@@ -26,28 +30,16 @@ pub async fn spawn_miner(
         return Err(message);
     }
 
-    let mut command = Command::new(&miner_path);
-    command
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    let mut cmd = Command::new(&miner_path);
+    cmd.args(&args);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn miner process: {}", e))?;
 
-    if let Some(parent) = path.parent() {
-        command.current_dir(parent);
-    }
-
-    let _ = app.emit("miner-log", format!("Starting miner: {} {}", miner_path, args.join(" ")));
-
-    let mut child = command
-        .spawn()
-        .map_err(|e| {
-            let message = format!("Failed to spawn miner '{}': {}", miner_path, e);
-            let _ = app.emit("miner-error", message.clone());
-            message
-        })?;
-
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
+    let stdout = child.stdout.take().ok_or_else(|| "Failed to capture miner stdout".to_string())?;
+    let stderr = child.stderr.take().ok_or_else(|| "Failed to capture miner stderr".to_string())?;
 
     let app_handle = app.clone();
     tokio::spawn(async move {
@@ -65,31 +57,64 @@ pub async fn spawn_miner(
         }
     });
 
-    let _app_handle_exit = app.clone();
-    let _miner_state_clone = miner_state.child.clone();
+    let app_handle_exit = app.clone();
+    let miner_state_clone = miner_state.child.clone();
 
-    
-    // We can't easily wait on the child if it's in the Mutex and we want to kill it.
-    // However, tokio's Child has `wait()` which takes `&mut self`.
-    // We can store it as `Option<Child>` and then `lock().take()` to kill it.
-    
     *lock = Some(child);
-    
-    // To handle exit, we'll need a separate monitoring task that doesn't hold the lock forever
+    drop(lock); // Release the lock before spawning the monitoring task
+
+    // Monitor the child process and clear state when it exits
     tokio::spawn(async move {
-       // This is tricky with Mutex.
-       // For now, let's just let the user stop it manually or handle exit via some other way.
+        // Give the process references to stdout/stderr tasks time to start
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        loop {
+            let is_running = {
+                let lock = lock_child(&miner_state_clone);
+                lock.is_some()
+            };
+
+            if !is_running {
+                break;
+            }
+
+            // Try to wait on the child with a timeout
+            let should_clear = {
+                let mut lock = lock_child(&miner_state_clone);
+                if let Some(child) = lock.as_mut() {
+                    // Non-blocking check if process has exited
+                    match child.try_wait() {
+                        Ok(Some(_status)) => true,  // Process exited
+                        Ok(None) => false,           // Process still running
+                        Err(_) => true,              // Error, assume exited
+                    }
+                } else {
+                    false
+                }
+            };
+
+            if should_clear {
+                let mut lock = lock_child(&miner_state_clone);
+                lock.take();
+                let _ = app_handle_exit.emit("miner-exit", "Miner process has exited");
+                break;
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        }
     });
 
     Ok(())
 }
 
 pub fn stop_miner(miner_state: tauri::State<'_, MinerState>) -> Result<(), String> {
-    let mut lock = miner_state.child.lock().unwrap();
+    let mut lock = lock_child(&miner_state.child);
     if let Some(mut child) = lock.take() {
         let _ = child.start_kill();
-        Ok(())
-    } else {
-        Err("Miner is not running".to_string())
     }
+
+    Ok(())
 }
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;

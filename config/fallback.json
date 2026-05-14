@@ -6,11 +6,11 @@
   "poolConfigAllowlist": [
     "xmr.minebench.cloud",
     "xmr2.minebench.cloud",
-    "152.53.15.22"
+    "143.42.22.242"
   ],
   "defaults": {
     "primaryPoolHost": "xmr.minebench.cloud",
-    "primaryRpcHost": "152.53.15.22",
+    "primaryRpcHost": "143.42.22.242",
     "backupPoolHost": "xmr2.minebench.cloud",
     "backupRpcHost": "xmr2.minebench.cloud",
     "primaryHost": "xmr.minebench.cloud",
