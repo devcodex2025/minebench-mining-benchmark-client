@@ -10,6 +10,46 @@ import { nativeApi } from '../lib/native-api';
 import { authStorage } from '../lib/auth-storage';
 import { BackendApiError, backendJson } from '../lib/backend-api';
 // ... (interfaces remain same)
+
+const AUTH_MESSAGE_PREFIX = 'MineBench Authentication Hook: ';
+const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+
+const buildAuthMessage = (publicKey: string) => `${AUTH_MESSAGE_PREFIX}${publicKey}`;
+
+const getSignatureBytes = (signature: any): Uint8Array => {
+  const raw = signature?.signature ?? signature;
+  if (raw instanceof Uint8Array) return raw;
+  if (Array.isArray(raw)) return new Uint8Array(raw);
+  throw new Error('Wallet returned unsupported signature format');
+};
+
+const encodeBase58 = (bytes: Uint8Array): string => {
+  const digits = [0];
+
+  for (const byte of bytes) {
+    let carry = byte;
+    for (let i = 0; i < digits.length; i++) {
+      carry += digits[i] << 8;
+      digits[i] = carry % 58;
+      carry = Math.floor(carry / 58);
+    }
+    while (carry > 0) {
+      digits.push(carry % 58);
+      carry = Math.floor(carry / 58);
+    }
+  }
+
+  let output = '';
+  for (const byte of bytes) {
+    if (byte !== 0) break;
+    output += BASE58_ALPHABET[0];
+  }
+  for (let i = digits.length - 1; i >= 0; i--) {
+    output += BASE58_ALPHABET[digits[i]];
+  }
+  return output;
+};
+
 export interface SolanaUser {
   publicKey: string;
   displayName?: string;
@@ -172,27 +212,18 @@ export class SolanaAuthService {
           isVerified: true
         };
 
-        // Store user
+        authStorage.setSignature(result.signature);
+        await this.login(result.publicKey, result.signature, result.message || buildAuthMessage(result.publicKey));
+
+        // Store user after backend auth succeeds so reward/report calls have a JWT.
         useSolanaAuth.getState().setUser(user);
         localStorage.setItem('minebench_user', JSON.stringify(user));
-        authStorage.setSignature(result.signature);
 
         // Sync premium status to MinerStore
         const { setIsPremium, setPremiumXmrWallet } = useMinerStore.getState();
         setIsPremium(!!result.isPremium);
         if (result.premiumXmrWallet) {
           setPremiumXmrWallet(result.premiumXmrWallet);
-        }
-
-        // Standard message used for signing (keep in sync with backend logic)
-        const message = "MineBench Authentication Hook: " + result.publicKey;
-
-        // Exchange for JWT
-        try {
-          await this.login(result.publicKey, result.signature, message);
-        } catch (e) {
-          console.error('[SolanaAuth] Login failed:', e);
-          // Non-fatal, just means backend-synced features won't work
         }
 
         console.log('[SolanaAuth] User authenticated successfully');
@@ -212,6 +243,15 @@ export class SolanaAuthService {
       // Connect
       await wallet.connect();
       const publicKey = wallet.publicKey.toString();
+      if (!wallet.signMessage) {
+        throw new Error('Wallet does not support message signing');
+      }
+
+      const message = buildAuthMessage(publicKey);
+      const signedMessage = await wallet.signMessage(new TextEncoder().encode(message), 'utf8');
+      const signature = encodeBase58(getSignatureBytes(signedMessage));
+      await this.login(publicKey, signature, message);
+      authStorage.setSignature(signature);
 
       const user: SolanaUser = {
         publicKey,
