@@ -79,6 +79,11 @@ const toBool = (value: string | undefined, defaultValue: boolean): boolean => {
   return defaultValue;
 };
 
+const normalizeApiBaseUrl = (value: string | undefined, fallback: string): string => {
+  const base = (value || fallback).trim().replace(/\/+$/, '');
+  return base.endsWith('/api/stats') ? base.slice(0, -'/stats'.length) : base;
+};
+
 const fallbackDefaults = (fallbackConfig as any)?.defaults || {};
 const primaryPoolHostFallback = fallbackDefaults.primaryPoolHost || fallbackDefaults.primaryHost || 'xmr.minebench.cloud';
 const backupPoolHostFallback = fallbackDefaults.backupPoolHost || fallbackDefaults.backupHost || 'xmr2.minebench.cloud';
@@ -100,7 +105,7 @@ const developmentConfig: EnvironmentConfig = {
   syncServiceUrl: 'ws://localhost:3000/sync',
   solanaRpcUrl: 'https://api.devnet.solana.com',
   bmtTokenMint: (import.meta.env.VITE_BMT_TOKEN_MINT as string) || '67ipDsgK6D7bqTW89H8T1KTxUvVuaFy92GX7Q2XFVdev',
-  poolApiUrl: 'http://localhost:8080/api',
+  poolApiUrl: 'http://localhost:8080/api/pool/stats',
   poolStratumHost: (import.meta.env.VITE_PRIMARY_POOL_HOST as string) || primaryPoolHostFallback,
   poolStratumPort: Number(import.meta.env.VITE_PRIMARY_STRATUM_PORT) || fallbackDefaults.stratumPort || 3333,
   poolStratumUrl: `${(import.meta.env.VITE_PRIMARY_POOL_HOST as string) || primaryPoolHostFallback}:${import.meta.env.VITE_PRIMARY_STRATUM_PORT || fallbackDefaults.stratumPort || 3333}`,
@@ -137,13 +142,13 @@ const productionConfig: EnvironmentConfig = {
   // Production cloud endpoints
   walletAuthUrl: 'https://minebench.cloud/auth',
   // All direct backend API calls should go to backend.minebench.cloud
-  apiBaseUrl: (import.meta as any).env.VITE_API_BASE_URL || 'https://backend.minebench.cloud/api',
+  apiBaseUrl: normalizeApiBaseUrl((import.meta as any).env.VITE_API_BASE_URL, 'https://backend.minebench.cloud/api'),
   backendUrl: (import.meta as any).env.VITE_BACKEND_URL || 'https://backend.minebench.cloud',
   walletServiceUrl: 'https://minebench.cloud/wallet',
   syncServiceUrl: 'wss://minebench.cloud/sync',
   solanaRpcUrl: 'https://api.mainnet-beta.solana.com',
   bmtTokenMint: (import.meta.env.VITE_BMT_TOKEN_MINT as string) || '67ipDsgK6D7bqTW89H8T1KTxUvVuaFy92GX7Q2XFVdev',
-  poolApiUrl: 'https://minebench.cloud/api/pool',
+  poolApiUrl: 'https://backend.minebench.cloud/api/pool/stats',
   poolStratumHost: (import.meta.env.VITE_PRIMARY_POOL_HOST as string) || primaryPoolHostFallback,
   poolStratumPort: Number(import.meta.env.VITE_PRIMARY_STRATUM_PORT) || fallbackDefaults.stratumPort || 3333,
   poolStratumUrl: `${(import.meta.env.VITE_PRIMARY_POOL_HOST as string) || primaryPoolHostFallback}:${import.meta.env.VITE_PRIMARY_STRATUM_PORT || fallbackDefaults.stratumPort || 3333}`,

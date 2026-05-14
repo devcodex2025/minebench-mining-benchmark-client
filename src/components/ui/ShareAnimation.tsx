@@ -3,6 +3,7 @@ import { cn } from '../../lib/utils';
 
 interface ASCIIAnimationProps {
     onComplete?: () => void;
+    onClose?: () => void;
     theme: string;
 }
 
@@ -17,7 +18,7 @@ const SHARE_ASCII = [
     "         + SHARE FOUND +             "
 ];
 
-export const ShareAnimation: React.FC<ASCIIAnimationProps> = ({ onComplete, theme }) => {
+export const ShareAnimation: React.FC<ASCIIAnimationProps> = ({ onComplete, onClose, theme }) => {
     const [visibleLines, setVisibleLines] = useState<number>(0);
     const [opacity, setOpacity] = useState(1);
 
@@ -58,11 +59,25 @@ export const ShareAnimation: React.FC<ASCIIAnimationProps> = ({ onComplete, them
             )}
         >
             <div className={cn(
-                "p-8 rounded-2xl border backdrop-blur-md shadow-2xl scale-110",
+                "relative p-8 rounded-2xl border backdrop-blur-md shadow-2xl scale-110 pointer-events-auto",
                 theme === 'light' 
                     ? "bg-white/80 border-emerald-200 text-emerald-600 shadow-emerald-100" 
                     : "bg-zinc-950/80 border-emerald-500/30 text-emerald-400 shadow-emerald-950/50"
             )}>
+                <button
+                    type="button"
+                    onClick={onClose}
+                    className={cn(
+                        "absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded text-lg leading-none transition-colors",
+                        theme === 'light'
+                            ? "text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900"
+                            : "text-zinc-500 hover:bg-white/10 hover:text-white"
+                    )}
+                    aria-label="Close share notification"
+                    title="Close"
+                >
+                    x
+                </button>
                 <pre className="font-mono text-[10px] sm:text-xs leading-tight">
                     {SHARE_ASCII.map((line, i) => (
                         <div 

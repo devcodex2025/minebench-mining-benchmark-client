@@ -4,10 +4,11 @@ import { useTheme } from '../contexts/ThemeContext';
 import { cn } from '../lib/utils';
 import { useMinerStore } from '../store/useMinerStore';
 import { useEnvironment } from '../hooks/useEnvironment';
+import { nativeApi } from '../lib/native-api';
 
 // Version from build-time define
 declare const __APP_VERSION__: string;
-const APP_VERSION = __APP_VERSION__ || '0.5.3';
+const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '0.0.0';
 const LATEST_VERSION = APP_VERSION;
 
 export const Settings = () => {
@@ -18,19 +19,21 @@ export const Settings = () => {
   const [autoStart, setAutoStart] = useState(false);
   const [autoStartSupported, setAutoStartSupported] = useState(true);
   const [autoStartLoading, setAutoStartLoading] = useState(false);
-  const autoStartDisabled = autoStartLoading || !autoStartSupported || !window?.electron?.invoke;
+  const isNative = (window as any).__TAURI_INTERNALS__;
+  const autoStartDisabled = autoStartLoading || !autoStartSupported || !isNative;
+
   const openExternal = useCallback(async (url: string) => {
     try {
-      if (window.electron?.openExternal) {
-        const res = await window.electron.openExternal(url);
-        if (res?.success === false) throw new Error(res?.error || 'openExternal failed');
+      if (isNative) {
+        await nativeApi.openExternal(url);
         return;
       }
     } catch (err) {
       console.warn('[Settings] openExternal failed, falling back to window.open:', err);
     }
     window.open(url, '_blank', 'noopener,noreferrer');
-  }, []);
+  }, [isNative]);
+
   const cardClass = cn(
     'rounded-lg p-6 space-y-4',
     theme === 'light'
@@ -68,35 +71,27 @@ export const Settings = () => {
   };
 
   const refreshAutoStart = useCallback(async () => {
-    if (!window.electron?.invoke) return;
+    if (!isNative) return;
     setAutoStartLoading(true);
     try {
-      const res = await window.electron.invoke('get-auto-start');
-      setAutoStart(!!res?.enabled);
-      setAutoStartSupported(res?.supported !== false);
+      const enabled = await nativeApi.system.getAutoStart();
+      setAutoStart(!!enabled);
+      setAutoStartSupported(true);
     } catch (err) {
       console.error('get-auto-start failed', err);
       setAutoStartSupported(false);
     } finally {
       setAutoStartLoading(false);
     }
-  }, []);
+  }, [isNative]);
 
   const toggleAutoStart = async () => {
-    if (!window.electron?.invoke || autoStartLoading) return;
+    if (!isNative || autoStartLoading) return;
     const next = !autoStart;
     setAutoStart(next);
     setAutoStartLoading(true);
     try {
-      const res = await window.electron.invoke('set-auto-start', next);
-      if (res?.supported === false || res?.success === false) {
-        setAutoStartSupported(false);
-        setAutoStart(!next);
-        return;
-      }
-      if (typeof res?.enabled === 'boolean') {
-        setAutoStart(res.enabled);
-      }
+      await nativeApi.system.setAutoStart(next);
       setAutoStartSupported(true);
     } catch (err) {
       console.error('set-auto-start failed', err);
@@ -261,6 +256,7 @@ const validateXmrWallet = (addr: string) => {
 };
 
 const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
+  const isNative = (window as any).__TAURI_INTERNALS__;
   const env = useEnvironment();
   const wallet = useMinerStore((s) => s.wallet);
   const poolUrl = useMinerStore((s) => s.poolUrl);
@@ -279,12 +275,12 @@ const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
   const validation = useMemo(() => validateXmrWallet(localWallet), [localWallet]);
 
   const openExternal = useCallback(async (url: string) => {
-    if (window.electron?.openExternal) {
-      await window.electron.openExternal(url);
+    if (isNative) {
+      await nativeApi.openExternal(url);
     } else {
-      window.open(url, '_blank');
+      window.open(url, '_blank', 'noopener,noreferrer');
     }
-  }, []);
+  }, [isNative]);
 
   // Local label style
   const labelClass = cn(

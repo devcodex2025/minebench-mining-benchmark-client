@@ -14,6 +14,9 @@ import { Activity, Coins, TrendingUp, AlertTriangle, X } from './components/icon
 import { getEnvironmentConfig } from './config/environment';
 import { useSolanaAuth, SolanaAuthService } from './services/solanaAuth';
 import { ClaimRewardsModal } from './components/ClaimRewardsModal';
+import { nativeApi } from './lib/native-api';
+import { p2poolAPI } from './services/p2poolAPI';
+import { backendJson } from './lib/backend-api';
 
 const PoolMonitor = () => {
     const updatePoolStatus = useMinerStore(state => state.updatePoolStatus);
@@ -24,14 +27,16 @@ const PoolMonitor = () => {
     const manualPoolSelection = useMinerStore(state => state.manualPoolSelection);
     const dynamicRpcHost = useMinerStore(state => state.rpcHost);
     const dynamicRpcPort = useMinerStore(state => state.rpcPort);
+    const backendPrimaryPoolUrl = useMinerStore(state => state.backendPrimaryPoolUrl);
+    const backendBackupPoolUrl = useMinerStore(state => state.backendBackupPoolUrl);
     
     const env = getEnvironmentConfig();
-    const primaryPoolUrl = env.poolStratumUrl;
-    const reservePoolUrl = env.enableBackupPool ? env.poolStratumUrlBackup : '';
+    const primaryPoolUrl = backendPrimaryPoolUrl || env.poolStratumUrl;
+    const reservePoolUrl = backendBackupPoolUrl || (env.enableBackupPool ? env.poolStratumUrlBackup : '');
 
     useEffect(() => {
         const checkSync = async () => {
-            if (!window.electron?.invoke) return;
+            if (!(window as any).__TAURI_INTERNALS__) return;
 
             // Check primary and backup CPU pools - GPU pool not deployed yet
             const poolIds = env.enableBackupPool ? ['cpu', 'cpu-backup'] : ['cpu'];
@@ -41,7 +46,7 @@ const PoolMonitor = () => {
                     const host = id === 'cpu' ? dynamicRpcHost : env.poolRpcHostBackup;
                     const port = id === 'cpu' ? dynamicRpcPort : env.poolRpcPortBackup;
                     
-                    const data = await window.electron.invoke('get-pool-sync', host, port);
+                    const data = await nativeApi.pool.getSyncStatus(host, port);
                     
                     if (data) {
                         const height = data.height || 0;
@@ -59,7 +64,7 @@ const PoolMonitor = () => {
                         });
                     }
                 } catch (e) {
-                    console.error(`[PoolMonitor] IPC Error for ${id}:`, e);
+                    console.error(`[PoolMonitor] Native Error for ${id}:`, e);
                     updatePoolStatus(id, {
                         connected: false,
                         message: "Connection Failed"
@@ -82,19 +87,11 @@ const PoolMonitor = () => {
                     setPoolUrl(primaryPoolUrl);
                     addLog('Auto-switched to CPU Primary (fully synced).');
                 }
-            } else if (manualPoolSelection) {
-                // Check if manually selected pool is down/unhealthy and warn user
-                if (!primaryPool?.connected && poolUrl === primaryPoolUrl) {
-                    // This is just a monitor, maybe add a warning log or UI indicator
-                }
             }
         };
 
         const fetchPoolStats = async () => {
-            if (!window.electron?.invoke) return;
-
             try {
-                const { p2poolAPI } = await import('./services/p2poolAPI');
                 const stats = await p2poolAPI.getPoolStats();
                 if (stats) {
                     setGlobalPoolStats(stats.poolHashrate || 0, stats.miners || 0, stats.networkHashrate || 0);
@@ -125,8 +122,8 @@ const DisplayWarningBanner = () => {
     const [dismissed, setDismissed] = useState(false);
 
     useEffect(() => {
-        if (window.electron?.getDisplayStatus) {
-            window.electron.getDisplayStatus().then(status => {
+        if ((window as any).__TAURI_INTERNALS__) {
+            nativeApi.system.getDisplayStatus().then(status => {
                 setDisplayStatus(status);
             }).catch(err => {
                 console.error('Failed to get display status:', err);
@@ -219,12 +216,7 @@ const Dashboard = () => {
     useEffect(() => {
         const fetchRates = async () => {
             try {
-                const ratesUrl = window.electron?.invoke
-                    ? 'https://backend.minebench.cloud/api/rates/current'
-                    : '/api/rates/current';
-                const res = await fetch(ratesUrl, { signal: AbortSignal.timeout(6000) });
-                if (!res.ok) throw new Error(`rates/current HTTP ${res.status}`);
-                const data = await res.json();
+                const data = await backendJson('/api/rates/current');
 
                 const nextXmrUsd = Number(data?.xmr_usd || 0);
                 const nextBmtUsd = Number(data?.bmt_usd || 0);
@@ -292,10 +284,24 @@ const Dashboard = () => {
         }
 
         const fetchLatestBenchmark = async () => {
-            if (!window.electron?.invoke) return;
-
             try {
-                const result = await window.electron.invoke('get-latest-benchmark', deviceType);
+                const isNative = (window as any).__TAURI_INTERNALS__;
+                let result = isNative ? await nativeApi.miner.getLatestBenchmark(deviceType) : null;
+
+                if (!result && !isNative) {
+                    const res = await fetch('https://minebench.cloud/api/benchmarks?limit=200', { signal: AbortSignal.timeout(8000) });
+                    if (res.ok) {
+                        const items = await res.json();
+                        result = Array.isArray(items)
+                            ? items.find((item) => {
+                                const avgHashrate = Number(item?.avg_hashrate || 0);
+                                const itemDeviceType = String(item?.device_type || '').toLowerCase();
+                                return avgHashrate > 0 && (!itemDeviceType || itemDeviceType === deviceType.toLowerCase());
+                            })
+                            : null;
+                    }
+                }
+
                 if (cancelled) return;
 
                 if (!applyEstimatedBenchmark(result) && !hasCachedBenchmark) {
@@ -567,7 +573,8 @@ const Placeholder = ({ name }: { name: string }) => <div className="text-2xl fon
 const App: React.FC = () => {
     // Fetch public configuration on mount
     useEffect(() => {
-        if (!window.electron?.invoke) return;
+        const isNative = (window as any).__TAURI_INTERNALS__;
+        if (!isNative) return;
         const { fetchPublicConfig } = useMinerStore.getState();
         fetchPublicConfig();
     }, []);

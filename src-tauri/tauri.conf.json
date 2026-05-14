@@ -1,13 +1,13 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "MineBench Client",
-  "version": "0.7.6",
+  "version": "0.8.5",
   "identifier": "cloud.minebench.client",
   "build": {
     "frontendDist": "../web-dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeBuildCommand": "npm run build:prod"
   },
   "app": {
     "windows": [
@@ -18,11 +18,12 @@
         "resizable": true,
         "fullscreen": false,
         "decorations": false,
-        "transparent": true
+        "transparent": true,
+        "devtools": false
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost http://127.0.0.1:* http://localhost:* https://minebench.cloud https://backend.minebench.cloud https://api.mainnet-beta.solana.com; img-src 'self' asset: http://asset.localhost data: blob:; media-src 'self' asset: http://asset.localhost blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:"
     }
   },
   "bundle": {
@@ -36,7 +37,7 @@
       "icons/icon.ico"
     ],
     "resources": [
-        "../Miner/**/*"
+      "../Miner/**/*"
     ],
     "android": {
       "debugApplicationIdSuffix": ".debug"

@@ -1,7 +1,7 @@
 {
   "name": "MineBench-Client",
   "private": true,
-  "version": "0.8",
+  "version": "0.8.5",
   "productName": "MineBench Client",
   "description": "Mining benchmark desktop client with native Wayland support.",
   "author": "MineBench Team",
@@ -10,6 +10,10 @@
     "dev": "vite",
     "dev:local": "vite --mode development",
     "dev:prod": "vite --mode production",
+    "sync:version": "powershell -ExecutionPolicy Bypass -File ./scripts/update-tauri-version.ps1",
+    "prebuild": "npm run sync:version",
+    "pretauri:dev": "npm run sync:version",
+    "pretauri:build": "npm run sync:version",
     "clean": "rimraf dist web-dist",
     "build": "vite build",
     "build:dev": "vite build --mode development",
@@ -17,7 +21,7 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "dist:win": "npm run build:prod && tauri build --target x86_64-pc-windows-msvc",
+    "dist:win": "npm run tauri:build -- --target x86_64-pc-windows-msvc",
     "dist:mac": "npm run build:prod && tauri build --target universal-apple-darwin",
     "dist:linux": "npm run build:prod && tauri build --target x86_64-unknown-linux-gnu",
     "release:patch": "npm version patch && git push && git push --tags",
@@ -33,10 +37,6 @@
     "@supabase/supabase-js": "^2.76.1",
     "@tauri-apps/api": "^2.11.0",
     "@tauri-apps/plugin-autostart": "^2.5.1",
-    "@tauri-apps/plugin-fs": "^2.5.1",
-    "@tauri-apps/plugin-os": "^2.3.2",
-    "@tauri-apps/plugin-process": "^2.3.1",
-    "@tauri-apps/plugin-shell": "^2.3.5",
     "clsx": "^2.1.1",
     "dotenv": "^17.4.2",
     "dotenv-expand": "^13.0.0",
@@ -45,7 +45,6 @@
     "react-is": "^18.3.1",
     "react-router-dom": "^6.28.0",
     "recharts": "^3.2.1",
-    "systeminformation": "^5.27.11",
     "tailwind-merge": "^3.4.0",
     "three": "^0.161.0",
     "zustand": "^5.0.10"
@@ -54,7 +53,7 @@
     "@eslint/js": "^9.36.0",
     "@tailwindcss/postcss": "^4.1.18",
     "@tauri-apps/cli": "^2.11.1",
-    "@types/node": "^24.6.1",
+    "@types/node": "^24.12.3",
     "@types/react": "^19.1.16",
     "@types/react-dom": "^19.1.9",
     "@types/three": "^0.165.0",
@@ -78,5 +77,8 @@
     "provider": "github",
     "owner": "devcodex2025",
     "repo": "MineBench-Client"
+  },
+  "overrides": {
+    "bn.js": "5.2.3"
   }
 }

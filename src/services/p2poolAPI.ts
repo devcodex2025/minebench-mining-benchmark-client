@@ -1,10 +1,13 @@
 import { getEnvironmentConfig } from '../config/environment';
+import { nativeApi } from '../lib/native-api';
+import { backendJson } from '../lib/backend-api';
 
 /**
  * P2Pool API Service
  * Отримує статистику майнінгу та винагороди з P2Pool RPC
  */
 
+// ... (interfaces remain same)
 export interface P2PoolWorkerStats {
   wallet: string;
   totalHashes: number;
@@ -70,14 +73,19 @@ class P2PoolService {
     this.apiBaseUrl = env.apiBaseUrl;
   }
 
+  // Force sync on next call
+  invalidateCache() {
+    this.lastRuntimeSyncAt = 0;
+  }
+
   private async syncRuntimeConfig() {
     const now = Date.now();
     if (now - this.lastRuntimeSyncAt < this.staleTime) return;
     this.lastRuntimeSyncAt = now;
 
     try {
-      if (!window.electron?.ipcRenderer) return;
-      const runtimeConfig = await window.electron.ipcRenderer.invoke('get-runtime-pool-config');
+      if (!(window as any).__TAURI_INTERNALS__) return;
+      const runtimeConfig = await nativeApi.pool.getRuntimeConfig();
       const primary = runtimeConfig?.primary;
       if (primary?.rpcHost && primary?.rpcPort) {
         this.rpcHost = primary.rpcHost;
@@ -92,20 +100,8 @@ class P2PoolService {
     try {
       await this.syncRuntimeConfig();
 
-      // Try to use Electron IPC first (bypasses CORS)
-      // @ts-ignore
-      if (window.electron?.ipcRenderer) {
-        try {
-          const result = await window.electron.ipcRenderer.invoke('p2pool-rpc-call', {
-            method,
-            params,
-            host: this.rpcHost,
-            port: this.rpcPort
-          });
-          return result;
-        } catch (ipcErr) {
-          console.warn(`[P2PoolAPI] IPC call failed, falling back to fetch:`, ipcErr);
-        }
+      if ((window as any).__TAURI_INTERNALS__) {
+        return nativeApi.pool.rpcCall(method, params, this.rpcHost, this.rpcPort);
       }
 
       // Fallback to fetch for web environment
@@ -130,6 +126,53 @@ class P2PoolService {
     }
   }
 
+  private getPoolStatsUrls(): string[] {
+    const urls = new Set<string>();
+    const cleanedApiBase = this.apiBaseUrl.replace(/\/+$/, '');
+
+    if (typeof window !== 'undefined') {
+      const isLocalhost = window.location.hostname === 'localhost'
+        || window.location.hostname === '127.0.0.1';
+
+      if (isLocalhost) {
+        urls.add('/api/pool/stats');
+      } else {
+        urls.add('https://backend.minebench.cloud/api/pool/stats');
+      }
+    }
+
+    urls.add(`${cleanedApiBase}/pool/stats`);
+    urls.add('https://backend.minebench.cloud/api/pool/stats');
+
+    return Array.from(urls);
+  }
+
+  private applyBackendPoolStats(poolStatsData: any): {
+    poolHashrate: number;
+    miners: number;
+    rewards?: P2PoolStats['rewards'];
+    stratum: P2PoolStratumSnapshot | null;
+  } {
+    const stratum = poolStatsData && typeof poolStatsData.stratum === 'object'
+      ? poolStatsData.stratum
+      : null;
+
+    return {
+      poolHashrate: Number(poolStatsData?.poolHashrate)
+        || Number(stratum?.hashrate_15m)
+        || Number(stratum?.hashrate_1h)
+        || Number(stratum?.hashrate_24h)
+        || 0,
+      miners: Number(poolStatsData?.miners)
+        || Number(stratum?.workers?.length)
+        || Number(stratum?.connections)
+        || Number(stratum?.incoming_connections)
+        || 0,
+      rewards: poolStatsData?.rewards || undefined,
+      stratum
+    };
+  }
+
   /**
    * Отримати інформацію про пул
    */
@@ -138,7 +181,7 @@ class P2PoolService {
       await this.syncRuntimeConfig();
 
       let info = { difficulty: 0 };
-      
+
       try {
         info = await this.rpcCall('get_info');
       } catch (p2poolErr) {
@@ -149,7 +192,6 @@ class P2PoolService {
         info.difficulty = 325000000000; // ~2.71 GH/s network hashrate
       }
 
-      // Fetch global pool stats from MineBench backend
       let poolExtra: {
         poolHashrate: number;
         miners: number;
@@ -160,22 +202,16 @@ class P2PoolService {
         miners: 0,
         stratum: null
       };
-      try {
-        // In packaged Electron (file://) relative /api paths don't work; use absolute backend URL.
-        const canUseRelativeApi = typeof window !== 'undefined'
-          && (window.location.protocol === 'http:' || window.location.protocol === 'https:')
-          && window.location.hostname === 'localhost';
-        const poolStatsUrl = canUseRelativeApi ? '/api/pool/stats' : `${this.apiBaseUrl.replace(/\/+$/, '')}/pool/stats`;
 
-        const res = await fetch(poolStatsUrl, { signal: AbortSignal.timeout(15000) });
-        if (res.ok) {
-          const data = await res.json();
-          poolExtra.poolHashrate = data.poolHashrate || 0;
-          poolExtra.miners = data.miners || 0;
-          poolExtra.rewards = data.rewards || undefined;
-          poolExtra.stratum = (data && typeof data.stratum === 'object') ? data.stratum : null;
-        } else {
-          console.warn(`[P2PoolAPI] Backend returned status ${res.status} for pool stats`);
+      try {
+        for (const url of this.getPoolStatsUrls()) {
+          try {
+            const path = url.includes('/api/pool/stats') ? '/api/pool/stats' : url;
+            poolExtra = this.applyBackendPoolStats(await backendJson(path));
+            break;
+          } catch (e) {
+            console.warn(`[P2PoolAPI] Pool stats request failed (${url}):`, e);
+          }
         }
       } catch (e) {
         console.warn(`[P2PoolAPI] Failed to fetch stats from backend: ${e}`);
@@ -200,17 +236,10 @@ class P2PoolService {
 
   /**
    * Отримати статистику worker за wallet адресою
-   * ПРИМІТКА: P2Pool не предоставляє цю інформацію через стандартне RPC
-   * Потрібна власна DB або integration з P2Pool API
    */
   async getWorkerStats(walletAddress: string): Promise<P2PoolWorkerStats> {
     try {
       // Тимчасово повертаємо mock дані
-      // Реальна реалізація потребує:
-      // 1. Custom P2Pool API endpoint
-      // 2. Або парсинг P2Pool UI
-      // 3. Або власна база даних для відстеження shares
-
       return {
         wallet: walletAddress,
         totalHashes: 0,
@@ -240,9 +269,6 @@ class P2PoolService {
     daily: number;
     monthly: number;
   } {
-    // Формула: Reward = (Your Hashrate / Network Hashrate) * Block Reward * Blocks per period
-    // Monero: 1 block кожні 120 сек = 720 блоків на день
-
     // Network hashrate estimate (rough)
     const networkHashrate = networkDifficulty / 120;
     const shareOfNetwork = hashrate / networkHashrate;
@@ -267,8 +293,6 @@ class P2PoolService {
    */
   async getBMTValue(): Promise<number> {
     try {
-      // TODO: Інтегрувати з реальним API для BMT ціни
-      // На разі повертаємо 0 поки не буде розроблено токен
       return 0;
     } catch (err) {
       console.error('[P2PoolAPI] Failed to get BMT value:', err);
@@ -280,7 +304,6 @@ class P2PoolService {
    * Перевірити чи wallet адреса валідна для Monero
    */
   validateMoneroAddress(address: string): boolean {
-    // Monero address: 95 char base58 або 106 char (integrated address)
     const moneroPrimaryPattern = /^4[0-9a-zA-Z]{94}$/;
     const moneroIntegratedPattern = /^8[0-9a-zA-Z]{105}$/;
 

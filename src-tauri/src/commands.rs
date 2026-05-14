@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use sysinfo::{System, Components};
 use tauri::{AppHandle, Manager};
 use tauri_plugin_opener::OpenerExt;
-use std::process::Command;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 use axum::{
@@ -12,8 +13,30 @@ use axum::{
     Router,
 };
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use crate::miner::{self, MinerState};
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+fn default_thread_count() -> u16 {
+    let mut sys = System::new_all();
+    sys.refresh_cpu_usage();
+    let total_cores = sys.cpus().len().max(1);
+    ((total_cores as u16) / 2).max(1)
+}
+
+#[cfg(target_os = "windows")]
+fn hidden_powershell_output(script: &str) -> Option<std::process::Output> {
+    std::process::Command::new("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .ok()
+}
 
 #[derive(Serialize)]
 pub struct CpuInfo {
@@ -27,6 +50,79 @@ pub struct CpuInfo {
     supports_standard_xmrig: bool,
     supports_compat_xmrig: bool,
     message: String,
+}
+
+#[derive(Deserialize)]
+pub struct BackendRequest {
+    method: Option<String>,
+    path: String,
+    body: Option<serde_json::Value>,
+    token: Option<String>,
+}
+
+fn validate_backend_path(path: &str) -> Result<String, String> {
+    if !path.starts_with('/') || path.contains("://") || path.contains("..") {
+        return Err("Invalid backend path".to_string());
+    }
+
+    let clean_path = path.split('?').next().unwrap_or(path);
+    let allowed = clean_path == "/public/config"
+        || clean_path == "/api/pool/stats"
+        || clean_path == "/api/rates/current"
+        || clean_path == "/api/auth/login"
+        || clean_path == "/api/rewards/balance"
+        || clean_path == "/api/rewards/history"
+        || clean_path == "/api/rewards/claim"
+        || clean_path == "/api/user/premium-status"
+        || clean_path == "/api/miner/report"
+        || clean_path == "/api/sync/device-update"
+        || clean_path == "/api/sync/devices";
+
+    if allowed {
+        Ok(path.to_string())
+    } else {
+        Err("Backend path is not allowed".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn backend_request(request: BackendRequest) -> Result<serde_json::Value, String> {
+    let path = validate_backend_path(&request.path)?;
+    let method = request.method.unwrap_or_else(|| "GET".to_string()).to_uppercase();
+    let url = format!("https://backend.minebench.cloud{}", path);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .danger_accept_invalid_certs(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut builder = match method.as_str() {
+        "GET" => client.get(&url),
+        "POST" => client.post(&url),
+        _ => return Err("Backend method is not allowed".to_string()),
+    };
+
+    if let Some(token) = request.token.as_deref().filter(|token| !token.trim().is_empty()) {
+        builder = builder.bearer_auth(token);
+    }
+
+    if let Some(body) = request.body {
+        builder = builder.json(&body);
+    }
+
+    let response = builder.send().await.map_err(|e| e.to_string())?;
+    let status = response.status().as_u16();
+    let ok = response.status().is_success();
+    let text = response.text().await.map_err(|e| e.to_string())?;
+    let data = serde_json::from_str::<serde_json::Value>(&text).unwrap_or(serde_json::Value::Null);
+
+    Ok(serde_json::json!({
+        "ok": ok,
+        "status": status,
+        "data": data,
+        "text": text
+    }))
 }
 
 #[tauri::command]
@@ -51,10 +147,10 @@ pub fn get_cpu_cores() -> usize {
 pub fn get_cpu_info() -> CpuInfo {
     let mut sys = System::new_all();
     sys.refresh_cpu_usage();
-    
+
     let model = sys.cpus().first().map(|c| c.brand().to_string()).unwrap_or_else(|| "Unknown CPU".to_string());
     let cores = sys.cpus().len();
-    
+
     #[cfg(target_arch = "x86_64")]
     let (has_aes, has_avx, has_avx2) = (
         std::is_x86_feature_detected!("aes"),
@@ -74,12 +170,12 @@ pub fn get_cpu_info() -> CpuInfo {
         platform: std::env::consts::OS.to_string(),
         supports_standard_xmrig: has_avx2,
         supports_compat_xmrig: has_aes,
-        message: if has_avx2 { 
-            "✅ Full support".to_string() 
-        } else if has_aes { 
-            "⚠️ Limited support (use compat version)".to_string() 
-        } else { 
-            "❌ Legacy only".to_string() 
+        message: if has_avx2 {
+            "✅ Full support".to_string()
+        } else if has_aes {
+            "⚠️ Limited support (use compat version)".to_string()
+        } else {
+            "❌ Legacy only".to_string()
         },
     }
 }
@@ -99,12 +195,50 @@ pub fn get_system_stats() -> SystemStats {
     let mut sys = System::new_all();
     sys.refresh_cpu_usage();
     sys.refresh_memory();
-    
+
     SystemStats {
         cpu_usage: sys.global_cpu_usage(),
         ram_usage: sys.used_memory(),
         ram_total: sys.total_memory(),
     }
+}
+
+#[tauri::command]
+pub fn get_process_stats() -> serde_json::Value {
+    let mut sys = System::new_all();
+    sys.refresh_cpu_usage();
+    sys.refresh_memory();
+
+    serde_json::json!({
+        "cpuUsage": sys.global_cpu_usage(),
+        "memoryUsage": sys.used_memory(),
+        "memoryTotal": sys.total_memory()
+    })
+}
+
+#[tauri::command]
+pub fn get_display_status() -> serde_json::Value {
+    let platform = std::env::consts::OS.to_string();
+    let is_linux = platform == "linux";
+    let has_display = !is_linux
+        || std::env::var("WAYLAND_DISPLAY").ok().filter(|v| !v.trim().is_empty()).is_some()
+        || std::env::var("DISPLAY").ok().filter(|v| !v.trim().is_empty()).is_some();
+
+    let mut warnings = Vec::new();
+    if is_linux && !has_display {
+        warnings.push("No DISPLAY or WAYLAND_DISPLAY environment was detected.".to_string());
+    }
+
+    serde_json::json!({
+        "platform": platform,
+        "isLinux": is_linux,
+        "hasDisplay": has_display,
+        "displayWarnings": warnings,
+        "displayInfo": std::env::var("WAYLAND_DISPLAY")
+            .or_else(|_| std::env::var("DISPLAY"))
+            .unwrap_or_default(),
+        "isRunningWithSudo": std::env::var("SUDO_USER").is_ok()
+    })
 }
 
 // === Solana OAuth ===
@@ -114,6 +248,7 @@ pub struct OAuthCallbackParams {
     #[serde(rename = "publicKey")]
     public_key: String,
     signature: String,
+    state: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -158,12 +293,28 @@ fn default_worker() -> String {
 
 struct AppState {
     tx: Mutex<Option<oneshot::Sender<OAuthResult>>>,
+    expected_state: String,
 }
 
 async fn oauth_callback(
     Query(params): Query<OAuthCallbackParams>,
     State(state): State<Arc<AppState>>,
 ) -> Html<&'static str> {
+    if params.state.as_deref() != Some(state.expected_state.as_str()) {
+        return Html(r#"
+          <!DOCTYPE html>
+          <html>
+          <head><meta charset="utf-8" /><title>MineBench - Invalid Callback</title></head>
+          <body style="background:#0a0a0a;color:#e5e7eb;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
+            <div style="max-width:500px;text-align:center;">
+              <h1 style="color:#f87171;">Invalid wallet callback</h1>
+              <p>Please return to MineBench and try connecting again.</p>
+            </div>
+          </body>
+          </html>
+        "#);
+    }
+
     let result = OAuthResult {
         public_key: params.public_key,
         signature: params.signature,
@@ -215,14 +366,16 @@ async fn oauth_callback(
             </script>
           </body>
           </html>
-    "#)
+      "#)
 }
 
 #[tauri::command]
 pub async fn solana_connect_wallet(app: AppHandle) -> Result<OAuthResult, String> {
     let (tx, rx) = oneshot::channel();
+    let callback_state = uuid::Uuid::new_v4().to_string();
     let state = Arc::new(AppState {
         tx: Mutex::new(Some(tx)),
+        expected_state: callback_state.clone(),
     });
 
     let app_state = state.clone();
@@ -234,11 +387,8 @@ pub async fn solana_connect_wallet(app: AppHandle) -> Result<OAuthResult, String
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| e.to_string())?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
 
-    // Always use the production wallet page, even in dev builds. Browser wallets
-    // commonly trust the production origin, while localhost can break extension
-    // connection state and callback redirects during desktop development.
     let base_url = "https://minebench.cloud";
-    let callback_url = format!("http://localhost:{}/callback", port);
+    let callback_url = format!("http://localhost:{}/callback?state={}", port, callback_state);
     let auth_url = format!("{}/wallet-connect?callbackUrl={}", base_url, urlencoding::encode(&callback_url));
 
     // Use tauri-plugin-opener to open browser
@@ -246,7 +396,7 @@ pub async fn solana_connect_wallet(app: AppHandle) -> Result<OAuthResult, String
 
     // Run server and wait for callback or timeout
     let server = axum::serve(listener, router);
-    
+
     tokio::select! {
         _ = server => {
             Err("Server closed unexpectedly".to_string())
@@ -342,7 +492,7 @@ pub async fn get_runtime_pool_config() -> Result<serde_json::Value, String> {
     let fallback = serde_json::json!({
         "primary": {
             "poolUrl": "xmr.minebench.cloud:3333",
-            "rpcHost": "152.53.15.22",
+            "rpcHost": "143.42.22.242",
             "rpcPort": 18089,
             "stratumPort": 3333
         },
@@ -376,7 +526,7 @@ pub async fn get_runtime_pool_config() -> Result<serde_json::Value, String> {
     let primary = &config["pool"]["primary"];
     let stratum_host = primary["stratumHost"].as_str().unwrap_or("xmr.minebench.cloud");
     let stratum_port = primary["stratumPort"].as_u64().unwrap_or(3333);
-    let rpc_host = primary["rpcHost"].as_str().unwrap_or("152.53.15.22");
+    let rpc_host = primary["rpcHost"].as_str().unwrap_or("143.42.22.242");
     let rpc_port = primary["rpcPort"].as_u64().unwrap_or(18089);
 
     Ok(serde_json::json!({
@@ -496,12 +646,15 @@ pub async fn p2pool_rpc_call(
     host: String,
     port: u16,
 ) -> Result<serde_json::Value, String> {
+    let host = validate_rpc_host(&host)?;
+    validate_rpc_port(port)?;
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| e.to_string())?;
     let url = format!("http://{}:{}/json_rpc", host, port);
-    
+
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": "0",
@@ -516,7 +669,7 @@ pub async fn p2pool_rpc_call(
         .map_err(|e| e.to_string())?;
 
     let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-    
+
     if let Some(error) = json.get("error") {
         return Err(error.get("message").and_then(|m| m.as_str()).unwrap_or("RPC Error").to_string());
     }
@@ -526,6 +679,9 @@ pub async fn p2pool_rpc_call(
 
 #[tauri::command]
 pub async fn get_pool_sync(host: String, port: u16) -> Result<serde_json::Value, String> {
+    let host = validate_rpc_host(&host)?;
+    validate_rpc_port(port)?;
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()
@@ -538,8 +694,41 @@ pub async fn get_pool_sync(host: String, port: u16) -> Result<serde_json::Value,
         .map_err(|e| e.to_string())?;
 
     let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-    
+
     Ok(data)
+}
+
+fn validate_rpc_host(host: &str) -> Result<String, String> {
+    let host = host.trim().trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase();
+    if host.is_empty()
+        || host.contains('/')
+        || host.contains('\\')
+        || host.contains('@')
+        || host.contains(char::is_whitespace)
+    {
+        return Err("Invalid RPC host".to_string());
+    }
+
+    let allowed = host == "localhost"
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host == "143.42.22.242"
+        || host.ends_with(".minebench.cloud")
+        || host == "minebench.cloud"
+        || host == "backend.minebench.cloud";
+
+    if allowed {
+        Ok(host)
+    } else {
+        Err("RPC host is not allowed".to_string())
+    }
+}
+
+fn validate_rpc_port(port: u16) -> Result<(), String> {
+    match port {
+        4067 | 4077 | 18081 | 18089 => Ok(()),
+        _ => Err("RPC port is not allowed".to_string()),
+    }
 }
 
 #[tauri::command]
@@ -629,11 +818,12 @@ try {
 exit 1
 "#;
 
-        let output = Command::new("powershell")
-            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script])
-            .output()
-            .ok()?;
-
+        #[cfg(target_os = "windows")]
+        let output = hidden_powershell_output(script);
+        if output.is_none() {
+            return None;
+        }
+        let output = output.unwrap();
         if !output.status.success() {
             return None;
         }
@@ -745,11 +935,12 @@ foreach ($ns in $namespaces) {
 exit 1
 "#;
 
-        let output = Command::new("powershell")
-            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script])
-            .output()
-            .ok()?;
-
+        #[cfg(target_os = "windows")]
+        let output = hidden_powershell_output(script);
+        if output.is_none() {
+            return None;
+        }
+        let output = output.unwrap();
         if !output.status.success() {
             return None;
         }
@@ -801,6 +992,8 @@ pub fn save_miner_logs(
 
     let now = chrono::Local::now();
     let timestamp = now.format("%Y-%m-%dT%H-%M-%S").to_string();
+    let session_type = sanitize_filename_part(&session_type);
+    let device = sanitize_filename_part(&device);
     let filename = format!("minebench-{}-{}-{}.log", session_type, device, timestamp);
     let filepath = logs_dir.join(&filename);
 
@@ -822,6 +1015,20 @@ pub fn save_miner_logs(
     }))
 }
 
+fn sanitize_filename_part(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+        .take(32)
+        .collect();
+
+    if sanitized.is_empty() {
+        "session".to_string()
+    } else {
+        sanitized
+    }
+}
+
 #[tauri::command]
 pub fn report_stats(_temp: Option<f32>, _power: Option<f32>) {
 }
@@ -836,7 +1043,7 @@ pub async fn log_to_file(app: AppHandle, level: String, message: String, source:
     let date_str = now.format("%Y-%m-%d").to_string();
     let log_file_path = log_dir.join(format!("app-{}.log", date_str));
 
-    let log_line = format!("[{}] [{}] [{}] {}\n", 
+    let log_line = format!("[{}] [{}] [{}] {}\n",
         now.format("%Y-%m-%dT%H:%M:%S"),
         source,
         level.to_uppercase(),
@@ -874,9 +1081,40 @@ pub fn window_close(window: tauri::Window) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn open_folder(app: AppHandle, path: String) -> Result<(), String> {
-    std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
-    app.opener().open_path(path, None::<&str>).map_err(|e| e.to_string())
+pub fn open_external_url(app: AppHandle, url: String) -> Result<(), String> {
+    let url = validate_external_url(&url)?;
+    app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn open_logs_directory(app: AppHandle) -> Result<(), String> {
+    let logs_dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("logs");
+    std::fs::create_dir_all(&logs_dir).map_err(|e| e.to_string())?;
+    app.opener().open_path(logs_dir.to_string_lossy().to_string(), None::<&str>).map_err(|e| e.to_string())
+}
+
+fn validate_external_url(url: &str) -> Result<String, String> {
+    let parsed = reqwest::Url::parse(url).map_err(|_| "Invalid URL".to_string())?;
+    if parsed.scheme() != "https" {
+        return Err("Only HTTPS URLs can be opened externally".to_string());
+    }
+
+    let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+    let allowed = matches!(
+        host.as_str(),
+        "minebench.cloud"
+            | "minebench.app"
+            | "backend.minebench.cloud"
+            | "phantom.app"
+            | "discord.gg"
+            | "x.com"
+    );
+
+    if allowed {
+        Ok(parsed.to_string())
+    } else {
+        Err("External URL is not allowed".to_string())
+    }
 }
 
 #[tauri::command]
@@ -891,22 +1129,23 @@ pub fn get_logs_directory(app: AppHandle) -> Result<serde_json::Value, String> {
 
 #[tauri::command]
 fn resolve_miner_path(app: &AppHandle, miner_name: &str) -> Result<PathBuf, String> {
-    let platform = std::env::consts::OS; // "windows", "macos", "linux"
-    let arch = std::env::consts::ARCH; // "x86_64", "aarch64"
+    let platform = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
 
     let platform_dir = match (platform, arch) {
-        ("windows", "aarch64") => "win-arm64".to_string(),
-        ("windows", _) => "win-x64".to_string(),
-        ("macos", "aarch64") => "macos-arm64".to_string(),
-        ("macos", _) => "macos-x64".to_string(),
-        ("linux", _) => "linux-x64".to_string(),
+        ("windows", "aarch64") => "win-arm64",
+        ("windows", _) => "win-x64",
+        ("macos", "aarch64") => "macos-arm64",
+        ("macos", _) => "macos-x64",
+        ("linux", _) => "linux-x64",
         _ => return Err(format!("Unsupported platform/arch: {}/{}", platform, arch)),
     };
 
     let exe_ext = if platform == "windows" { ".exe" } else { "" };
-    let miner_folder = if miner_name.to_lowercase() == "xmrig" { "Xmrig" } else { &miner_name };
+    let miner_folder = if miner_name.to_lowercase() == "xmrig" { "Xmrig" } else { miner_name };
     let miner_exe = format!("{}{}", miner_name, exe_ext);
 
+    // Determine sub-directory for xmrig variants
     let mut miner_sub_dir = "";
     if miner_name.to_lowercase() == "xmrig" {
         #[cfg(target_arch = "x86_64")]
@@ -921,75 +1160,61 @@ fn resolve_miner_path(app: &AppHandle, miner_name: &str) -> Result<PathBuf, Stri
         }
     }
 
-    let platform_path = if !miner_sub_dir.is_empty() {
-        Path::new(&platform_dir).join(miner_sub_dir)
-    } else {
-        PathBuf::from(&platform_dir)
-    };
+    // Build list of potential relative paths to check
+    let mut relative_paths = Vec::new();
 
-    let mut relative_miner_paths = vec![
-        Path::new("Miner")
-            .join(miner_folder)
-            .join(&platform_path)
-            .join(&miner_exe),
-    ];
+    // 1. Try the specific variant (standard, compat, or legacy)
+    let mut p1 = PathBuf::from("Miner").join(miner_folder).join(platform_dir);
+    if !miner_sub_dir.is_empty() { p1 = p1.join(miner_sub_dir); }
+    relative_paths.push(p1.join(&miner_exe));
 
-    if miner_name.to_lowercase() == "xmrig" {
-        let root_path = Path::new("Miner")
-            .join(miner_folder)
-            .join(&platform_dir)
-            .join(&miner_exe);
-        let legacy_path = Path::new("Miner")
-            .join(miner_folder)
-            .join(&platform_dir)
-            .join("legacy")
-            .join(&miner_exe);
+    let mut p2 = PathBuf::from(miner_folder).join(platform_dir);
+    if !miner_sub_dir.is_empty() { p2 = p2.join(miner_sub_dir); }
+    relative_paths.push(p2.join(&miner_exe));
 
-        if !relative_miner_paths.contains(&root_path) {
-            relative_miner_paths.push(root_path);
-        }
-        if !relative_miner_paths.contains(&legacy_path) {
-            relative_miner_paths.push(legacy_path);
+    // 2. Fallback to standard variant if compat/legacy is not found
+    if !miner_sub_dir.is_empty() {
+        relative_paths.push(PathBuf::from("Miner").join(miner_folder).join(platform_dir).join(&miner_exe));
+        relative_paths.push(PathBuf::from(miner_folder).join(platform_dir).join(&miner_exe));
+    }
+
+    // Try resolving via resource_dir (Production)
+    let mut tried_paths = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        for rel_path in &relative_paths {
+            let candidate = resource_dir.join(rel_path);
+            tried_paths.push(format!("Resource: {}", candidate.to_string_lossy()));
+            if candidate.exists() { return Ok(candidate); }
+
+            let up_candidate = resource_dir.join("_up_").join(rel_path);
+            tried_paths.push(format!("Resource (up): {}", up_candidate.to_string_lossy()));
+            if up_candidate.exists() { return Ok(up_candidate); }
         }
     }
 
-    let mut candidates = Vec::new();
-
-    if let Ok(resource_path) = app.path().resource_dir() {
-        for relative_path in &relative_miner_paths {
-            candidates.push(resource_path.join(relative_path));
-        }
-    }
-
+    // Fallback for development (current_dir)
     if let Ok(current_dir) = std::env::current_dir() {
-        for relative_path in &relative_miner_paths {
-            candidates.push(current_dir.join(relative_path));
-            candidates.push(current_dir.join("..").join(relative_path));
+        for rel_path in &relative_paths {
+            let candidate = current_dir.join(rel_path);
+            tried_paths.push(format!("Dev: {}", candidate.to_string_lossy()));
+            if candidate.exists() { return Ok(candidate); }
         }
     }
 
-    #[cfg(debug_assertions)]
-    {
-        for relative_path in &relative_miner_paths {
-            candidates.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(relative_path));
-        }
-    }
-
-    for candidate in &candidates {
-        if candidate.exists() {
-            return Ok(candidate.clone());
-        }
-    }
-
-    let checked = candidates
-        .iter()
-        .map(|p| p.to_string_lossy().to_string())
-        .collect::<Vec<_>>()
-        .join("; ");
+    #[cfg(target_arch = "x86_64")]
+    let features = format!("AVX2={}, AES={}",
+        std::is_x86_feature_detected!("avx2"),
+        std::is_x86_feature_detected!("aes")
+    );
+    #[cfg(not(target_arch = "x86_64"))]
+    let features = "Non-x86_64".to_string();
 
     Err(format!(
-        "Miner binary not found. Checked: {}",
-        checked
+        "Miner binary '{}' not found. Features: {}. Tried {} paths: {:?}",
+        miner_exe,
+        features,
+        tried_paths.len(),
+        tried_paths
     ))
 }
 
@@ -1003,28 +1228,37 @@ fn build_xmrig_args(request: &MinerStartRequest, _benchmark: bool) -> Result<(St
         return Err("GPU mining is not implemented in the Tauri backend yet".to_string());
     }
 
+    let wallet = validate_miner_value(&request.wallet, "wallet", 160)?;
+
     let pool_url = request
         .pool_url
         .clone()
         .unwrap_or_else(|| "xmr.minebench.cloud:3333".to_string());
+    let pool_url = validate_pool_url(&pool_url)?;
     let normalized_pool = if pool_url.contains("://") {
         pool_url
     } else {
         format!("stratum+tcp://{}", pool_url)
     };
-    let worker = request.worker.replace(char::is_whitespace, "-");
+    let worker = validate_miner_value(&request.worker.replace(char::is_whitespace, "-"), "worker", 80)?;
     let rig_id = request
         .solana_wallet
         .clone()
         .filter(|v| !v.trim().is_empty())
+        .map(|value| validate_miner_value(&value, "solana wallet", 160))
+        .transpose()?
         .unwrap_or_else(|| worker.clone());
     let api_port = "4077";
-    let donate_level = request.donate_level.unwrap_or(0).to_string();
-    let cpu_priority = request.cpu_priority.unwrap_or(2).to_string();
+    let donate_level = request.donate_level.unwrap_or(0).min(5).to_string();
+    let cpu_priority = request.cpu_priority.unwrap_or(2).min(5).to_string();
     let randomx_mode = request
         .randomx_mode
         .clone()
         .unwrap_or_else(|| "auto".to_string());
+    let randomx_mode = match randomx_mode.as_str() {
+        "auto" | "fast" | "light" => randomx_mode,
+        _ => return Err("Invalid RandomX mode".to_string()),
+    };
 
     let mut args = vec![
         "--coin".to_string(),
@@ -1032,7 +1266,7 @@ fn build_xmrig_args(request: &MinerStartRequest, _benchmark: bool) -> Result<(St
         "-o".to_string(),
         normalized_pool,
         "-u".to_string(),
-        request.wallet.clone(),
+        wallet,
         "-p".to_string(),
         "x".to_string(),
         "--rig-id".to_string(),
@@ -1054,14 +1288,41 @@ fn build_xmrig_args(request: &MinerStartRequest, _benchmark: bool) -> Result<(St
         args.push("--randomx-1gb-pages".to_string());
     }
 
-    if let Some(threads) = request.threads {
-        if threads > 0 {
-            args.push("-t".to_string());
-            args.push(threads.to_string());
-        }
-    }
+    let threads = request
+        .threads
+        .filter(|&threads| threads > 0)
+        .map(|threads| threads.min(get_cpu_cores() as u16))
+        .unwrap_or_else(default_thread_count);
+
+    args.push("-t".to_string());
+    args.push(threads.to_string());
 
     Ok(("xmrig".to_string(), args))
+}
+
+fn validate_miner_value(value: &str, label: &str, max_len: usize) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("{} is required", label));
+    }
+    if value.len() > max_len || value.chars().any(|ch| ch.is_control() || matches!(ch, '"' | '\'' | '`')) {
+        return Err(format!("Invalid {}", label));
+    }
+    Ok(value.to_string())
+}
+
+fn validate_pool_url(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 180 {
+        return Err("Invalid pool URL".to_string());
+    }
+    if value.chars().any(|ch| ch.is_control() || ch.is_whitespace() || matches!(ch, '"' | '\'' | '`' | '<' | '>' | '|' | '&' | ';')) {
+        return Err("Invalid pool URL".to_string());
+    }
+    if value.contains("://") && !value.starts_with("stratum+tcp://") && !value.starts_with("stratum+ssl://") {
+        return Err("Only stratum pool URLs are allowed".to_string());
+    }
+    Ok(value.to_string())
 }
 
 #[tauri::command]

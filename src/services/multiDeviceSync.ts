@@ -3,6 +3,9 @@
  * Синхронізує дані майнінгу між пристроями через Solana blockchain + IPFS/Server
  */
 
+import { authStorage } from '../lib/auth-storage';
+import { backendJson } from '../lib/backend-api';
+
 export interface DeviceSyncData {
   deviceId: string;
   walletPublicKey: string;
@@ -288,28 +291,17 @@ export class MultiDeviceSyncService {
   private async syncWithServer(data: DeviceSyncData): Promise<void> {
     try {
       const signature = await this.signSyncData(data);
-      const { getEnvironmentConfig } = await import('../config/environment');
-      const env = getEnvironmentConfig();
-      const apiUrl = env.apiBaseUrl.replace(/\/+$/, '') + '/sync/device-update';
-
-      const response = await fetch(apiUrl, {
+      await backendJson('/api/sync/device-update', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('minebench_auth_token') || ''}`
-        },
-        body: JSON.stringify({
+        token: authStorage.getToken() || '',
+        body: {
           walletPublicKey: this.walletPublicKey,
           deviceData: data,
           signature
-        })
+        }
       });
 
-      if (!response.ok) {
-        console.warn(`[MultiDeviceSync] Server sync failed (${response.status})`);
-      } else {
-        console.log(`[MultiDeviceSync] Synced ${data.deviceName} with server`);
-      }
+      console.log(`[MultiDeviceSync] Synced ${data.deviceName} with server`);
     } catch (err) {
       console.error('[MultiDeviceSync] Failed to sync with server:', err);
     }

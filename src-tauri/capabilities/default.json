@@ -1,15 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "enables the default permissions",
+  "description": "enables the minimal permissions required by the renderer",
   "windows": [
     "main"
   ],
   "permissions": [
-    "core:default",
-    "shell:default",
-    "os:default",
-    "process:default",
-    "fs:default"
+    "core:default"
   ]
 }

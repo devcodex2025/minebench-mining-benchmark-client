@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
-import { Play, PauseSolid, SquareSolid, Play as PlayIcon, Flame, Gauge, Zap, Shield, Cpu, TrendingUp, Clock, Activity, Thermometer, HardDrive, Info, Hourglass } from '../components/icons';
+import { Play, SquareSolid, PauseSolid, Flame, Gauge, Zap, Shield, Cpu, TrendingUp, Clock, Activity, Info, Hourglass } from '../components/icons';
 import { useMinerStore } from '../store/useMinerStore';
 import { SolanaAuthService, useSolanaAuth } from '../services/solanaAuth';
 import { MultiDeviceSyncService } from '../services/multiDeviceSync';
@@ -9,18 +9,8 @@ import { cn, formatHashrate } from '../lib/utils';
 import { p2poolAPI } from '../services/p2poolAPI';
 import type { P2PoolStratumSnapshot } from '../services/p2poolAPI';
 import { getEnvironmentConfig } from '../config/environment';
-
-const getBackendApiUrl = (path: string) => {
-    const env = getEnvironmentConfig();
-    const normalizedPath = path.startsWith('/') ? path : `/${path}`;
-    const canUseRelativeApi = typeof window !== 'undefined'
-        && (window.location.protocol === 'http:' || window.location.protocol === 'https:')
-        && window.location.hostname === 'localhost';
-
-    return canUseRelativeApi
-        ? `/api${normalizedPath}`
-        : `${env.apiBaseUrl.replace(/\/+$/, '')}${normalizedPath}`;
-};
+import { nativeApi } from '../lib/native-api';
+import { backendJson } from '../lib/backend-api';
 
 const getErrorMessage = (err: any) => {
     if (!err) return 'Unknown error';
@@ -90,6 +80,7 @@ const HashRateChart: React.FC<{ data: any[]; theme: string }> = React.memo(({ da
                             strokeWidth={3}
                             fillOpacity={1}
                             fill="url(#colorHashrate)"
+                            isAnimationActive={false}
                         />
                     </AreaChart>
                 </ResponsiveContainer>
@@ -129,13 +120,12 @@ const Mining: React.FC = () => {
     const updateStats = useMinerStore((state) => state.updateStats);
     const history = useMinerStore((state) => state.history);
     const currentHashrate = useMinerStore((state) => state.currentHashrate);
-    const currentTemp = useMinerStore((state) => state.currentTemp);
-    const currentPower = useMinerStore((state) => state.currentPower);
     const resetSession = useMinerStore((state) => state.resetSession);
     const pools = useMinerStore((state) => state.pools);
     const setGlobalPoolStats = useMinerStore((state) => state.setGlobalPoolStats);
     const loadSettings = useMinerStore((state) => state.loadSettings);
     const saveSettings = useMinerStore((state) => state.saveSettings);
+    const fetchPublicConfig = useMinerStore((state) => state.fetchPublicConfig);
     const isPremium = useMinerStore((state) => state.isPremium);
     const premiumXmrWallet = useMinerStore((state) => state.premiumXmrWallet);
 
@@ -153,35 +143,39 @@ const Mining: React.FC = () => {
     const setRandomxMode = useMinerStore((state) => state.setRandomxMode);
     const setHugePages = useMinerStore((state) => state.setHugePages);
 
-    // System resource monitoring
-    const [systemStats, setSystemStats] = useState<{
-        cpuUsage: number | null;
-        ramUsage: number | null;
-        ramTotal: number | null;
-        hasCpuData: boolean;
-        hasRamData: boolean;
-    }>({
-        cpuUsage: null,
-        ramUsage: null,
-        ramTotal: null,
-        hasCpuData: false,
-        hasRamData: false
-    });
     const [showHugePagesInfo, setShowHugePagesInfo] = useState(false);
     const [stratumStats, setStratumStats] = useState<P2PoolStratumSnapshot | null>(null);
     const [showShareAnimation, setShowShareAnimation] = useState(false);
 
-    const statsIntervalRef = useRef<NodeJS.Timeout | null>(null);
-    const timeIntervalRef = useRef<NodeJS.Timeout | null>(null);
-    const poolStatsIntervalRef = useRef<NodeJS.Timeout | null>(null);
+    const statsIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const timeIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const poolStatsIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const ratesIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const rewardReportIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const statsInFlightRef = useRef(false);
+    const poolStatsInFlightRef = useRef(false);
+    const ratesInFlightRef = useRef(false);
+    const rewardReportInFlightRef = useRef(false);
     const lastRewardReportAtRef = useRef(0);
+    const lastTimerPersistAtRef = useRef(0);
     const lastShareCountRef = useRef<number | null>(null);
+    const lastReportedPoolShareCountRef = useRef<number | null>(null);
+    const localAcceptedSharesRef = useRef(0);
+    const lastReportedAcceptedSharesRef = useRef(0);
     const rewardReportSeqRef = useRef(0);
     const miningStartedAtRef = useRef<number | null>(null);
     const pausedElapsedRef = useRef(0);
     const [elapsedTime, setElapsedTime] = useState(0);
     const [peakHashrate, setPeakHashrate] = useState(0);
     const [poolNetworkHashrate, setPoolNetworkHashrate] = useState(300000000000); // Default Monero difficulty
+    const statusRef = useRef(status);
+    const userPublicKeyRef = useRef(user?.publicKey);
+    const currentHashrateRef = useRef(currentHashrate);
+    const stratumSharesRef = useRef(Math.max(stratumStats?.total_stratum_shares || 0, stratumStats?.shares_found || 0));
+    const workerNameRef = useRef(workerName);
+    const deviceTypeRef = useRef(deviceType);
+    const elapsedTimeRef = useRef(0);
+    const poolNetworkHashrateRef = useRef(300000000000);
     const env = getEnvironmentConfig();
     const primaryPool = pools?.['cpu'];
     const reservePool = env.enableBackupPool ? pools?.['cpu-backup'] : undefined;
@@ -193,6 +187,17 @@ const Mining: React.FC = () => {
     const activeWindowUserShares = Number(miningStats?.activeWindowUserShares ?? miningStats?.activeShares ?? 0);
     const activeWindowPoolShares = Number(miningStats?.activeWindowPoolShares ?? 0);
     const activeWindowRewardSharePercent = Number(miningStats?.activeWindowRewardSharePercent ?? 0);
+
+    useEffect(() => {
+        statusRef.current = status;
+        userPublicKeyRef.current = user?.publicKey;
+        currentHashrateRef.current = currentHashrate;
+        stratumSharesRef.current = Math.max(stratumStats?.total_stratum_shares || 0, stratumStats?.shares_found || 0);
+        workerNameRef.current = workerName;
+        deviceTypeRef.current = deviceType;
+        elapsedTimeRef.current = elapsedTime;
+        poolNetworkHashrateRef.current = poolNetworkHashrate;
+    }, [status, user?.publicKey, currentHashrate, stratumStats?.total_stratum_shares, stratumStats?.shares_found, workerName, deviceType, elapsedTime, poolNetworkHashrate]);
 
     const persistMiningTimer = (startedAt: number | null, elapsed: number) => {
         try {
@@ -215,12 +220,20 @@ const Mining: React.FC = () => {
             return 0;
         }
     };
-    
+
     // Get global pool stats from store
     const poolHashrateTotal = useMinerStore((state) => state.poolHashrateTotal);
     const poolMinersCount = useMinerStore((state) => state.poolMinersCount);
     const setPoolNetworkHashrateStore = useMinerStore((state) => state.setPoolNetworkHashrate);
     const setExchangeRates = useMinerStore((state) => state.setExchangeRates);
+
+    const poolStatusLabel = stratumStats
+        ? (stratumStats.wallet || (stratumStats.workers?.length || poolHashrateTotal > 0 || poolMinersCount > 0)
+            ? 'Live'
+            : 'No Wallet')
+        : (poolHashrateTotal > 0 || poolMinersCount > 0)
+            ? 'Live'
+            : 'Waiting for backend stats...';
 
     // Wallet balance and rewards
     const [walletValid, setWalletValid] = useState(false);
@@ -232,7 +245,7 @@ const Mining: React.FC = () => {
         if (!isSolanaConnected || !user?.publicKey) return;
 
         const syncService = MultiDeviceSyncService.getInstance(user.publicKey);
-        
+
         // Register this device if not already registered
         let deviceId = localStorage.getItem('minebench_device_id');
         if (!deviceId) {
@@ -264,14 +277,14 @@ const Mining: React.FC = () => {
     // Load CPU info
     useEffect(() => {
         const loadCpuInfo = async () => {
-            try {
-                const name = await window.electron.invoke('get-cpu-name');
-                const cores = await window.electron.invoke('get-cpu-cores');
-                setCpuInfo(name, cores);
-            } catch (err) {
-                console.error('Failed to load CPU info:', err);
-            }
-        };
+                    try {
+                        if (!(window as any).__TAURI_INTERNALS__) return;
+                        const info = await nativeApi.system.getCpuInfo();
+                        setCpuInfo(info.name, info.cores);
+                    } catch (err) {
+                        console.error('Failed to load CPU info:', err);
+                    }
+                };
         loadCpuInfo();
     }, [setCpuInfo]);
 
@@ -279,7 +292,7 @@ const Mining: React.FC = () => {
         history.filter((point) => Number.isFinite(point?.hashrate) && point.hashrate >= 0)
     ), [history]);
 
-    // Load miner settings from localStorage/Electron on component mount
+    // Load miner settings from localStorage/Native on component mount
     useEffect(() => {
         let mounted = true;
         (async () => {
@@ -325,85 +338,58 @@ const Mining: React.FC = () => {
         return () => clearTimeout(timer);
     }, [settingsLoaded, wallet, workerName, threads, cpuPriority, randomxMode, hugePages, donateLevel, poolUrl, deviceType, saveSettings]);
 
-    // Load system stats - OPTIMIZED to reduce frequency
     useEffect(() => {
-        const loadSystemStats = async () => {
-            try {
-                const stats = await window.electron.invoke('get-system-stats');
-                const cpu = typeof stats?.cpuUsage === 'number' ? stats.cpuUsage : null;
-                const ramUsage = typeof stats?.ramUsage === 'number' ? stats.ramUsage : null;
-                const ramTotal = typeof stats?.ramTotal === 'number' ? stats.ramTotal : null;
+        if (!(window as any).__TAURI_INTERNALS__) return;
 
-                const hasCpuData = cpu !== null && Number.isFinite(cpu) && cpu >= 0 && cpu <= 100;
-                const hasRamData =
-                    ramUsage !== null && ramTotal !== null &&
-                    Number.isFinite(ramUsage) && Number.isFinite(ramTotal) &&
-                    ramTotal > 0 && ramUsage >= 0;
+        let unlistenLog: () => void;
+        let unlistenError: () => void;
 
-                setSystemStats({
-                    cpuUsage: hasCpuData ? cpu : null,
-                    ramUsage: hasRamData ? ramUsage : null,
-                    ramTotal: hasRamData ? ramTotal : null,
-                    hasCpuData,
-                    hasRamData
-                });
-            } catch (err) {
-                // Silently fail - system stats not critical
-                setSystemStats({
-                    cpuUsage: null,
-                    ramUsage: null,
-                    ramTotal: null,
-                    hasCpuData: false,
-                    hasRamData: false
-                });
-            }
-        };
-        loadSystemStats();
-        // Increase from 2000ms to 3000ms to reduce IPC calls
-        const interval = setInterval(loadSystemStats, 3000);
-        return () => clearInterval(interval);
-    }, []);
-
-    useEffect(() => {
-        if (!window.electron.on) return;
-        const offLog = window.electron.on('miner-log', (msg: string) => {
-            const line = msg.toLowerCase();
-            const isConnectError =
-                line.includes('connection refused') ||
-                line.includes('failed to connect') ||
-                line.includes('connect error') ||
-                line.includes('login failed') ||
-                line.includes('stratum connection failed') ||
-                line.includes('network error');
-            if (isConnectError) {
-                setStatus('error');
-                addLog(`❌ Mining connection error: ${msg.trim()}`);
-            }
-            if (line.includes('connected') || line.includes('login succeeded') || line.includes('new job')) {
-                if (status !== 'running') {
-                    setStatus('running');
-                    addLog('✅ Miner connected to pool');
+        const setupListeners = async () => {
+            unlistenLog = await nativeApi.listen<string>('miner-log', (msg: string) => {
+                const line = msg.toLowerCase();
+                const isConnectError =
+                    line.includes('connection refused') ||
+                    line.includes('failed to connect') ||
+                    line.includes('connect error') ||
+                    line.includes('login failed') ||
+                    line.includes('stratum connection failed') ||
+                    line.includes('network error');
+                if (isConnectError) {
+                    setStatus('error');
+                    addLog(`❌ Mining connection error: ${msg.trim()}`);
                 }
-            }
-        });
-        const offError = window.electron.on('miner-error', (msg: string) => {
-            const message = String(msg || '').trim();
-            if (message) {
-                setStatus('error');
-                addLog(`Miner error: ${message}`);
-            }
-        });
-        return () => {
-            if (offLog) offLog();
-            if (offError) offError();
+                if (line.includes('connected') || line.includes('login succeeded') || line.includes('new job')) {
+                    if (statusRef.current !== 'running') {
+                        setStatus('running');
+                        addLog('✅ Miner connected to pool');
+                    }
+                }
+            });
+
+            unlistenError = await nativeApi.listen<string>('miner-error', (msg: string) => {
+                const message = String(msg || '').trim();
+                if (message) {
+                    setStatus('error');
+                    addLog(`Miner error: ${message}`);
+                }
+            });
         };
-    }, [setStatus, addLog, status]);
+
+        setupListeners();
+
+        return () => {
+            if (unlistenLog) unlistenLog();
+            if (unlistenError) unlistenError();
+        };
+    }, [setStatus, addLog]);
 
     useEffect(() => {
         return () => {
             if (statsIntervalRef.current) clearInterval(statsIntervalRef.current);
             if (timeIntervalRef.current) clearInterval(timeIntervalRef.current);
             if (poolStatsIntervalRef.current) clearInterval(poolStatsIntervalRef.current);
+            if (ratesIntervalRef.current) clearInterval(ratesIntervalRef.current);
+            if (rewardReportIntervalRef.current) clearInterval(rewardReportIntervalRef.current);
         };
     }, []);
 
@@ -433,10 +419,12 @@ const Mining: React.FC = () => {
     // Fetch pool network hashrate and stats for reward calculation
     useEffect(() => {
         const fetchPoolStats = async () => {
+            if (poolStatsInFlightRef.current) return;
+            poolStatsInFlightRef.current = true;
             try {
                 const stats = await p2poolAPI.getPoolStats();
                 const newStratum = stats.stratum || null;
-                
+
                 // Trigger ASCII animation if a new share was found
                 if (newStratum && newStratum.shares_found !== undefined) {
                     if (lastShareCountRef.current !== null && newStratum.shares_found > lastShareCountRef.current) {
@@ -446,20 +434,20 @@ const Mining: React.FC = () => {
                 }
 
                 setStratumStats(newStratum);
-                
-                if (stats && stats.poolDifficulty) {
-                    // Calculate network hashrate from difficulty
-                    // Monero: difficulty = hashrate * 120 (block time in seconds)
-                    const networkHashrate = stats.poolDifficulty / 120;
-                    setPoolNetworkHashrate(networkHashrate);
-                    setPoolNetworkHashrateStore(networkHashrate);
 
-                    // Update global pool stats in store
-                    setGlobalPoolStats(stats.poolHashrate || 0, stats.miners || 0, networkHashrate);
-                }
+                const networkHashrate = stats && stats.poolDifficulty
+                    ? stats.poolDifficulty / 120
+                    : poolNetworkHashrate;
+                setPoolNetworkHashrate(networkHashrate);
+                setPoolNetworkHashrateStore(networkHashrate);
+
+                // Update global pool stats in store even when difficulty is temporarily unavailable.
+                setGlobalPoolStats(stats.poolHashrate || 0, stats.miners || 0, networkHashrate);
             } catch (err) {
                 console.warn('[Mining] Failed to fetch pool stats:', err);
                 // Use default if fetch fails
+            } finally {
+                poolStatsInFlightRef.current = false;
             }
         };
 
@@ -488,7 +476,11 @@ const Mining: React.FC = () => {
                 ? pausedElapsedRef.current + Math.floor((Date.now() - startedAt) / 1000)
                 : pausedElapsedRef.current;
             setElapsedTime(nextElapsed);
-            persistMiningTimer(startedAt, nextElapsed);
+            const now = Date.now();
+            if (now - lastTimerPersistAtRef.current >= 30000) {
+                lastTimerPersistAtRef.current = now;
+                persistMiningTimer(startedAt, nextElapsed);
+            }
         };
 
         syncElapsed();
@@ -507,10 +499,10 @@ const Mining: React.FC = () => {
     // Fetch rates from backend (XMR USD, BMT USD, XMR->BMT)
     useEffect(() => {
         const fetchRates = async () => {
+            if (ratesInFlightRef.current) return;
+            ratesInFlightRef.current = true;
             try {
-                const res = await fetch(getBackendApiUrl('/rates/current'), { signal: AbortSignal.timeout(6000) });
-                if (!res.ok) throw new Error(`rates/current HTTP ${res.status}`);
-                const data = await res.json();
+                const data = await backendJson('/api/rates/current');
 
                 const toNumber = (value: any) => {
                     if (value === null || value === undefined) return 0;
@@ -537,46 +529,98 @@ const Mining: React.FC = () => {
             } catch (err) {
                 console.warn('[Mining] Failed to fetch rates from backend:', err);
                 setExchangeRates(0, 0, 0);
+            } finally {
+                ratesInFlightRef.current = false;
             }
         };
 
         // Fetch immediately on mount
         fetchRates();
-        
+
         // Then fetch periodically when running
         if (status === 'running' || status === 'paused') {
-            const interval = setInterval(fetchRates, 60000); // Update every 60s
-            return () => clearInterval(interval);
+            ratesIntervalRef.current = setInterval(fetchRates, 60000); // Update every 60s
+            return () => {
+                if (ratesIntervalRef.current) {
+                    clearInterval(ratesIntervalRef.current);
+                    ratesIntervalRef.current = null;
+                }
+            };
         }
     }, [status]);
 
     useEffect(() => {
-        if (status !== 'running' || !user?.publicKey) return;
+        if (status !== 'running' || !user?.publicKey) {
+            if (rewardReportIntervalRef.current) {
+                clearInterval(rewardReportIntervalRef.current);
+                rewardReportIntervalRef.current = null;
+            }
+            return;
+        }
 
-        const now = Date.now();
-        if (now - lastRewardReportAtRef.current < 15000) return;
+        const reportRewards = async () => {
+            const publicKey = userPublicKeyRef.current;
+            if (!publicKey || statusRef.current !== 'running' || rewardReportInFlightRef.current) return;
 
-        const seq = ++rewardReportSeqRef.current;
-        lastRewardReportAtRef.current = now;
+            const now = Date.now();
+            if (now - lastRewardReportAtRef.current < 15000) return;
 
-        SolanaAuthService.getInstance()
-            .reportMiningStats({
-                hashrate: currentHashrate,
-                shares: stratumStats?.total_stratum_shares || 0,
-                source: 'mining',
-                referenceId: `mining-${user.publicKey}-${now}-${seq}`,
-                metadata: {
-                    workerName,
-                    deviceType,
-                    elapsedTime,
-                    poolNetworkHashrate
+            rewardReportInFlightRef.current = true;
+            const seq = ++rewardReportSeqRef.current;
+            lastRewardReportAtRef.current = now;
+
+            try {
+                const currentAcceptedShareCount = localAcceptedSharesRef.current;
+                let shareSource = 'xmrig-local';
+                let shareDelta = currentAcceptedShareCount >= lastReportedAcceptedSharesRef.current
+                    ? currentAcceptedShareCount - lastReportedAcceptedSharesRef.current
+                    : currentAcceptedShareCount;
+                lastReportedAcceptedSharesRef.current = currentAcceptedShareCount;
+
+                if (shareDelta <= 0 && currentAcceptedShareCount <= 0) {
+                    const currentPoolShareCount = stratumSharesRef.current;
+                    const previousPoolShareCount = lastReportedPoolShareCountRef.current;
+                    shareDelta = previousPoolShareCount === null
+                        ? 0
+                        : currentPoolShareCount >= previousPoolShareCount
+                            ? currentPoolShareCount - previousPoolShareCount
+                            : currentPoolShareCount;
+                    lastReportedPoolShareCountRef.current = currentPoolShareCount;
+                    shareSource = 'pool-stratum';
                 }
-            })
-            .then(() => SolanaAuthService.getInstance().fetchMiningStats(user.publicKey))
-            .catch((err) => {
+
+                await SolanaAuthService.getInstance().reportMiningStats({
+                    hashrate: currentHashrateRef.current,
+                    shares: shareDelta,
+                    source: 'mining',
+                    referenceId: `mining-${publicKey}-${now}-${seq}`,
+                    metadata: {
+                        workerName: workerNameRef.current,
+                        deviceType: deviceTypeRef.current,
+                        elapsedTime: elapsedTimeRef.current,
+                        poolNetworkHashrate: poolNetworkHashrateRef.current,
+                        shareSource,
+                        localAcceptedShares: currentAcceptedShareCount
+                    }
+                });
+                await SolanaAuthService.getInstance().fetchMiningStats(publicKey);
+            } catch (err) {
                 console.warn('[Mining] Failed to report mining stats:', err);
-            });
-    }, [status, user?.publicKey, currentHashrate, stratumStats?.total_stratum_shares, workerName, deviceType, elapsedTime, poolNetworkHashrate]);
+            } finally {
+                rewardReportInFlightRef.current = false;
+            }
+        };
+
+        reportRewards();
+        rewardReportIntervalRef.current = setInterval(reportRewards, 15000);
+
+        return () => {
+            if (rewardReportIntervalRef.current) {
+                clearInterval(rewardReportIntervalRef.current);
+                rewardReportIntervalRef.current = null;
+            }
+        };
+    }, [status, user?.publicKey]);
 
     const formatTime = (seconds: number) => {
         const h = Math.floor(seconds / 3600);
@@ -588,8 +632,10 @@ const Mining: React.FC = () => {
     };
 
     const fetchStats = async () => {
-        const shouldPoll = status === 'running';
+        const shouldPoll = statusRef.current === 'running';
         if (!shouldPoll) return;
+        if (statsInFlightRef.current) return;
+        statsInFlightRef.current = true;
         try {
             // Determine which xmrig API endpoint to use based on miner version
             let endpoints: string[] = [];
@@ -630,64 +676,88 @@ const Mining: React.FC = () => {
 
             if (!data) return;
 
-            let hr = 0;
-            let temp: number | null = null;
-            let power: number | null = null;
+            const acceptedShares = Number(
+                data.results?.shares_good
+                ?? data.results?.accepted
+                ?? data.results?.shares?.good
+                ?? data.shares_good
+                ?? data.accepted_shares
+                ?? 0
+            );
+            if (Number.isFinite(acceptedShares) && acceptedShares >= 0) {
+                localAcceptedSharesRef.current = acceptedShares;
+            }
 
+            let hr = 0;
             if (deviceType === 'cpu') {
                 hr = data.hashrate?.total?.[0] ?? data.hashrate?.current ?? data.hashrate ?? 0;
                 if (hr > 0) setPeakHashrate((prev) => (hr > prev ? hr : prev));
 
-                Promise.all([
-                    window.electron.invoke('get-cpu-temp'),
-                    window.electron.invoke('get-cpu-power')
-                ]).then(([tempRes, powerRes]: any[]) => {
-                    const nextTemp = tempRes && tempRes.success ? tempRes.temp : null;
-                    const nextPower = powerRes && powerRes.success ? powerRes.power : null;
-                    updateStats(hr, nextTemp, nextPower ?? undefined);
+                updateStats(hr, null, undefined);
 
-                    if (user?.publicKey) {
-                        const deviceId = localStorage.getItem('minebench_device_id');
-                        if (deviceId) {
-                            MultiDeviceSyncService.getInstance(user.publicKey).updateDevice(deviceId, {
-                                currentHashrate: hr,
-                                temperature: nextTemp || undefined,
-                                power: nextPower || undefined,
-                                uptime: elapsedTime,
-                                accumulatedRewards: Number(miningStats?.totalRewards || 0),
-                                mode: 'mining'
-                            });
-                        }
+                if (user?.publicKey) {
+                    const deviceId = localStorage.getItem('minebench_device_id');
+                    if (deviceId) {
+                        MultiDeviceSyncService.getInstance(user.publicKey).updateDevice(deviceId, {
+                            currentHashrate: hr,
+                            uptime: elapsedTime,
+                            accumulatedRewards: Number(miningStats?.totalRewards || 0),
+                            mode: 'mining'
+                        });
                     }
-                }).catch(() => {
-                    updateStats(hr, null, undefined);
-                });
+                }
             } else if (data.gpus && data.gpus.length > 0) {
                 hr = data.gpus[0].hashrate ?? data.gpus[0].hash ?? 0;
-                temp = data.gpus[0].temperature ?? data.gpus[0].temp ?? 0;
-                power = data.gpus[0].power ?? 0;
-                updateStats(hr, temp, power ?? undefined);
+                updateStats(hr, null, undefined);
                 setPeakHashrate((prev) => (hr > prev ? hr : prev));
             }
-        } catch (err) { }
+        } catch (err) {
+        } finally {
+            statsInFlightRef.current = false;
+        }
     };
 
     const startMining = async () => {
-        if (status === 'running' || status === 'starting') return;
-        if (!isSolanaConnected) {
-            addLog('Cannot start mining: connect Solana wallet first.');
+        console.log("Start Mining clicked");
+        if (status === 'running' || status === 'starting') {
+            console.log("Mining already running or starting, skipping.");
             return;
         }
-        if (!isNodeFullySynced) {
-            addLog('Cannot start mining: pool node is not fully synced yet.');
+        if (!isSolanaConnected) {
+            addLog('Cannot start mining: connect Solana wallet first.');
             return;
         }
         if (!walletValid) {
             addLog('Cannot start mining: Monero wallet address is invalid.');
             return;
         }
+
+        // Ensure we have the latest config
+        console.log("Invalidating pool config cache...");
+        p2poolAPI.invalidateCache();
+        console.log("Fetching latest public config...");
+        try {
+            await fetchPublicConfig();
+            console.log("Public config fetched successfully.");
+        } catch (e) {
+            console.error("Failed to fetch public config:", e);
+        }
+        const latestState = useMinerStore.getState();
+        const latestPrimaryPool = latestState.pools?.['cpu'];
+        const latestReservePool = env.enableBackupPool ? latestState.pools?.['cpu-backup'] : undefined;
+        const latestNodeFullySynced = env.enableBackupPool
+            ? !!((latestPrimaryPool?.isSynced && latestPrimaryPool?.progress >= 99.9) || (latestReservePool?.isSynced && latestReservePool?.progress >= 99.9))
+            : !!(latestPrimaryPool?.isSynced && latestPrimaryPool?.progress >= 99.9);
+        if (!latestNodeFullySynced) {
+            addLog('Cannot start mining: pool node is not fully synced yet.');
+            return;
+        }
+
         resetSession();
         lastRewardReportAtRef.current = 0;
+        lastReportedPoolShareCountRef.current = null;
+        localAcceptedSharesRef.current = 0;
+        lastReportedAcceptedSharesRef.current = 0;
         rewardReportSeqRef.current = 0;
         pausedElapsedRef.current = 0;
         miningStartedAtRef.current = Date.now();
@@ -695,22 +765,25 @@ const Mining: React.FC = () => {
         setPeakHashrate(0);
         persistMiningTimer(miningStartedAtRef.current, 0);
         try {
-            await window.electron.invoke('start-mining', {
-                type: deviceType,
-                wallet,
-                worker: workerName,
-                threads: deviceType === 'cpu' ? safeMiningThreads : undefined,
-                cpuPriority,
+            console.log("Invoking Native start-mining command...");
+            await nativeApi.miner.startMining({
+                              type: deviceType,
+                              wallet,
+                              worker: workerName,
+                              threads: deviceType === 'cpu' ? safeMiningThreads : undefined,
+                              cpuPriority,
                 randomxMode,
                 hugePages,
                 donateLevel,
-                poolUrl,
+                poolUrl: latestState.poolUrl,
                 manualPoolSelection,
                 solanaWallet: user!.publicKey,
             });
+            console.log("start-mining command invoked.");
             setStatus('starting');
             fetchStats();
         } catch (err: any) {
+            console.error("Failed to start-mining:", err);
             setStatus('error');
             addLog(`Failed to start mining: ${getErrorMessage(err)}`);
         }
@@ -725,15 +798,13 @@ const Mining: React.FC = () => {
         setStatus('stopping');
         try {
             const { logs: storeLogs } = useMinerStore.getState();
-            await window.electron.invoke('save-miner-logs', {
+            await nativeApi.miner.saveLogs({
                 systemLogs: storeLogs,
-                minerLogs: storeLogs,
+                minerLogs: [],
                 sessionType: 'mining',
                 device: deviceType
-            }).catch((err: any) => {
-                console.warn('Failed to save miner logs:', err);
             });
-            await window.electron.invoke('stop-mining', {});
+            await nativeApi.miner.stopMining();
             setStatus('completed');
             addLog('Mining stopped');
         } catch (err: any) {
@@ -744,7 +815,7 @@ const Mining: React.FC = () => {
 
     const pauseMining = async () => {
         try {
-            await window.electron.invoke('pause-mining', {});
+            await nativeApi.miner.pauseMining();
             pausedElapsedRef.current = elapsedTime;
             miningStartedAtRef.current = null;
             persistMiningTimer(null, elapsedTime);
@@ -759,7 +830,7 @@ const Mining: React.FC = () => {
 
     const resumeMining = async () => {
         try {
-            await window.electron.invoke('resume-mining', {});
+            await nativeApi.miner.resumeMining();
             pausedElapsedRef.current = elapsedTime;
             miningStartedAtRef.current = Date.now();
             persistMiningTimer(miningStartedAtRef.current, elapsedTime);
@@ -774,9 +845,10 @@ const Mining: React.FC = () => {
     return (
         <div className="space-y-6">
             {showShareAnimation && (
-                <ShareAnimation 
-                    theme={theme} 
-                    onComplete={() => setShowShareAnimation(false)} 
+                <ShareAnimation
+                    theme={theme}
+                    onComplete={() => setShowShareAnimation(false)}
+                    onClose={() => setShowShareAnimation(false)}
                 />
             )}
             <div className="flex items-center justify-between">
@@ -850,12 +922,12 @@ const Mining: React.FC = () => {
                                 <div className="flex justify-between items-center">
                                     <label className={cn("text-xs", theme === 'light' ? 'text-zinc-600' : 'text-zinc-500')}>CPU Priority:</label>
                                     <span className={cn("text-sm font-mono", theme === 'light' ? 'text-yellow-600' : 'text-yellow-400')}>
-                                        {cpuPriority === 0 ? 'Idle' : cpuPriority === 1 ? 'Low' : 'Normal'}
+                                        {cpuPriority === 0 ? 'Idle' : cpuPriority === 1 ? 'Low' : cpuPriority === 2 ? 'Normal' : 'High'}
                                     </span>
                                 </div>
-                                <input type="range" min="0" max="2" value={Math.min(cpuPriority, 2)} onChange={(e) => setCpuPriority(Number(e.target.value))} disabled={status === 'running' || status === 'starting'} className={cn("w-full h-2 rounded-lg appearance-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed", theme === 'light' ? 'bg-zinc-300' : 'bg-zinc-800')} />
+                                <input type="range" min="0" max="3" value={Math.min(cpuPriority, 3)} onChange={(e) => setCpuPriority(Number(e.target.value))} disabled={status === 'running' || status === 'starting'} className={cn("w-full h-2 rounded-lg appearance-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed", theme === 'light' ? 'bg-zinc-300' : 'bg-zinc-800')} />
                                 <p className={cn("text-xs", theme === 'light' ? 'text-zinc-500' : 'text-zinc-600')}>
-                                    Idle · Low · Normal — balancing performance and system stability
+                                    Idle · Low · Normal · High — balancing performance and system stability
                                 </p>
                             </div>
                             <div className={cn("pt-2 space-y-2", theme === 'light' ? 'border-t border-zinc-200' : 'border-t border-white/5')}>
@@ -918,9 +990,6 @@ const Mining: React.FC = () => {
                         <div className="grid grid-cols-2 gap-2">
                             <MetricCard label="H/s" value={formatHashrate(currentHashrate)} icon={<Zap size={14} />} color="emerald" theme={theme} />
                             <MetricCard label="Peak" value={formatHashrate(peakHashrate)} icon={<TrendingUp size={14} />} color="yellow" theme={theme} />
-                            {currentTemp !== null && currentTemp !== undefined && currentTemp > 0 && (
-                                <MetricCard label="Temp" value={`${currentTemp.toFixed(0)}°C`} icon={<Thermometer size={14} />} color="emerald" theme={theme} />
-                            )}
                             <MetricCard label="Time" value={formatTime(elapsedTime)} icon={<Clock size={14} />} color="emerald" theme={theme} />
                         </div>
                         <div className="grid grid-cols-2 gap-2">
@@ -941,18 +1010,17 @@ const Mining: React.FC = () => {
                                 </div>
                             )}
                             <button onClick={status === 'paused' ? resumeMining : (status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping') ? startMining : pauseMining} disabled={status === 'starting' || ((!walletValid || !isSolanaConnected || !isNodeFullySynced) && (status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping'))} className={cn('py-3.5 px-4 rounded-xl font-semibold text-sm tracking-tight transition-all transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 cursor-pointer', status === 'running' || status === 'paused' ? 'bg-yellow-500/10 text-yellow-600 border-2 border-yellow-500/20 hover:bg-yellow-500/20' : (theme === 'light' ? 'bg-emerald-600 text-white border-2 border-emerald-600 hover:bg-emerald-500' : 'bg-emerald-500 text-zinc-950 border-2 border-emerald-500 hover:bg-emerald-400'))}>
-                                {status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping' ? <><Play size={16} /> Start</> : status === 'paused' ? <><PlayIcon size={16} /> Resume</> : status === 'starting' ? <><Hourglass size={16} className="animate-spin" /> Connecting</> : <><Pause size={16} /> Pause</>}
+                                {status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping' ? <><Play size={16} /> Start</> : status === 'paused' ? <><Play size={16} /> Resume</> : status === 'starting' ? <><Hourglass size={16} className="animate-spin" /> Connecting</> : <><PauseSolid size={16} /> Pause</>}
                             </button>
                             <button onClick={stopMining} disabled={status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping'} className={cn('py-3.5 px-4 rounded-xl font-semibold text-sm tracking-tight transition-all transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 cursor-pointer', status === 'running' || status === 'starting' || status === 'paused' ? 'bg-red-500/10 text-red-500 border-2 border-red-500/20 hover:bg-red-500/20' : (theme === 'light' ? 'bg-zinc-200 text-zinc-500 border-2 border-zinc-200' : 'bg-zinc-800 text-zinc-600 border-2 border-zinc-800'))}>
-                                <Square size={16} /> Stop
-                            </button>
-                        </div>
+                            <SquareSolid size={16} /> Stop
+                            </button>                        </div>
                     </div>
                     <div className={cn("border rounded-xl p-5 space-y-4", theme === 'light' ? 'bg-white border-zinc-200' : 'bg-zinc-900/50 border-white/10')}>
                         <div className="flex items-center justify-between">
                             <span className={cn("text-sm font-semibold", theme === 'light' ? 'text-zinc-700' : 'text-zinc-300')}>Pool Stats</span>
                             <span className={cn("text-[10px] uppercase tracking-widest", theme === 'light' ? 'text-zinc-500' : 'text-zinc-500')}>
-                                {stratumStats ? (stratumStats.wallet ? 'Live' : 'No Wallet') : 'Waiting for backend stats...'}
+                                {poolStatusLabel}
                             </span>
                         </div>
                         <div className="grid grid-cols-2 gap-2">
@@ -1025,7 +1093,7 @@ const Mining: React.FC = () => {
     );
 };
 
-const StatCard = ({ label, value, icon, tone = 'blue', theme }: { label: string; value: string; icon: React.ReactNode; tone?: 'blue' | 'emerald' | 'violet' | 'sky' | 'cyan' | 'teal' | 'rose' | 'amber'; theme: string }) => {
+const StatCard = React.memo(({ label, value, icon, tone = 'blue', theme }: { label: string; value: string; icon: React.ReactNode; tone?: 'blue' | 'emerald' | 'violet' | 'sky' | 'cyan' | 'teal' | 'rose' | 'amber'; theme: string }) => {
     const tones = {
         blue: { light: 'border-l-blue-500 text-zinc-700', dark: 'border-l-blue-400 text-zinc-300' },
         emerald: { light: 'border-l-emerald-500 text-zinc-700', dark: 'border-l-emerald-400 text-zinc-300' },
@@ -1047,7 +1115,7 @@ const StatCard = ({ label, value, icon, tone = 'blue', theme }: { label: string;
             <div className={cn("text-lg font-mono", theme === 'light' ? 'text-zinc-900' : 'text-white')}>{value}</div>
         </div>
     );
-};
+});
 
 const MetricCard = React.memo(({ label, value, icon, color, theme }: { label: string; value: string; icon: React.ReactNode; color: 'emerald' | 'yellow' | 'blue'; theme: string }) => {
     const colorMap = {

@@ -12,19 +12,18 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
-        .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_os::init())
-        .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             commands::get_cpu_name,
             commands::get_cpu_cores,
             commands::get_cpu_info,
             commands::get_system_stats,
+            commands::get_process_stats,
+            commands::get_display_status,
             commands::solana_connect_wallet,
             commands::solana_disconnect_wallet,
             commands::solana_get_token_balance,
             commands::get_premium_status,
+            commands::backend_request,
             commands::get_runtime_pool_config,
             commands::get_auto_start,
             commands::set_auto_start,
@@ -43,7 +42,8 @@ pub fn run() {
             commands::window_minimize,
             commands::window_maximize,
             commands::window_close,
-            commands::open_folder,
+            commands::open_external_url,
+            commands::open_logs_directory,
             commands::get_logs_directory,
             commands::get_miner_path,
             commands::start_benchmark,

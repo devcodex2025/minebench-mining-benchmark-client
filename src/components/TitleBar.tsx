@@ -2,19 +2,27 @@ import React from 'react';
 import { Minus, Square, X } from './icons';
 import { cn } from '../lib/utils';
 import { useTheme } from '../contexts/ThemeContext';
+import { nativeApi } from '../lib/native-api';
 
 export const TitleBar: React.FC = () => {
   const { theme } = useTheme();
+
   const handleMinimize = () => {
-    window.electron.invoke('window-minimize');
+    nativeApi.invoke('window_minimize').catch((err) => {
+      console.error('Failed to minimize window:', err);
+    });
   };
 
   const handleMaximize = () => {
-    window.electron.invoke('window-maximize');
+    nativeApi.invoke('window_maximize').catch((err) => {
+      console.error('Failed to toggle fullscreen:', err);
+    });
   };
 
   const handleClose = () => {
-    window.electron.invoke('window-close');
+    nativeApi.invoke('window_close').catch((err) => {
+      console.error('Failed to close window:', err);
+    });
   };
 
   return (
