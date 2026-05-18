@@ -10,7 +10,7 @@
     "dev": "vite",
     "dev:local": "vite --mode development",
     "dev:prod": "vite --mode production",
-    "sync:version": "powershell -ExecutionPolicy Bypass -File ./scripts/update-tauri-version.ps1",
+    "sync:version": "node ./scripts/update-tauri-version.cjs",
     "prebuild": "npm run sync:version",
     "pretauri:dev": "npm run sync:version",
     "pretauri:build": "npm run sync:version",
