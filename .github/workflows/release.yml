@@ -45,6 +45,8 @@ jobs:
           cache: 'npm'
       - name: Install dependencies
         run: npm install
+      - name: Install macOS Rust targets
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
       - name: Build renderer
         run: npm run build
       - name: Build macOS (x64 + ARM64)
