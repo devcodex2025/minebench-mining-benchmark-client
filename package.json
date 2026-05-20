@@ -1,7 +1,7 @@
 {
   "name": "MineBench-Client",
   "private": true,
-  "version": "0.8.9",
+  "version": "0.8.10",
   "productName": "MineBench Client",
   "description": "Mining benchmark desktop client with native Wayland support.",
   "author": "MineBench Team",
@@ -76,7 +76,7 @@
   "publish": {
     "provider": "github",
     "owner": "devcodex2025",
-    "repo": "MineBench-Client"
+    "repo": "minebench-mining-benchmark-client"
   },
   "overrides": {
     "bn.js": "5.2.3"

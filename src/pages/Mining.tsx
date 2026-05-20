@@ -152,16 +152,15 @@ const Mining: React.FC = () => {
     const poolStatsIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const ratesIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const rewardReportIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const verifiedSharesIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const statsInFlightRef = useRef(false);
     const poolStatsInFlightRef = useRef(false);
     const ratesInFlightRef = useRef(false);
     const rewardReportInFlightRef = useRef(false);
+    const verifiedSharesInFlightRef = useRef(false);
     const lastRewardReportAtRef = useRef(0);
     const lastTimerPersistAtRef = useRef(0);
     const lastShareCountRef = useRef<number | null>(null);
-    const lastReportedPoolShareCountRef = useRef<number | null>(null);
-    const localAcceptedSharesRef = useRef(0);
-    const lastReportedAcceptedSharesRef = useRef(0);
     const rewardReportSeqRef = useRef(0);
     const miningStartedAtRef = useRef<number | null>(null);
     const pausedElapsedRef = useRef(0);
@@ -184,9 +183,26 @@ const Mining: React.FC = () => {
         : !!(primaryPool?.isSynced && primaryPool?.progress >= 99.9);
     const maxMiningThreads = Math.max(1, cpuCores - 1);
     const safeMiningThreads = Math.min(threads, maxMiningThreads);
-    const activeWindowUserShares = Number(miningStats?.activeWindowUserShares ?? miningStats?.activeShares ?? 0);
+    const activeWindowUserShares = Number(miningStats?.activeWindowUserShares ?? 0);
     const activeWindowPoolShares = Number(miningStats?.activeWindowPoolShares ?? 0);
     const activeWindowRewardSharePercent = Number(miningStats?.activeWindowRewardSharePercent ?? 0);
+    const currentWindowUpdatedAt = miningStats?.currentWindow?.updatedAt
+        ? new Date(miningStats.currentWindow.updatedAt).toLocaleTimeString()
+        : null;
+
+    const refreshVerifiedShares = useCallback(async () => {
+        const publicKey = userPublicKeyRef.current;
+        if (!publicKey || verifiedSharesInFlightRef.current) return;
+
+        verifiedSharesInFlightRef.current = true;
+        try {
+            await SolanaAuthService.getInstance().fetchMiningStats(publicKey);
+        } catch (err) {
+            console.warn('[Mining] Failed to refresh verified shares:', err);
+        } finally {
+            verifiedSharesInFlightRef.current = false;
+        }
+    }, []);
 
     useEffect(() => {
         statusRef.current = status;
@@ -347,6 +363,10 @@ const Mining: React.FC = () => {
         const setupListeners = async () => {
             unlistenLog = await nativeApi.listen<string>('miner-log', (msg: string) => {
                 const line = msg.toLowerCase();
+                if (msg.startsWith('[MineBench]')) {
+                    addLog(msg);
+                    return;
+                }
                 const isConnectError =
                     line.includes('connection refused') ||
                     line.includes('failed to connect') ||
@@ -390,6 +410,7 @@ const Mining: React.FC = () => {
             if (poolStatsIntervalRef.current) clearInterval(poolStatsIntervalRef.current);
             if (ratesIntervalRef.current) clearInterval(ratesIntervalRef.current);
             if (rewardReportIntervalRef.current) clearInterval(rewardReportIntervalRef.current);
+            if (verifiedSharesIntervalRef.current) clearInterval(verifiedSharesIntervalRef.current);
         };
     }, []);
 
@@ -415,6 +436,26 @@ const Mining: React.FC = () => {
             }
         };
     }, [status, deviceType]);
+
+    useEffect(() => {
+        if (!user?.publicKey) {
+            if (verifiedSharesIntervalRef.current) {
+                clearInterval(verifiedSharesIntervalRef.current);
+                verifiedSharesIntervalRef.current = null;
+            }
+            return;
+        }
+
+        refreshVerifiedShares();
+        verifiedSharesIntervalRef.current = setInterval(refreshVerifiedShares, 15000);
+
+        return () => {
+            if (verifiedSharesIntervalRef.current) {
+                clearInterval(verifiedSharesIntervalRef.current);
+                verifiedSharesIntervalRef.current = null;
+            }
+        };
+    }, [refreshVerifiedShares, user?.publicKey]);
 
     // Fetch pool network hashrate and stats for reward calculation
     useEffect(() => {
@@ -443,6 +484,7 @@ const Mining: React.FC = () => {
 
                 // Update global pool stats in store even when difficulty is temporarily unavailable.
                 setGlobalPoolStats(stats.poolHashrate || 0, stats.miners || 0, networkHashrate);
+                await refreshVerifiedShares();
             } catch (err) {
                 console.warn('[Mining] Failed to fetch pool stats:', err);
                 // Use default if fetch fails
@@ -456,7 +498,7 @@ const Mining: React.FC = () => {
         return () => {
             if (poolStatsIntervalRef.current) clearInterval(poolStatsIntervalRef.current);
         };
-    }, [setGlobalPoolStats, setPoolNetworkHashrateStore]);
+    }, [refreshVerifiedShares, setGlobalPoolStats, setPoolNetworkHashrateStore]);
 
     useEffect(() => {
         if (status !== 'running') {
@@ -570,28 +612,9 @@ const Mining: React.FC = () => {
             lastRewardReportAtRef.current = now;
 
             try {
-                const currentAcceptedShareCount = localAcceptedSharesRef.current;
-                let shareSource = 'xmrig-local';
-                let shareDelta = currentAcceptedShareCount >= lastReportedAcceptedSharesRef.current
-                    ? currentAcceptedShareCount - lastReportedAcceptedSharesRef.current
-                    : currentAcceptedShareCount;
-                lastReportedAcceptedSharesRef.current = currentAcceptedShareCount;
-
-                if (shareDelta <= 0 && currentAcceptedShareCount <= 0) {
-                    const currentPoolShareCount = stratumSharesRef.current;
-                    const previousPoolShareCount = lastReportedPoolShareCountRef.current;
-                    shareDelta = previousPoolShareCount === null
-                        ? 0
-                        : currentPoolShareCount >= previousPoolShareCount
-                            ? currentPoolShareCount - previousPoolShareCount
-                            : currentPoolShareCount;
-                    lastReportedPoolShareCountRef.current = currentPoolShareCount;
-                    shareSource = 'pool-stratum';
-                }
-
                 await SolanaAuthService.getInstance().reportMiningStats({
                     hashrate: currentHashrateRef.current,
-                    shares: shareDelta,
+                    shares: 0,
                     source: 'mining',
                     referenceId: `mining-${publicKey}-${now}-${seq}`,
                     metadata: {
@@ -599,8 +622,7 @@ const Mining: React.FC = () => {
                         deviceType: deviceTypeRef.current,
                         elapsedTime: elapsedTimeRef.current,
                         poolNetworkHashrate: poolNetworkHashrateRef.current,
-                        shareSource,
-                        localAcceptedShares: currentAcceptedShareCount
+                        shareSource: 'pool-verified-only'
                     }
                 });
                 await SolanaAuthService.getInstance().fetchMiningStats(publicKey);
@@ -676,18 +698,6 @@ const Mining: React.FC = () => {
 
             if (!data) return;
 
-            const acceptedShares = Number(
-                data.results?.shares_good
-                ?? data.results?.accepted
-                ?? data.results?.shares?.good
-                ?? data.shares_good
-                ?? data.accepted_shares
-                ?? 0
-            );
-            if (Number.isFinite(acceptedShares) && acceptedShares >= 0) {
-                localAcceptedSharesRef.current = acceptedShares;
-            }
-
             let hr = 0;
             if (deviceType === 'cpu') {
                 hr = data.hashrate?.total?.[0] ?? data.hashrate?.current ?? data.hashrate ?? 0;
@@ -755,9 +765,6 @@ const Mining: React.FC = () => {
 
         resetSession();
         lastRewardReportAtRef.current = 0;
-        lastReportedPoolShareCountRef.current = null;
-        localAcceptedSharesRef.current = 0;
-        lastReportedAcceptedSharesRef.current = 0;
         rewardReportSeqRef.current = 0;
         pausedElapsedRef.current = 0;
         miningStartedAtRef.current = Date.now();
@@ -765,6 +772,9 @@ const Mining: React.FC = () => {
         setPeakHashrate(0);
         persistMiningTimer(miningStartedAtRef.current, 0);
         try {
+            addLog(`Starting miner: XMR payout wallet (-u) ${wallet}`);
+            addLog(`Starting miner: reward tracking (--rig-id) ${user!.publicKey}`);
+            addLog(`Starting miner: pool ${latestState.poolUrl}`);
             console.log("Invoking Native start-mining command...");
             await nativeApi.miner.startMining({
                               type: deviceType,
@@ -1029,7 +1039,7 @@ const Mining: React.FC = () => {
                             <StatCard label="24h Avg" value={formatHashrate(stratumStats?.hashrate_24h || 0)} icon={<Clock size={12} />} tone="violet" theme={theme} />
                             <StatCard label="Workers" value={`${stratumStats?.workers?.length || poolMinersCount || 0}`} icon={<Cpu size={12} />} tone="sky" theme={theme} />
                             <StatCard label="Connections" value={`${stratumStats?.connections || poolMinersCount || 0}`} icon={<Shield size={12} />} tone="cyan" theme={theme} />
-                            <StatCard label="Accepted Shares" value={`${stratumStats?.total_stratum_shares || 0}`} icon={<Zap size={12} />} tone="teal" theme={theme} />
+                            <StatCard label="Pool Stratum Shares" value={`${stratumStats?.total_stratum_shares || 0}`} icon={<Zap size={12} />} tone="teal" theme={theme} />
                             <StatCard label="Failed Shares" value={`${stratumStats?.shares_failed || 0}`} icon={<Flame size={12} />} tone="rose" theme={theme} />
                             <StatCard label="Total Hashes" value={((stratumStats?.total_hashes || 0)).toLocaleString()} icon={<Gauge size={12} />} tone="amber" theme={theme} />
                         </div>
@@ -1037,16 +1047,16 @@ const Mining: React.FC = () => {
                             <div>Current Effort: {(((stratumStats?.current_effort || 0) * 100)).toFixed(2)}%</div>
                             <div>Average Effort: {(((stratumStats?.average_effort || 0) * 100)).toFixed(2)}%</div>
                             <div>Share Found: {stratumStats?.shares_found || 0}</div>
-                            <div>Reward Share: {(((stratumStats?.block_reward_share_percent || 0))).toFixed(3)}%</div>
+                            <div>Block Share Estimate: {(((stratumStats?.block_reward_share_percent || 0))).toFixed(3)}%</div>
                         </div>
                     </div>
                     <div className={cn("border rounded-xl p-5 space-y-4", theme === 'light' ? 'bg-white border-zinc-200' : 'bg-zinc-900/50 border-white/10')}>
                         <div className={cn("flex items-center gap-2 text-xs font-semibold uppercase tracking-wider", theme === 'light' ? 'text-sky-700' : 'text-sky-400')}>
                             <Shield size={14} />
-                            Verified Shares
+                            Reward Window Shares
                         </div>
                         <div className={cn("text-xs mt-1", theme === 'light' ? 'text-zinc-500' : 'text-zinc-600')}>
-                            Current Monero reward window share accounting from backend.
+                            Current Monero reward window share accounting from backend{currentWindowUpdatedAt ? `, updated ${currentWindowUpdatedAt}` : ''}.
                         </div>
                         <div className="grid grid-cols-2 gap-2 text-xs">
                             <div>
@@ -1066,26 +1076,6 @@ const Mining: React.FC = () => {
                                 <span className={cn("font-mono", theme === 'light' ? 'text-zinc-900' : 'text-white')}>{(miningStats?.paidShares ?? 0).toLocaleString()}</span>
                             </div>
                         </div>
-                        {(Number(miningStats?.totalXmrMined ?? 0) > 0 || Number(miningStats?.totalBmtEarned ?? 0) > 0 || Number(miningStats?.activeShares ?? 0) > 0) && (
-                            <>
-                                <div className={cn("border-t", theme === 'light' ? 'border-zinc-200' : 'border-white/5')} />
-                                <div className={cn("text-xs uppercase tracking-wide pt-1", theme === 'light' ? 'text-zinc-500' : 'text-zinc-500')}>Lifetime (from pool)</div>
-                                <div className="grid grid-cols-2 gap-2 text-xs">
-                                    <div>
-                                        <span className={cn(theme === 'light' ? 'text-zinc-600' : 'text-zinc-400')}>XMR mined: </span>
-                                        <span className={cn("font-mono", theme === 'light' ? 'text-zinc-900' : 'text-white')}>{(miningStats?.totalXmrMined ?? 0).toFixed(8)}</span>
-                                    </div>
-                                    <div>
-                                        <span className={cn(theme === 'light' ? 'text-zinc-600' : 'text-zinc-400')}>Active shares: </span>
-                                        <span className={cn("font-mono", theme === 'light' ? 'text-zinc-900' : 'text-white')}>{(miningStats?.activeShares ?? 0).toLocaleString()}</span>
-                                    </div>
-                                    <div>
-                                        <span className={cn(theme === 'light' ? 'text-zinc-600' : 'text-zinc-400')}>BMT credited: </span>
-                                        <span className={cn("font-mono", theme === 'light' ? 'text-zinc-900' : 'text-white')}>{(miningStats?.totalBmtEarned ?? 0).toFixed(2)}</span>
-                                    </div>
-                                </div>
-                            </>
-                        )}
                     </div>
                 </div>
             </div>

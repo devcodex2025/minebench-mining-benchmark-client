@@ -20,6 +20,8 @@ export const SolanaAuthButton: React.FC = () => {
   const tokenMint = getEnvironmentConfig().bmtTokenMint;
   const authService = SolanaAuthService.getInstance();
   const dbTotalBMT = useMinerStore(state => state.dbTotalBMT);
+  const miningStatus = useMinerStore(state => state.status);
+  const isMiningLocked = miningStatus === 'running' || miningStatus === 'starting' || miningStatus === 'paused';
 
   useEffect(() => {
     if (isConnected && user?.publicKey && Number.isFinite(dbTotalBMT)) {
@@ -156,7 +158,11 @@ export const SolanaAuthButton: React.FC = () => {
         const stillConnected = await authService.verifyConnection();
         if (!stillConnected) {
           useSolanaAuth.getState().disconnect();
+          return;
         }
+        authService.fetchMiningStats(stored.publicKey).catch((err) => {
+          console.warn('[SolanaAuthButton] Failed to refresh restored wallet stats:', err);
+        });
       }
     };
 
@@ -179,6 +185,10 @@ export const SolanaAuthButton: React.FC = () => {
   const handleDisconnect = async () => {
     try {
       setError(null);
+      if (isMiningLocked) {
+        setError('Stop mining before disconnecting wallet');
+        return;
+      }
       await authService.disconnectWallet();
     } catch (err: any) {
       setError(err.message);
@@ -188,11 +198,11 @@ export const SolanaAuthButton: React.FC = () => {
   if (isConnected && user) {
     return (
       <div className={cn(
-        'flex items-center gap-3 px-4 py-2 rounded-lg border',
+        'flex items-center gap-2 xl:gap-3 px-3 xl:px-4 py-2 rounded-lg border',
         isDark ? 'bg-amber-200/10 border-amber-200/20' : 'bg-yellow-400/10 border-yellow-400/30'
       )}>
         <CheckCircle className={cn('w-4 h-4 flex-shrink-0', isDark ? 'text-amber-200' : 'text-yellow-500')} />
-        <div className="flex flex-col gap-0.5 min-w-0">
+        <div className="flex flex-col gap-0.5 min-w-0 flex-1">
           <code
             className={cn('text-[10px] font-mono truncate', isDark ? 'text-amber-200/80' : 'text-yellow-700/80')}
             title={user.publicKey}
@@ -210,12 +220,14 @@ export const SolanaAuthButton: React.FC = () => {
         </div>
         <button
           onClick={handleDisconnect}
+          disabled={isMiningLocked}
           className={cn(
             'ml-auto p-1.5 rounded hover:bg-red-500/20 transition cursor-pointer',
             isDark ? 'text-amber-200' : 'text-yellow-600',
-            'hover:text-red-400'
+            'hover:text-red-400',
+            isMiningLocked && 'opacity-40 cursor-not-allowed hover:bg-transparent hover:text-current'
           )}
-          title="Disconnect wallet"
+          title={isMiningLocked ? 'Stop mining before disconnecting wallet' : 'Disconnect wallet'}
         >
           <LogOut className="w-4 h-4" />
         </button>
