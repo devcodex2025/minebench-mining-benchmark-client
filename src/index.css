@@ -11,6 +11,10 @@ body {
   overflow: hidden; /* App handles scrolling */
 }
 
+#root {
+  min-width: 920px;
+}
+
 /* Custom Scrollbar for main content (neutral dark) */
 .custom-scrollbar::-webkit-scrollbar {
   width: 6px;

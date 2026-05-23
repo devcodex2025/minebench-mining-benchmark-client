@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "MineBench Client",
-  "version": "0.8.5",
+  "version": "0.8.11",
   "identifier": "cloud.minebench.client",
   "build": {
     "frontendDist": "../web-dist",
@@ -15,6 +15,8 @@
         "title": "MineBench Client",
         "width": 1024,
         "height": 768,
+        "minWidth": 920,
+        "minHeight": 640,
         "resizable": true,
         "fullscreen": false,
         "decorations": false,

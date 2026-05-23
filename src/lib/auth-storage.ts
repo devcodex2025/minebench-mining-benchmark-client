@@ -34,7 +34,7 @@ const getSecret = (key: string) => {
 
 const setSecret = (key: string, value: string) => {
   getSessionStorage()?.setItem(key, value);
-  getLocalStorage()?.removeItem(key);
+  getLocalStorage()?.setItem(key, value);
 };
 
 const removeSecret = (key: string) => {

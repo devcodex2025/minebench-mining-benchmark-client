@@ -5,11 +5,7 @@ import { cn } from '../lib/utils';
 import { useMinerStore } from '../store/useMinerStore';
 import { useEnvironment } from '../hooks/useEnvironment';
 import { nativeApi } from '../lib/native-api';
-
-// Version from build-time define
-declare const __APP_VERSION__: string;
-const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '0.0.0';
-const LATEST_VERSION = APP_VERSION;
+import { getAppUpdateStatus, getInitialAppUpdateStatus, RELEASES_URL } from '../services/appUpdate';
 
 export const Settings = () => {
   const { theme, toggleTheme } = useTheme();
@@ -21,6 +17,7 @@ export const Settings = () => {
   const [autoStartLoading, setAutoStartLoading] = useState(false);
   const isNative = (window as any).__TAURI_INTERNALS__;
   const autoStartDisabled = autoStartLoading || !autoStartSupported || !isNative;
+  const [updateStatus, setUpdateStatus] = useState(getInitialAppUpdateStatus);
 
   const openExternal = useCallback(async (url: string) => {
     try {
@@ -58,16 +55,15 @@ export const Settings = () => {
 
   const handleCheckUpdates = async () => {
     setCheckingUpdates(true);
-    // Simulate checking for updates
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    setUpdateAvailable(false);
+    const status = await getAppUpdateStatus();
+    setUpdateStatus(status);
+    setUpdateAvailable(status.updateAvailable);
     setUpdateChecked(true);
     setCheckingUpdates(false);
   };
 
   const handleDownloadUpdate = () => {
-    // Open MineBench releases page
-    openExternal('https://minebench.app/releases');
+    openExternal(RELEASES_URL);
   };
 
   const refreshAutoStart = useCallback(async () => {
@@ -105,6 +101,18 @@ export const Settings = () => {
     refreshAutoStart();
   }, [refreshAutoStart]);
 
+  useEffect(() => {
+    let active = true;
+
+    getAppUpdateStatus().then((status) => {
+      if (active) setUpdateStatus(status);
+    });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
   return (
     <div className="space-y-6">
       <div>
@@ -117,7 +125,12 @@ export const Settings = () => {
           <Info size={20} className="text-yellow-400 mt-1 flex-shrink-0" />
           <div className="flex-1">
             <h2 className={cn("text-lg font-semibold", theme === 'light' ? 'text-zinc-900' : 'text-white')}>Application Version</h2>
-            <p className={cn("mt-1", textClass)}>Current version: <span className="text-yellow-400 font-mono font-bold">v{APP_VERSION}</span></p>
+            <p className={cn("mt-1", textClass)}>Current version: <span className="text-yellow-400 font-mono font-bold">v{updateStatus.currentVersion}</span></p>
+            {updateStatus.updateAvailable && (
+              <p className={cn("mt-1 text-xs", theme === 'light' ? 'text-yellow-700' : 'text-yellow-400')}>
+                Update required: v{updateStatus.latestVersion} is available.
+              </p>
+            )}
           </div>
         </div>
       </div>
@@ -260,6 +273,7 @@ const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
   const env = useEnvironment();
   const wallet = useMinerStore((s) => s.wallet);
   const poolUrl = useMinerStore((s) => s.poolUrl);
+  const backendPoolEndpoints = useMinerStore((s) => s.backendPoolEndpoints);
   const donateLevel = useMinerStore((s) => s.donateLevel);
   const isPremium = useMinerStore((s) => s.isPremium);
   
@@ -288,9 +302,12 @@ const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
     theme === 'light' ? 'text-zinc-600' : 'text-zinc-500'
   );
 
+  const backendPresetPools = backendPoolEndpoints.map((endpoint) => ({
+    name: endpoint.label,
+    url: endpoint.url
+  }));
   const presetPools = [
-    { name: 'MineBench Pool (Primary)', url: env.poolStratumUrl },
-    ...(env.enableBackupPool ? [{ name: 'MineBench Pool (Reserve)', url: env.poolStratumUrlBackup }] : []),
+    ...(backendPresetPools.length > 0 ? backendPresetPools : [{ name: 'MineBench Pool (Primary)', url: env.poolStratumUrl }]),
     { name: 'SupportXMR', url: 'pool.supportxmr.com:3333' },
     { name: 'MoneroOcean', url: 'gulf.moneroocean.stream:10032' },
   ];

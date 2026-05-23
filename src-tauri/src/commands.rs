@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use sysinfo::{System, Components};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -14,6 +14,9 @@ use axum::{
 };
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Instant;
+use tokio::net::TcpStream;
+use tokio::time::{timeout, Duration};
 use crate::miner::{self, MinerState};
 
 #[cfg(target_os = "windows")]
@@ -122,6 +125,27 @@ pub async fn backend_request(request: BackendRequest) -> Result<serde_json::Valu
         "status": status,
         "data": data,
         "text": text
+    }))
+}
+
+#[tauri::command]
+pub async fn ping_pool_endpoint(host: String, port: u16) -> Result<serde_json::Value, String> {
+    let host = host.trim();
+    if host.is_empty() || host.contains('/') || host.contains("://") {
+        return Err("Invalid pool host".to_string());
+    }
+
+    let addr = format!("{host}:{port}");
+    let started = Instant::now();
+    timeout(Duration::from_secs(3), TcpStream::connect(&addr))
+        .await
+        .map_err(|_| "Pool latency check timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+
+    Ok(serde_json::json!({
+        "host": host,
+        "port": port,
+        "latencyMs": started.elapsed().as_millis()
     }))
 }
 
@@ -1244,13 +1268,14 @@ fn build_xmrig_args(request: &MinerStartRequest, _benchmark: bool) -> Result<(St
         format!("stratum+tcp://{}", pool_url)
     };
     let worker = validate_miner_value(&request.worker.replace(char::is_whitespace, "-"), "worker", 80)?;
-    let rig_id = request
+    let solana_wallet = request
         .solana_wallet
         .clone()
         .filter(|v| !v.trim().is_empty())
         .map(|value| validate_miner_value(&value, "solana wallet", 160))
         .transpose()?
         .unwrap_or_else(|| worker.clone());
+    let xmrig_user = wallet.clone();
     let api_port = "4077";
     let donate_level = request.donate_level.unwrap_or(0).min(5).to_string();
     let cpu_priority = request.cpu_priority.unwrap_or(2).min(5).to_string();
@@ -1269,11 +1294,11 @@ fn build_xmrig_args(request: &MinerStartRequest, _benchmark: bool) -> Result<(St
         "-o".to_string(),
         normalized_pool,
         "-u".to_string(),
-        wallet,
+        xmrig_user,
         "-p".to_string(),
         "x".to_string(),
         "--rig-id".to_string(),
-        rig_id,
+        solana_wallet,
         "--http-enabled".to_string(),
         "--http-host".to_string(),
         "127.0.0.1".to_string(),
@@ -1301,6 +1326,22 @@ fn build_xmrig_args(request: &MinerStartRequest, _benchmark: bool) -> Result<(St
     args.push(threads.to_string());
 
     Ok(("xmrig".to_string(), args))
+}
+
+fn get_arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.windows(2)
+        .find(|pair| pair[0] == flag)
+        .map(|pair| pair[1].as_str())
+}
+
+fn emit_miner_launch_logs(app: &AppHandle, args: &[String]) {
+    let pool = get_arg_value(args, "-o").unwrap_or("unknown");
+    let payout_wallet = get_arg_value(args, "-u").unwrap_or("unknown");
+    let rig_id = get_arg_value(args, "--rig-id").unwrap_or("unknown");
+
+    let _ = app.emit("miner-log", format!("[MineBench] Pool: {}", pool));
+    let _ = app.emit("miner-log", format!("[MineBench] XMR payout wallet (-u): {}", payout_wallet));
+    let _ = app.emit("miner-log", format!("[MineBench] Reward tracking (--rig-id): {}", rig_id));
 }
 
 fn validate_miner_value(value: &str, label: &str, max_len: usize) -> Result<String, String> {
@@ -1335,6 +1376,7 @@ pub async fn start_benchmark(
     state: tauri::State<'_, MinerState>,
 ) -> Result<(), String> {
     let (miner_name, args) = build_xmrig_args(&request, true)?;
+    emit_miner_launch_logs(&app, &args);
     let miner_path = resolve_miner_path(&app, &miner_name)?.to_string_lossy().to_string();
     miner::spawn_miner(app, miner_path, args, state).await
 }
@@ -1351,6 +1393,7 @@ pub async fn start_mining(
     state: tauri::State<'_, MinerState>,
 ) -> Result<(), String> {
     let (miner_name, args) = build_xmrig_args(&request, false)?;
+    emit_miner_launch_logs(&app, &args);
     let miner_path = resolve_miner_path(&app, &miner_name)?.to_string_lossy().to_string();
     miner::spawn_miner(app, miner_path, args, state).await
 }

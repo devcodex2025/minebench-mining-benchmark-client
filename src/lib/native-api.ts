@@ -77,5 +77,6 @@ export const nativeApi = {
     rpcCall: (method: string, params: any, host: string, port: number) =>
       nativeApi.invoke<any>('p2pool_rpc_call', { method, params, host, port }),
     getRuntimeConfig: () => nativeApi.invoke<any>('get_runtime_pool_config'),
+    pingEndpoint: (host: string, port: number) => nativeApi.invoke<any>('ping_pool_endpoint', { host, port }),
   }
 };

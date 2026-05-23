@@ -30,7 +30,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-build
-          path: dist
+          path: |
+            src-tauri/target/**/release/bundle/**/*.msi
+            src-tauri/target/**/release/bundle/**/*.exe
           if-no-files-found: ignore
 
   build_macos:
@@ -43,6 +45,8 @@ jobs:
           cache: 'npm'
       - name: Install dependencies
         run: npm install
+      - name: Install macOS Rust targets
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
       - name: Build renderer
         run: npm run build
       - name: Build macOS (x64 + ARM64)
@@ -53,7 +57,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: macos-build
-          path: dist
+          path: |
+            src-tauri/target/**/release/bundle/**/*.dmg
+            src-tauri/target/**/release/bundle/**/*.app.tar.gz
           if-no-files-found: ignore
 
   build_linux:
@@ -66,6 +72,10 @@ jobs:
           cache: 'npm'
       - name: Install dependencies
         run: npm install
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf rpm
       - name: Build renderer
         run: npm run build
       - name: Build Linux (x64)
@@ -76,7 +86,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: linux-build
-          path: dist
+          path: |
+            src-tauri/target/**/release/bundle/**/*.deb
+            src-tauri/target/**/release/bundle/**/*.rpm
+            src-tauri/target/**/release/bundle/**/*.AppImage
           if-no-files-found: ignore
 
   publish:
@@ -95,10 +108,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            artifacts/**/MineBench Client-*.exe
-            artifacts/**/MineBench Client-*.dmg
-            artifacts/**/MineBench Client-*.AppImage
-            artifacts/**/latest*.yml
+            artifacts/**/*
           draft: false
           prerelease: false
           generate_release_notes: true

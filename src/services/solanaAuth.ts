@@ -9,6 +9,7 @@ import { useMinerStore } from '../store/useMinerStore';
 import { nativeApi } from '../lib/native-api';
 import { authStorage } from '../lib/auth-storage';
 import { BackendApiError, backendJson } from '../lib/backend-api';
+import { mapRewardsBalanceToMiningStats } from './miningStatsMapper';
 // ... (interfaces remain same)
 
 const AUTH_MESSAGE_PREFIX = 'MineBench Authentication Hook: ';
@@ -96,6 +97,16 @@ export interface UserMiningStats {
   activeWindowUserShares?: number;
   activeWindowPoolShares?: number;
   activeWindowRewardSharePercent?: number;
+  currentWindow?: {
+    moneroWindowNumber: number;
+    windowKey: string;
+    totalPoolShares: number;
+    totalAcceptedShares: number;
+    userAcceptedShares: number;
+    rewardSharePercent: number;
+    poolHashrate: number;
+    updatedAt?: string | null;
+  };
   thisMonth: number;
   thisWeek: number;
   today: number;
@@ -298,6 +309,11 @@ export class SolanaAuthService {
   async disconnectWallet(): Promise<void> {
       try {
         // Відключаємо напряму через localStorage
+        const miningStatus = useMinerStore.getState().status;
+        if (miningStatus === 'running' || miningStatus === 'starting' || miningStatus === 'paused') {
+          throw new Error('Stop mining before disconnecting wallet');
+        }
+
         useSolanaAuth.getState().disconnect();
         localStorage.removeItem('minebench_user');
         authStorage.clearSecrets();
@@ -310,6 +326,7 @@ export class SolanaAuthService {
         }
       } catch (err) {
         console.error('Failed to disconnect wallet:', err);
+        throw err;
       }
     }
 
@@ -399,21 +416,7 @@ export class SolanaAuthService {
         }
         return this.getEmptyStats();
       }
-      const toNum = (v: any) => {
-        const n = Number(v);
-        return Number.isFinite(n) ? n : 0;
-      };
-      const bmtBalance = toNum(balanceData?.bmt_available ?? balanceData?.available_bmt ?? balanceData?.balance ?? 0);
-      const totalXmrMined = toNum(balanceData?.total_xmr_mined ?? balanceData?.xmr_total_earned ?? 0);
-      const totalBmtEarned = toNum(balanceData?.total_bmt_earned ?? balanceData?.bmt_total_earned ?? 0);
-      const totalBmtWithdrawn = toNum(balanceData?.total_bmt_withdrawn ?? balanceData?.bmt_total_withdrawn ?? 0);
-      const activeBmt = toNum(balanceData?.active_bmt ?? bmtBalance);
-      const paidBmt = toNum(balanceData?.paid_bmt ?? totalBmtWithdrawn);
-      const activeShares = toNum(balanceData?.active_shares ?? 0);
-      const paidShares = toNum(balanceData?.paid_shares ?? 0);
-      const activeWindowUserShares = toNum(balanceData?.active_window_user_shares ?? 0);
-      const activeWindowPoolShares = toNum(balanceData?.active_window_pool_shares ?? 0);
-      const activeWindowRewardSharePercent = toNum(balanceData?.active_window_reward_share_percent ?? 0);
+      const bmtBalance = Number(balanceData?.bmt_available ?? balanceData?.available_bmt ?? balanceData?.balance ?? 0) || 0;
 
       // Update miner store with confirmed balance and totals
       const { setDbTotalBMT, setIsPremium, setPremiumXmrWallet } = useMinerStore.getState();
@@ -430,27 +433,10 @@ export class SolanaAuthService {
               console.warn('[SolanaAuth] Failed to fetch premium status:', e);
             }
 
-      const stats: UserMiningStats = {
-        totalRewards: bmtBalance,
-        totalXmrMined,
-        totalBmtEarned,
-        totalBmtWithdrawn,
-        activeBmt,
-        paidBmt,
-        activeShares,
-        paidShares,
-        activeWindowUserShares,
-        activeWindowPoolShares,
-        activeWindowRewardSharePercent,
-        thisMonth: 0,
-        thisWeek: 0,
-        today: 0,
-        devices: useSolanaAuth.getState().devices,
-        poolBalance: 0,
-        totalBlocks: 0
-      };
+      const authState = useSolanaAuth.getState();
+      const stats = mapRewardsBalanceToMiningStats(balanceData, authState.devices, authState.miningStats);
 
-      useSolanaAuth.getState().setMiningStats(stats);
+      authState.setMiningStats(stats);
       return stats;
     } catch (err) {
       console.error('[SolanaAuth] Failed to fetch mining stats:', err);
@@ -533,9 +519,10 @@ export class SolanaAuthService {
       // Перевіряємо наявність збереженого user та signature
       const storedUser = localStorage.getItem('minebench_user');
       const storedSignature = authStorage.getSignature();
+      const storedToken = authStorage.getToken();
 
       if ((window as any).__TAURI_INTERNALS__) {
-        return !!(storedUser && storedSignature);
+        return !!(storedUser && (storedToken || storedSignature));
       }
 
       // Для web flow - перевіряємо підключення через window.solana

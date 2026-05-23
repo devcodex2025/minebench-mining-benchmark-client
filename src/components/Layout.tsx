@@ -28,14 +28,14 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
 
   return (
     <div className={cn(
-      "flex h-screen overflow-hidden font-sans selection:bg-emerald-500/30 pt-8",
+      "flex h-screen min-w-[920px] overflow-hidden font-sans selection:bg-emerald-500/30 pt-8",
       theme === 'light' 
         ? 'bg-zinc-100 text-zinc-900' 
         : 'bg-zinc-950 text-white'
     )}>
       {/* Sidebar */}
       <aside className={cn(
-        "w-64 border-r flex flex-col justify-between p-4 flex-shrink-0",
+        "w-56 xl:w-64 border-r flex flex-col justify-between p-3 xl:p-4 flex-shrink-0",
         theme === 'light'
           ? 'border-zinc-300 bg-zinc-100'
           : 'border-white/5 bg-zinc-900/50 backdrop-blur-xl'
@@ -146,7 +146,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
            theme === 'light' ? 'bg-emerald-200/20' : 'bg-blue-500/5'
          )} />
 
-         <header className={cn("h-14 border-b flex items-center justify-between px-6 backdrop-blur z-10",
+         <header className={cn("min-h-14 border-b flex flex-wrap items-center justify-between gap-3 px-4 xl:px-6 py-3 backdrop-blur z-10",
            theme === 'light'
              ? 'border-zinc-300 bg-white'
              : 'border-white/5 bg-zinc-950/50'
@@ -159,7 +159,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
                     {status === 'running' ? 'System Active' : 'System Idle'}
                 </span>
             </div>
-            <div className="flex items-center gap-4">
+            <div className="flex flex-wrap items-center justify-end gap-x-4 gap-y-1">
                 <div className={cn("font-mono text-sm",
                   theme === 'light' ? 'text-zinc-700' : 'text-zinc-400'
                 )}>
@@ -175,7 +175,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
             </div>
          </header>
 
-         <div className="flex-1 overflow-y-auto p-6 z-10 custom-scrollbar">
+         <div className="flex-1 overflow-auto p-4 xl:p-6 z-10 custom-scrollbar">
             {children}
          </div>
 

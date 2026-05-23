@@ -6,6 +6,16 @@ import { backendJson } from '../lib/backend-api';
 export type AppMode = 'benchmark' | 'mining';
 export type DeviceType = 'cpu' | 'gpu';
 
+export interface PoolEndpoint {
+    id: string;
+    label: string;
+    region: string;
+    host: string;
+    port: number;
+    url: string;
+    default?: boolean;
+}
+
 interface StatsPoint {
     time: string;
     hashrate: number;
@@ -48,6 +58,7 @@ interface MiningState {
     poolUrl: string;
     backendPrimaryPoolUrl: string;
     backendBackupPoolUrl: string;
+    backendPoolEndpoints: PoolEndpoint[];
     cpuPriority: number; // 0-5, higher = more aggressive
     randomxMode: 'auto' | 'fast' | 'light'; // fast uses 2GB RAM, light uses 256MB
     hugePages: boolean;
@@ -141,6 +152,33 @@ const initialPools = {
         : {})
 };
 
+async function selectFastestPoolEndpoint(endpoints: PoolEndpoint[]): Promise<PoolEndpoint | null> {
+    if (!(window as any).__TAURI_INTERNALS__) {
+        return endpoints.find((endpoint) => endpoint.default) || endpoints[0] || null;
+    }
+
+    const latencyResults = await Promise.all(
+        endpoints.map(async (endpoint) => {
+            try {
+                const result = await nativeApi.pool.pingEndpoint(endpoint.host, endpoint.port);
+                return {
+                    endpoint,
+                    latencyMs: Number(result?.latencyMs)
+                };
+            } catch (err) {
+                console.warn(`[PoolConfig] Pool latency check failed for ${endpoint.url}:`, err);
+                return null;
+            }
+        })
+    );
+
+    const reachable = latencyResults
+        .filter((result): result is { endpoint: PoolEndpoint; latencyMs: number } => !!result && Number.isFinite(result.latencyMs))
+        .sort((a, b) => a.latencyMs - b.latencyMs);
+
+    return reachable[0]?.endpoint || endpoints.find((endpoint) => endpoint.default) || endpoints[0] || null;
+}
+
 export const useMinerStore = create<MiningState>((set, get) => ({
     mode: 'benchmark',
     deviceType: 'cpu',
@@ -171,6 +209,26 @@ export const useMinerStore = create<MiningState>((set, get) => ({
     poolUrl: env.poolStratumUrl,
     backendPrimaryPoolUrl: env.poolStratumUrl,
     backendBackupPoolUrl: env.poolStratumUrlBackup,
+    backendPoolEndpoints: [
+        {
+            id: 'legacy',
+            label: 'MineBench Pool',
+            region: 'GLOBAL',
+            host: env.poolStratumHost,
+            port: env.poolStratumPort,
+            url: env.poolStratumUrl,
+            default: true
+        },
+        ...(env.enableBackupPool ? [{
+            id: 'backup',
+            label: 'MineBench Reserve',
+            region: 'BACKUP',
+            host: env.poolStratumHostBackup,
+            port: env.poolStratumPortBackup,
+            url: env.poolStratumUrlBackup,
+            default: false
+        }] : [])
+    ],
     cpuPriority: 2, // Default: balanced (0=lowest, 5=highest)
     randomxMode: 'auto', // auto-detect best mode
     hugePages: true, // Enable huge pages for better performance
@@ -397,13 +455,27 @@ export const useMinerStore = create<MiningState>((set, get) => ({
                 const { rpcHost, rpcPort, stratumHost, stratumPort } = data.pool.primary;
                 const newPrimaryPoolUrl = `${stratumHost}:${stratumPort}`;
                 const backupPrimaryPoolUrl = data.pool.backup ? `${data.pool.backup.stratumHost}:${data.pool.backup.stratumPort}` : env.poolStratumUrlBackup;
+                const backendPoolEndpoints = Array.isArray(data.pool.endpoints)
+                    ? data.pool.endpoints
+                        .map((endpoint: any) => ({
+                            id: String(endpoint.id || endpoint.region || endpoint.url || ''),
+                            label: String(endpoint.label || endpoint.region || endpoint.host || 'MineBench Pool'),
+                            region: String(endpoint.region || endpoint.id || 'GLOBAL'),
+                            host: String(endpoint.host || ''),
+                            port: Number(endpoint.port || 0),
+                            url: String(endpoint.url || `${endpoint.host}:${endpoint.port}`),
+                            default: !!endpoint.default
+                        }))
+                        .filter((endpoint: PoolEndpoint) => endpoint.id && endpoint.host && endpoint.port > 0 && endpoint.url.includes(':'))
+                    : [];
 
                 // Update runtime config in store
                 set({
                     rpcHost,
                     rpcPort,
                     backendPrimaryPoolUrl: newPrimaryPoolUrl,
-                    backendBackupPoolUrl: backupPrimaryPoolUrl
+                    backendBackupPoolUrl: backupPrimaryPoolUrl,
+                    backendPoolEndpoints: backendPoolEndpoints.length > 0 ? backendPoolEndpoints : get().backendPoolEndpoints
                 });
                 console.log(`📡 Updated RPC node to ${rpcHost}:${rpcPort}`);
                 console.log(`📡 Backend primary pool URL is ${newPrimaryPoolUrl}`);
@@ -413,10 +485,18 @@ export const useMinerStore = create<MiningState>((set, get) => ({
 
                 const currentStore = get();
 
-                // If the user is in auto mode, always follow backend primary pool URL.
-                if (!currentStore.manualPoolSelection && currentStore.poolUrl !== newPrimaryPoolUrl) {
-                    set({ poolUrl: newPrimaryPoolUrl });
-                    console.log(`📡 Updated mining pool to backend primary pool URL ${newPrimaryPoolUrl}`);
+                if (!currentStore.manualPoolSelection) {
+                    const selectedPool = await selectFastestPoolEndpoint(
+                        backendPoolEndpoints.length > 0
+                            ? backendPoolEndpoints
+                            : get().backendPoolEndpoints
+                    );
+                    const selectedPoolUrl = selectedPool?.url || newPrimaryPoolUrl;
+
+                    if (currentStore.poolUrl !== selectedPoolUrl) {
+                        set({ poolUrl: selectedPoolUrl });
+                        console.log(`📡 Updated mining pool to ${selectedPoolUrl}${selectedPool ? ` (${selectedPool.label})` : ''}`);
+                    }
 
                     // Persist backend-backed pool selection so the next app start also uses current backend config.
                     get().saveSettings();
@@ -431,4 +511,3 @@ export const useMinerStore = create<MiningState>((set, get) => ({
         }
     }
 }));
-

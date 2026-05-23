@@ -1,8 +1,9 @@
 mod commands;
 mod miner;
 
-use std::sync::{Arc, Mutex};
 use miner::MinerState;
+use std::sync::{Arc, Mutex};
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -10,6 +11,12 @@ pub fn run() {
         .manage(MinerState {
             child: Arc::new(Mutex::new(Option::None)),
         })
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
@@ -24,6 +31,7 @@ pub fn run() {
             commands::solana_get_token_balance,
             commands::get_premium_status,
             commands::backend_request,
+            commands::ping_pool_endpoint,
             commands::get_runtime_pool_config,
             commands::get_auto_start,
             commands::set_auto_start,
