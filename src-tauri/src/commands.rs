@@ -14,6 +14,9 @@ use axum::{
 };
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Instant;
+use tokio::net::TcpStream;
+use tokio::time::{timeout, Duration};
 use crate::miner::{self, MinerState};
 
 #[cfg(target_os = "windows")]
@@ -122,6 +125,27 @@ pub async fn backend_request(request: BackendRequest) -> Result<serde_json::Valu
         "status": status,
         "data": data,
         "text": text
+    }))
+}
+
+#[tauri::command]
+pub async fn ping_pool_endpoint(host: String, port: u16) -> Result<serde_json::Value, String> {
+    let host = host.trim();
+    if host.is_empty() || host.contains('/') || host.contains("://") {
+        return Err("Invalid pool host".to_string());
+    }
+
+    let addr = format!("{host}:{port}");
+    let started = Instant::now();
+    timeout(Duration::from_secs(3), TcpStream::connect(&addr))
+        .await
+        .map_err(|_| "Pool latency check timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+
+    Ok(serde_json::json!({
+        "host": host,
+        "port": port,
+        "latencyMs": started.elapsed().as_millis()
     }))
 }
 

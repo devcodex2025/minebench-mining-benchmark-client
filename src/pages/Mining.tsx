@@ -7,7 +7,7 @@ import { MultiDeviceSyncService } from '../services/multiDeviceSync';
 import { useTheme } from '../contexts/ThemeContext';
 import { cn, formatHashrate } from '../lib/utils';
 import { p2poolAPI } from '../services/p2poolAPI';
-import type { P2PoolStratumSnapshot } from '../services/p2poolAPI';
+import type { P2PoolPoolSnapshot, P2PoolStratumSnapshot } from '../services/p2poolAPI';
 import { getEnvironmentConfig } from '../config/environment';
 import { nativeApi } from '../lib/native-api';
 import { backendJson } from '../lib/backend-api';
@@ -117,6 +117,7 @@ const Mining: React.FC = () => {
     const poolUrl = useMinerStore((state) => state.poolUrl);
     const setPoolUrl = useMinerStore((state) => state.setPoolUrl);
     const manualPoolSelection = useMinerStore((state) => state.manualPoolSelection);
+    const backendPoolEndpoints = useMinerStore((state) => state.backendPoolEndpoints);
     const updateStats = useMinerStore((state) => state.updateStats);
     const history = useMinerStore((state) => state.history);
     const currentHashrate = useMinerStore((state) => state.currentHashrate);
@@ -145,6 +146,7 @@ const Mining: React.FC = () => {
 
     const [showHugePagesInfo, setShowHugePagesInfo] = useState(false);
     const [stratumStats, setStratumStats] = useState<P2PoolStratumSnapshot | null>(null);
+    const [poolSnapshots, setPoolSnapshots] = useState<P2PoolPoolSnapshot[]>([]);
     const [showShareAnimation, setShowShareAnimation] = useState(false);
 
     const statsIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -250,6 +252,10 @@ const Mining: React.FC = () => {
         : (poolHashrateTotal > 0 || poolMinersCount > 0)
             ? 'Live'
             : 'Waiting for backend stats...';
+    const selectedPoolEndpoint = backendPoolEndpoints.find((endpoint) => endpoint.url === poolUrl);
+    const selectedPoolLabel = selectedPoolEndpoint
+        ? `${selectedPoolEndpoint.label} (${selectedPoolEndpoint.region})`
+        : 'Custom Pool';
 
     // Wallet balance and rewards
     const [walletValid, setWalletValid] = useState(false);
@@ -475,6 +481,7 @@ const Mining: React.FC = () => {
                 }
 
                 setStratumStats(newStratum);
+                setPoolSnapshots(Array.isArray(stats.pools) ? stats.pools : []);
 
                 const networkHashrate = stats && stats.poolDifficulty
                     ? stats.poolDifficulty / 120
@@ -1033,16 +1040,35 @@ const Mining: React.FC = () => {
                                 {poolStatusLabel}
                             </span>
                         </div>
+                        <div className={cn("rounded-lg border px-3 py-2 text-xs", theme === 'light' ? 'bg-zinc-50 border-zinc-200 text-zinc-700' : 'bg-zinc-950/40 border-white/10 text-zinc-300')}>
+                            <div className="flex items-center justify-between gap-3">
+                                <span className={cn("uppercase tracking-widest font-bold", theme === 'light' ? 'text-zinc-500' : 'text-zinc-500')}>Mining on</span>
+                                <span className="font-semibold text-right">{selectedPoolLabel}</span>
+                            </div>
+                            <div className={cn("mt-1 font-mono text-[11px] truncate", theme === 'light' ? 'text-zinc-500' : 'text-zinc-500')}>
+                                {poolUrl}
+                            </div>
+                        </div>
                         <div className="grid grid-cols-2 gap-2">
-                            <StatCard label="15m Avg" value={formatHashrate(stratumStats?.hashrate_15m || poolHashrateTotal || 0)} icon={<Activity size={12} />} tone="blue" theme={theme} />
+                            <StatCard label="Aggregate 15m" value={formatHashrate(stratumStats?.hashrate_15m || poolHashrateTotal || 0)} icon={<Activity size={12} />} tone="blue" theme={theme} />
                             <StatCard label="1h Avg" value={formatHashrate(stratumStats?.hashrate_1h || 0)} icon={<TrendingUp size={12} />} tone="emerald" theme={theme} />
                             <StatCard label="24h Avg" value={formatHashrate(stratumStats?.hashrate_24h || 0)} icon={<Clock size={12} />} tone="violet" theme={theme} />
-                            <StatCard label="Workers" value={`${stratumStats?.workers?.length || poolMinersCount || 0}`} icon={<Cpu size={12} />} tone="sky" theme={theme} />
+                            <StatCard label="Aggregate Workers" value={`${stratumStats?.workers?.length || poolMinersCount || 0}`} icon={<Cpu size={12} />} tone="sky" theme={theme} />
                             <StatCard label="Connections" value={`${stratumStats?.connections || poolMinersCount || 0}`} icon={<Shield size={12} />} tone="cyan" theme={theme} />
                             <StatCard label="Pool Stratum Shares" value={`${stratumStats?.total_stratum_shares || 0}`} icon={<Zap size={12} />} tone="teal" theme={theme} />
                             <StatCard label="Failed Shares" value={`${stratumStats?.shares_failed || 0}`} icon={<Flame size={12} />} tone="rose" theme={theme} />
                             <StatCard label="Total Hashes" value={((stratumStats?.total_hashes || 0)).toLocaleString()} icon={<Gauge size={12} />} tone="amber" theme={theme} />
                         </div>
+                        {poolSnapshots.length > 0 && (
+                            <div className={cn("space-y-2 text-xs pt-1 border-t", theme === 'light' ? 'border-zinc-200' : 'border-white/10')}>
+                                {poolSnapshots.map((pool) => (
+                                    <div key={pool.id} className={cn("flex items-center justify-between gap-3 rounded-lg px-3 py-2", theme === 'light' ? 'bg-zinc-50 text-zinc-700' : 'bg-zinc-950/40 text-zinc-300')}>
+                                        <span className="font-semibold truncate">{pool.region || pool.id}</span>
+                                        <span className="font-mono text-right">{formatHashrate(pool.poolHashrate || 0)} · {pool.miners || 0} workers</span>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
                         <div className={cn("text-xs pt-1 border-t", theme === 'light' ? 'border-zinc-200 text-zinc-600' : 'border-white/10 text-zinc-500')}>
                             <div>Current Effort: {(((stratumStats?.current_effort || 0) * 100)).toFixed(2)}%</div>
                             <div>Average Effort: {(((stratumStats?.average_effort || 0) * 100)).toFixed(2)}%</div>

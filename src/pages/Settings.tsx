@@ -273,6 +273,7 @@ const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
   const env = useEnvironment();
   const wallet = useMinerStore((s) => s.wallet);
   const poolUrl = useMinerStore((s) => s.poolUrl);
+  const backendPoolEndpoints = useMinerStore((s) => s.backendPoolEndpoints);
   const donateLevel = useMinerStore((s) => s.donateLevel);
   const isPremium = useMinerStore((s) => s.isPremium);
   
@@ -301,9 +302,12 @@ const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
     theme === 'light' ? 'text-zinc-600' : 'text-zinc-500'
   );
 
+  const backendPresetPools = backendPoolEndpoints.map((endpoint) => ({
+    name: endpoint.label,
+    url: endpoint.url
+  }));
   const presetPools = [
-    { name: 'MineBench Pool (Primary)', url: env.poolStratumUrl },
-    ...(env.enableBackupPool ? [{ name: 'MineBench Pool (Reserve)', url: env.poolStratumUrlBackup }] : []),
+    ...(backendPresetPools.length > 0 ? backendPresetPools : [{ name: 'MineBench Pool (Primary)', url: env.poolStratumUrl }]),
     { name: 'SupportXMR', url: 'pool.supportxmr.com:3333' },
     { name: 'MoneroOcean', url: 'gulf.moneroocean.stream:10032' },
   ];

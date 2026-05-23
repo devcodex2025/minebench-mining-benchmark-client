@@ -39,9 +39,21 @@ export interface P2PoolStats {
     rewardEntries: number;
   };
   stratum?: P2PoolStratumSnapshot;
+  pools?: P2PoolPoolSnapshot[];
+}
+
+export interface P2PoolPoolSnapshot {
+  id: string;
+  region: string;
+  poolHashrate: number;
+  miners: number;
+  updatedAt: string;
+  stratum?: P2PoolStratumSnapshot;
 }
 
 export interface P2PoolStratumSnapshot {
+  pool_id?: string;
+  pool_region?: string;
   hashrate_15m?: number;
   hashrate_1h?: number;
   hashrate_24h?: number;
@@ -152,6 +164,7 @@ class P2PoolService {
     miners: number;
     rewards?: P2PoolStats['rewards'];
     stratum: P2PoolStratumSnapshot | null;
+    pools: P2PoolPoolSnapshot[];
   } {
     const stratum = poolStatsData && typeof poolStatsData.stratum === 'object'
       ? poolStatsData.stratum
@@ -169,7 +182,8 @@ class P2PoolService {
         || Number(stratum?.incoming_connections)
         || 0,
       rewards: poolStatsData?.rewards || undefined,
-      stratum
+      stratum,
+      pools: Array.isArray(poolStatsData?.pools) ? poolStatsData.pools : []
     };
   }
 
@@ -197,10 +211,12 @@ class P2PoolService {
         miners: number;
         rewards?: P2PoolStats['rewards'];
         stratum: P2PoolStratumSnapshot | null;
+        pools: P2PoolPoolSnapshot[];
       } = {
         poolHashrate: 0,
         miners: 0,
-        stratum: null
+        stratum: null,
+        pools: []
       };
 
       try {
@@ -226,7 +242,8 @@ class P2PoolService {
         networkDifficulty: info.difficulty || 0,
         lastBlockTime: Date.now() - 30000, // Mock last block since get_info doesn't have it directly
         rewards: poolExtra.rewards,
-        stratum: poolExtra.stratum || undefined
+        stratum: poolExtra.stratum || undefined,
+        pools: poolExtra.pools
       };
     } catch (err) {
       console.error('[P2PoolAPI] Failed to get pool stats:', err);

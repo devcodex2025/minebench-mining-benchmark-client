@@ -29,6 +29,7 @@ const PoolMonitor = () => {
     const dynamicRpcPort = useMinerStore(state => state.rpcPort);
     const backendPrimaryPoolUrl = useMinerStore(state => state.backendPrimaryPoolUrl);
     const backendBackupPoolUrl = useMinerStore(state => state.backendBackupPoolUrl);
+    const backendPoolEndpoints = useMinerStore(state => state.backendPoolEndpoints);
     
     const env = getEnvironmentConfig();
     const primaryPoolUrl = backendPrimaryPoolUrl || env.poolStratumUrl;
@@ -77,9 +78,12 @@ const PoolMonitor = () => {
             const reservePool = env.enableBackupPool ? state.pools?.['cpu-backup'] : undefined;
             const primarySynced = !!(primaryPool?.isSynced && primaryPool?.progress >= 99.9);
             const reserveSynced = env.enableBackupPool && !!(reservePool?.isSynced && reservePool?.progress >= 99.9);
-            const isMineBenchPool = [primaryPoolUrl, ...(env.enableBackupPool ? [reservePoolUrl] : [])].some((url) => !!url && !!poolUrl && poolUrl.includes(url));
+            const mineBenchPoolUrls = backendPoolEndpoints.length > 0
+                ? backendPoolEndpoints.map((endpoint) => endpoint.url)
+                : [primaryPoolUrl, ...(env.enableBackupPool ? [reservePoolUrl] : [])];
+            const isMineBenchPool = mineBenchPoolUrls.some((url) => !!url && !!poolUrl && poolUrl.includes(url));
 
-            if (isMineBenchPool && !manualPoolSelection) {
+            if (isMineBenchPool && !manualPoolSelection && backendPoolEndpoints.length <= 1) {
                 if (env.enableBackupPool && !primarySynced && reserveSynced && reservePoolUrl && poolUrl !== reservePoolUrl) {
                     setPoolUrl(reservePoolUrl);
                     addLog('Auto-switched to CPU Reserve NODE (primary not fully synced).');
@@ -110,7 +114,7 @@ const PoolMonitor = () => {
             clearInterval(interval);
             clearInterval(statsInterval);
         };
-    }, [updatePoolStatus, setPoolUrl, poolUrl, addLog, primaryPoolUrl, reservePoolUrl, setGlobalPoolStats, manualPoolSelection, dynamicRpcHost, dynamicRpcPort]);
+    }, [updatePoolStatus, setPoolUrl, poolUrl, addLog, primaryPoolUrl, reservePoolUrl, setGlobalPoolStats, manualPoolSelection, dynamicRpcHost, dynamicRpcPort, backendPoolEndpoints]);
 
     return null;
 };
@@ -573,8 +577,6 @@ const Placeholder = ({ name }: { name: string }) => <div className="text-2xl fon
 const App: React.FC = () => {
     // Fetch public configuration on mount
     useEffect(() => {
-        const isNative = (window as any).__TAURI_INTERNALS__;
-        if (!isNative) return;
         const { fetchPublicConfig } = useMinerStore.getState();
         fetchPublicConfig();
     }, []);
@@ -604,5 +606,4 @@ const App: React.FC = () => {
 };
 
 export default App;
-
 

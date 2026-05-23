@@ -31,6 +31,7 @@ pub fn run() {
             commands::solana_get_token_balance,
             commands::get_premium_status,
             commands::backend_request,
+            commands::ping_pool_endpoint,
             commands::get_runtime_pool_config,
             commands::get_auto_start,
             commands::set_auto_start,

@@ -34,6 +34,7 @@ export interface NativeApi {
     getSyncStatus(host: string, port: number): Promise<any>;
     rpcCall(method: string, params: any, host: string, port: number): Promise<any>;
     getRuntimeConfig(): Promise<any>;
+    pingEndpoint(host: string, port: number): Promise<any>;
   };
 }
 
