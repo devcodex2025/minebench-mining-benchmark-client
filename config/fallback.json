@@ -4,21 +4,21 @@
   "supabaseUrl": "https://mmwtuyllptkelcfujaod.supabase.co",
   "supabaseAnonKey": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1td3R1eWxscHRrZWxjZnVqYW9kIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA5NDA2ODIsImV4cCI6MjA3NjUxNjY4Mn0.CGVlOAFfRWR9MyRpYW99gppLgVMcrG8sz83bO3YEhoA",
   "poolConfigAllowlist": [
-    "xmr.minebench.cloud",
-    "xmr2.minebench.cloud",
+    "162.230.144.172",
+    "213.58.173.240",
     "143.42.22.242"
   ],
   "defaults": {
-    "primaryPoolHost": "xmr.minebench.cloud",
+    "primaryPoolHost": "162.230.144.172",
     "primaryRpcHost": "143.42.22.242",
-    "backupPoolHost": "xmr2.minebench.cloud",
-    "backupRpcHost": "xmr2.minebench.cloud",
-    "primaryHost": "xmr.minebench.cloud",
-    "backupHost": "xmr2.minebench.cloud",
+    "backupPoolHost": "213.58.173.240",
+    "backupRpcHost": "213.58.173.240",
+    "primaryHost": "162.230.144.172",
+    "backupHost": "213.58.173.240",
     "stratumPort": 3333,
     "moneroP2pPort": 18080,
     "moneroRpcPort": 18089,
     "p2poolP2pPort": 37889,
-    "enableBackupPool": false
+    "enableBackupPool": true
   }
 }

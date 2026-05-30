@@ -69,6 +69,7 @@ export interface P2PoolStratumSnapshot {
   block_reward_share_percent?: number;
   wallet?: string;
   workers?: string[];
+  updated_at?: string;
 }
 
 class P2PoolService {
@@ -220,13 +221,23 @@ class P2PoolService {
       };
 
       try {
-        for (const url of this.getPoolStatsUrls()) {
+        const isNative = !!(window as any).__TAURI_INTERNALS__;
+        if (isNative) {
+          // Tauri native bridge only accepts relative /api/ paths
           try {
-            const path = url.includes('/api/pool/stats') ? '/api/pool/stats' : url;
-            poolExtra = this.applyBackendPoolStats(await backendJson(path));
-            break;
+            poolExtra = this.applyBackendPoolStats(await backendJson('/api/pool/stats'));
           } catch (e) {
-            console.warn(`[P2PoolAPI] Pool stats request failed (${url}):`, e);
+            console.warn('[P2PoolAPI] Pool stats request failed:', e);
+          }
+        } else {
+          for (const url of this.getPoolStatsUrls()) {
+            try {
+              // Pass the full URL — backendJson uses it as-is when it's not a /api/ relative path
+              poolExtra = this.applyBackendPoolStats(await backendJson(url));
+              break;
+            } catch (e) {
+              console.warn(`[P2PoolAPI] Pool stats request failed (${url}):`, e);
+            }
           }
         }
       } catch (e) {

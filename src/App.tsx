@@ -15,18 +15,11 @@ import { getEnvironmentConfig } from './config/environment';
 import { useSolanaAuth, SolanaAuthService } from './services/solanaAuth';
 import { ClaimRewardsModal } from './components/ClaimRewardsModal';
 import { nativeApi } from './lib/native-api';
-import { p2poolAPI } from './services/p2poolAPI';
 import { backendJson } from './lib/backend-api';
 
 const PoolMonitor = () => {
     const updatePoolStatus = useMinerStore(state => state.updatePoolStatus);
-    const setPoolUrl = useMinerStore(state => state.setPoolUrl);
-    const poolUrl = useMinerStore(state => state.poolUrl);
-    const addLog = useMinerStore(state => state.addLog);
     const setGlobalPoolStats = useMinerStore(state => state.setGlobalPoolStats);
-    const manualPoolSelection = useMinerStore(state => state.manualPoolSelection);
-    const dynamicRpcHost = useMinerStore(state => state.rpcHost);
-    const dynamicRpcPort = useMinerStore(state => state.rpcPort);
     const backendPrimaryPoolUrl = useMinerStore(state => state.backendPrimaryPoolUrl);
     const backendBackupPoolUrl = useMinerStore(state => state.backendBackupPoolUrl);
     const backendPoolEndpoints = useMinerStore(state => state.backendPoolEndpoints);
@@ -36,85 +29,96 @@ const PoolMonitor = () => {
     const reservePoolUrl = backendBackupPoolUrl || (env.enableBackupPool ? env.poolStratumUrlBackup : '');
 
     useEffect(() => {
-        const checkSync = async () => {
-            if (!(window as any).__TAURI_INTERNALS__) return;
+        const fallbackEndpoints = [
+            {
+                id: 'us',
+                label: 'MineBench US',
+                region: 'US',
+                host: env.poolStratumHost,
+                port: env.poolStratumPort,
+                url: primaryPoolUrl,
+                default: true
+            },
+            ...(env.enableBackupPool && reservePoolUrl ? [{
+                id: 'eu',
+                label: 'MineBench EU',
+                region: 'EU',
+                host: env.poolStratumHostBackup,
+                port: env.poolStratumPortBackup,
+                url: reservePoolUrl,
+                default: false
+            }] : [])
+        ];
 
-            // Check primary and backup CPU pools - GPU pool not deployed yet
-            const poolIds = env.enableBackupPool ? ['cpu', 'cpu-backup'] : ['cpu'];
-            for (const id of poolIds) {
-                try {
-                    // Use dynamic host/port for primary pool, fallback for backup
-                    const host = id === 'cpu' ? dynamicRpcHost : env.poolRpcHostBackup;
-                    const port = id === 'cpu' ? dynamicRpcPort : env.poolRpcPortBackup;
-                    
-                    const data = await nativeApi.pool.getSyncStatus(host, port);
-                    
-                    if (data) {
-                        const height = data.height || 0;
-                        const targetHeight = data.target_height || data.targetHeight || height;
-                        const isSynced = data.synchronized || (height >= targetHeight && height > 0);
-                        const progress = isSynced ? 100 : (targetHeight > 0 ? (height / targetHeight) * 100 : 0);
-                        
-                        updatePoolStatus(id, {
-                            height,
-                            targetHeight,
-                            isSynced,
-                            progress,
-                            connected: true,
-                            message: isSynced ? "Synced" : "Syncing..."
-                        });
-                    }
-                } catch (e) {
-                    console.error(`[PoolMonitor] Native Error for ${id}:`, e);
-                    updatePoolStatus(id, {
-                        connected: false,
-                        message: "Connection Failed"
-                    });
+        const updateEndpointStatus = async (poolId: string, endpoint: typeof fallbackEndpoints[number] | undefined) => {
+            if (!endpoint) return;
+
+            try {
+                if ((window as any).__TAURI_INTERNALS__) {
+                    await nativeApi.pool.pingEndpoint(endpoint.host, endpoint.port);
                 }
+
+                updatePoolStatus(poolId, {
+                    height: 0,
+                    targetHeight: 0,
+                    isSynced: true,
+                    progress: 100,
+                    connected: true,
+                    message: "Ready"
+                });
+            } catch (e) {
+                console.error(`[PoolMonitor] Pool check failed for ${endpoint.url}:`, e);
+                updatePoolStatus(poolId, {
+                    isSynced: false,
+                    progress: 0,
+                    connected: false,
+                    message: "Connection Failed"
+                });
             }
+        };
 
-            const state = useMinerStore.getState();
-            const primaryPool = state.pools?.['cpu'];
-            const reservePool = env.enableBackupPool ? state.pools?.['cpu-backup'] : undefined;
-            const primarySynced = !!(primaryPool?.isSynced && primaryPool?.progress >= 99.9);
-            const reserveSynced = env.enableBackupPool && !!(reservePool?.isSynced && reservePool?.progress >= 99.9);
-            const mineBenchPoolUrls = backendPoolEndpoints.length > 0
-                ? backendPoolEndpoints.map((endpoint) => endpoint.url)
-                : [primaryPoolUrl, ...(env.enableBackupPool ? [reservePoolUrl] : [])];
-            const isMineBenchPool = mineBenchPoolUrls.some((url) => !!url && !!poolUrl && poolUrl.includes(url));
+        const checkPools = async () => {
+            const endpoints = backendPoolEndpoints.length > 0 ? backendPoolEndpoints : fallbackEndpoints;
+            const primaryEndpoint = endpoints.find((endpoint) => endpoint.default) || endpoints[0];
+            const backupEndpoint = endpoints.find((endpoint) => endpoint.id === 'eu') || endpoints[1];
 
-            if (isMineBenchPool && !manualPoolSelection && backendPoolEndpoints.length <= 1) {
-                if (env.enableBackupPool && !primarySynced && reserveSynced && reservePoolUrl && poolUrl !== reservePoolUrl) {
-                    setPoolUrl(reservePoolUrl);
-                    addLog('Auto-switched to CPU Reserve NODE (primary not fully synced).');
-                } else if (primarySynced && primaryPoolUrl && poolUrl !== primaryPoolUrl) {
-                    setPoolUrl(primaryPoolUrl);
-                    addLog('Auto-switched to CPU Primary (fully synced).');
-                }
+            await updateEndpointStatus('cpu', primaryEndpoint);
+            if (env.enableBackupPool && backupEndpoint) {
+                await updateEndpointStatus('cpu-backup', backupEndpoint);
             }
         };
 
         const fetchPoolStats = async () => {
             try {
-                const stats = await p2poolAPI.getPoolStats();
+                const stats = await backendJson('/api/pool/stats');
                 if (stats) {
-                    setGlobalPoolStats(stats.poolHashrate || 0, stats.miners || 0, stats.networkHashrate || 0);
+                    setGlobalPoolStats(Number(stats.poolHashrate || 0), Number(stats.miners || 0), 0);
                 }
             } catch (err) {
                 console.warn('[PoolMonitor] Failed to fetch pool stats:', err);
             }
         };
 
-        checkSync();
-        fetchPoolStats();
-        const interval = setInterval(checkSync, 10000); // Check every 10s
-        const statsInterval = setInterval(fetchPoolStats, 60000); // Check pool stats every 60s
+        checkPools();
+        const interval = setInterval(checkPools, 10000);
+        return () => clearInterval(interval);
+    }, [updatePoolStatus, primaryPoolUrl, reservePoolUrl, backendPoolEndpoints]);
 
-        return () => {
-            clearInterval(interval);
-            clearInterval(statsInterval);
+    useEffect(() => {
+        const fetchPoolStats = async () => {
+            try {
+                const stats = await backendJson('/api/pool/stats');
+                if (stats) {
+                    setGlobalPoolStats(Number(stats.poolHashrate || 0), Number(stats.miners || 0), 0);
+                }
+            } catch (err) {
+                console.warn('[PoolMonitor] Failed to fetch pool stats:', err);
+            }
         };
-    }, [updatePoolStatus, setPoolUrl, poolUrl, addLog, primaryPoolUrl, reservePoolUrl, setGlobalPoolStats, manualPoolSelection, dynamicRpcHost, dynamicRpcPort, backendPoolEndpoints]);
+        fetchPoolStats();
+        const statsInterval = setInterval(fetchPoolStats, 60000);
+        return () => clearInterval(statsInterval);
+    }, [setGlobalPoolStats]);
 
     return null;
 };
@@ -243,8 +247,8 @@ const Dashboard = () => {
 
     const cpuPool = pools['cpu'];
     const poolLabels: Record<string, string> = {
-        'cpu': 'CPU Primary',
-        'cpu-backup': 'CPU Reserve'
+        'cpu': 'MineBench US',
+        'cpu-backup': 'MineBench EU'
     };
     const navigate = useNavigate();
     const [benchmarkHashrate, setBenchmarkHashrate] = useState<number>(0);
@@ -606,4 +610,3 @@ const App: React.FC = () => {
 };
 
 export default App;
-
