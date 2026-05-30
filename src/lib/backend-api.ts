@@ -25,14 +25,15 @@ export async function backendJson<T = any>(path: string, options: BackendRequest
   const isNative = (window as any).__TAURI_INTERNALS__;
 
   if (isNative) {
-    const result = await nativeApi.invoke<{ ok: boolean; status: number; data: any; text: string }>('backend_request', {
-      request: {
-        method,
-        path,
-        body: options.body,
-        token: options.token || null
-      }
-    });
+    const timeout = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new BackendApiError(0, null, `Native request timed out: ${path}`)), 15000)
+    );
+    const result = await Promise.race([
+      nativeApi.invoke<{ ok: boolean; status: number; data: any; text: string }>('backend_request', {
+        request: { method, path, body: options.body, token: options.token || null }
+      }),
+      timeout
+    ]);
 
     if (!result.ok) {
       throw new BackendApiError(result.status, result.data, `Backend request failed (${result.status})`);
