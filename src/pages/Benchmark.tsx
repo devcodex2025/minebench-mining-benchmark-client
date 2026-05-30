@@ -67,6 +67,8 @@ const Benchmark = () => {
     const currentPower = useMinerStore(state => state.currentPower);
     const resetSession = useMinerStore(state => state.resetSession);
     const pools = useMinerStore(state => state.pools);
+    const poolUrl = useMinerStore(state => state.poolUrl);
+    const backendPoolEndpoints = useMinerStore(state => state.backendPoolEndpoints);
 
 
     const [duration, setDuration] = useState<number>(60);
@@ -247,7 +249,8 @@ const Benchmark = () => {
 
     const startBenchmark = async () => {
         if (status === 'running') return;
-        if (!isNodeFullySynced) {
+        const usingRemotePool = backendPoolEndpoints.length > 0;
+        if (!usingRemotePool && !isNodeFullySynced) {
             addLog('Node is not fully synced (100%). Benchmark is disabled until sync completes.');
             return;
         }
@@ -290,6 +293,7 @@ const Benchmark = () => {
                 type: deviceType,
                 wallet,
                 worker: workerName,
+                poolUrl: useMinerStore.getState().poolUrl,
                 solanaWallet: user?.publicKey // Raw Solana address (no encoding)
             });
 
@@ -681,7 +685,7 @@ const Benchmark = () => {
 
                         <button
                             onClick={status === 'running' ? stopBenchmark : startBenchmark}
-                            disabled={status === 'stopping' || (!isNodeFullySynced && status !== 'running')}
+                            disabled={status === 'stopping' || (backendPoolEndpoints.length === 0 && !isNodeFullySynced && status !== 'running')}
                             className={cn(
                                 "w-full py-4 rounded-lg font-bold text-sm tracking-wide transition-all transform active:scale-[0.98] cursor-pointer disabled:cursor-not-allowed",
                                 status === 'running'
@@ -700,7 +704,7 @@ const Benchmark = () => {
                             </div>
                         </button>
 
-                        {!isNodeFullySynced && status !== 'running' && (
+                        {backendPoolEndpoints.length === 0 && !isNodeFullySynced && status !== 'running' && (
                             <div className={cn("mt-3 p-3 rounded-lg border text-xs",
                                 theme === 'light'
                                     ? 'bg-yellow-50 border-yellow-200 text-yellow-700'

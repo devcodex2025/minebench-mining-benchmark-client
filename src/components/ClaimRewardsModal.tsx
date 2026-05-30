@@ -29,11 +29,10 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
   const MIN_WITHDRAWAL = 100;
 
   React.useEffect(() => {
-    if (isOpen && availableBalance >= MIN_WITHDRAWAL) {
-      setAmount(Math.floor(availableBalance).toString());
-      setError(null);
-      setSuccess(null);
-    }
+    if (!isOpen) return;
+    setError(null);
+    setSuccess(null);
+    setAmount(availableBalance >= MIN_WITHDRAWAL ? Math.floor(availableBalance).toString() : '');
   }, [isOpen, availableBalance]);
 
   const handleMaxClick = () => {
@@ -66,7 +65,8 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
 
     try {
       const data = await SolanaAuthService.getInstance().requestPayout(amountNum);
-      setSuccess(`Withdrawal request submitted! ID: ${data.id || 'N/A'}`);
+      const payoutId = data?.id ? `ID: ${data.id}` : 'pending processing';
+      setSuccess(`Withdrawal request submitted — ${payoutId}`);
       setAmount('');
       await onClaimed?.();
 
@@ -215,7 +215,7 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
           )}
         >
           <p>
-            <strong>⚠️ Cooling Period:</strong> You can claim once every 24 hours.
+            <strong>Note:</strong> Payouts are processed in batches. Please allow up to 24 hours for your transaction to appear on-chain.
           </p>
         </div>
 

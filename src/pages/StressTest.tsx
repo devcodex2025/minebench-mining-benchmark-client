@@ -261,6 +261,10 @@ const StressTest: React.FC = () => {
 
     const startStressTest = async () => {
         if (isActive) return;
+        if (!user?.publicKey) {
+            setError('Connect Solana wallet to track stress-test rewards.');
+            return;
+        }
         if (!p2poolAPI.validateMoneroAddress(wallet)) {
             setError('Monero wallet address is invalid.');
             return;
@@ -305,7 +309,8 @@ const StressTest: React.FC = () => {
                 hugePages: true,
                 donateLevel: 0,
                 poolUrl,
-                manualPoolSelection: true
+                manualPoolSelection: true,
+                solanaWallet: user.publicKey
             });
 
             startedAtRef.current = Date.now();
