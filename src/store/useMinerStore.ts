@@ -133,6 +133,7 @@ interface MinerSettings {
     wallet: string;
     workerName: string;
     threads: number;
+    threadsManuallySet?: boolean;
     donateLevel: number;
     poolUrl: string;
     cpuPriority: number;
@@ -211,18 +212,18 @@ export const useMinerStore = create<MiningState>((set, get) => ({
     backendBackupPoolUrl: env.poolStratumUrlBackup,
     backendPoolEndpoints: [
         {
-            id: 'legacy',
-            label: 'MineBench Pool',
-            region: 'GLOBAL',
+            id: 'us',
+            label: 'MineBench US',
+            region: 'US',
             host: env.poolStratumHost,
             port: env.poolStratumPort,
             url: env.poolStratumUrl,
             default: true
         },
         ...(env.enableBackupPool ? [{
-            id: 'backup',
-            label: 'MineBench Reserve',
-            region: 'BACKUP',
+            id: 'eu',
+            label: 'MineBench EU',
+            region: 'EU',
             host: env.poolStratumHostBackup,
             port: env.poolStratumPortBackup,
             url: env.poolStratumUrlBackup,
@@ -358,6 +359,7 @@ export const useMinerStore = create<MiningState>((set, get) => ({
             wallet: state.wallet,
             workerName: state.workerName,
             threads: state.threads,
+            threadsManuallySet: state.threadsManuallySet,
             donateLevel: state.donateLevel,
             poolUrl: state.poolUrl,
             cpuPriority: state.cpuPriority,
@@ -418,7 +420,7 @@ export const useMinerStore = create<MiningState>((set, get) => ({
 
         const legacyBackupHostSelected = !!(
             settings.poolUrl &&
-            settings.poolUrl.includes('xmr2.minebench.cloud')
+            (settings.poolUrl.includes('xmr2.minebench.cloud') || settings.poolUrl.includes('xmr.minebench.cloud'))
         );
         const settingsManualPoolSelection = settings.manualPoolSelection ?? state.manualPoolSelection;
         const backendPoolUrl = state.backendPrimaryPoolUrl || env.poolStratumUrl;
@@ -429,7 +431,7 @@ export const useMinerStore = create<MiningState>((set, get) => ({
 
         const requestedThreads = settings.threads ?? state.threads;
         const currentMaxThreads = state.cpuCores > 1 ? Math.max(1, state.cpuCores - 1) : requestedThreads;
-        const hasManualThreadSelection = settings.threads !== undefined && settings.threads !== null;
+        const hasManualThreadSelection = settings.threadsManuallySet === true;
 
         set({
             wallet: settings.wallet || state.wallet,
