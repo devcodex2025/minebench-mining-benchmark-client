@@ -24,12 +24,11 @@ const getSecret = (key: string) => {
   if (sessionValue) return sessionValue;
 
   const local = getLocalStorage();
-  const migratedValue = local?.getItem(key) || null;
-  if (migratedValue) {
-    getSessionStorage()?.setItem(key, migratedValue);
-    local?.removeItem(key);
+  const localValue = local?.getItem(key) || null;
+  if (localValue) {
+    getSessionStorage()?.setItem(key, localValue);
   }
-  return migratedValue;
+  return localValue;
 };
 
 const setSecret = (key: string, value: string) => {
