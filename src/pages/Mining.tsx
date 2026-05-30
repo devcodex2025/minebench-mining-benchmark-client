@@ -1,13 +1,13 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
-import { Play, SquareSolid, PauseSolid, Flame, Gauge, Zap, Shield, Cpu, TrendingUp, Clock, Activity, Info, Hourglass } from '../components/icons';
+import { Play, SquareSolid, PauseSolid, Flame, Gauge, Zap, Shield, Cpu, TrendingUp, Clock, Activity, Info, Hourglass, Award } from '../components/icons';
 import { useMinerStore } from '../store/useMinerStore';
 import { SolanaAuthService, useSolanaAuth } from '../services/solanaAuth';
 import { MultiDeviceSyncService } from '../services/multiDeviceSync';
 import { useTheme } from '../contexts/ThemeContext';
 import { cn, formatHashrate } from '../lib/utils';
 import { p2poolAPI } from '../services/p2poolAPI';
-import type { P2PoolPoolSnapshot, P2PoolStratumSnapshot } from '../services/p2poolAPI';
+import type { P2PoolStratumSnapshot } from '../services/p2poolAPI';
 import { getEnvironmentConfig } from '../config/environment';
 import { nativeApi } from '../lib/native-api';
 import { backendJson } from '../lib/backend-api';
@@ -117,6 +117,7 @@ const Mining: React.FC = () => {
     const poolUrl = useMinerStore((state) => state.poolUrl);
     const setPoolUrl = useMinerStore((state) => state.setPoolUrl);
     const manualPoolSelection = useMinerStore((state) => state.manualPoolSelection);
+    const setManualPoolSelection = useMinerStore((state) => state.setManualPoolSelection);
     const backendPoolEndpoints = useMinerStore((state) => state.backendPoolEndpoints);
     const updateStats = useMinerStore((state) => state.updateStats);
     const history = useMinerStore((state) => state.history);
@@ -146,8 +147,10 @@ const Mining: React.FC = () => {
 
     const [showHugePagesInfo, setShowHugePagesInfo] = useState(false);
     const [stratumStats, setStratumStats] = useState<P2PoolStratumSnapshot | null>(null);
-    const [poolSnapshots, setPoolSnapshots] = useState<P2PoolPoolSnapshot[]>([]);
+    const [verifiedSharesCount, setVerifiedSharesCount] = useState(0);
     const [showShareAnimation, setShowShareAnimation] = useState(false);
+
+    const [poolPings, setPoolPings] = useState<Record<string, { avg: number; min: number; max: number; jitter: number } | null>>({});
 
     const statsIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const timeIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -155,6 +158,7 @@ const Mining: React.FC = () => {
     const ratesIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const rewardReportIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const verifiedSharesIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const pingIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const statsInFlightRef = useRef(false);
     const poolStatsInFlightRef = useRef(false);
     const ratesInFlightRef = useRef(false);
@@ -162,17 +166,20 @@ const Mining: React.FC = () => {
     const verifiedSharesInFlightRef = useRef(false);
     const lastRewardReportAtRef = useRef(0);
     const lastTimerPersistAtRef = useRef(0);
-    const lastShareCountRef = useRef<number | null>(null);
+    // Tracks the session maximum of shares_found so the animation fires only on a genuine new share,
+    // not when the stat source switches between aggregate and per-pool snapshots.
+    const lastShareCountRef = useRef<number>(-1);
     const rewardReportSeqRef = useRef(0);
     const miningStartedAtRef = useRef<number | null>(null);
     const pausedElapsedRef = useRef(0);
     const [elapsedTime, setElapsedTime] = useState(0);
     const [peakHashrate, setPeakHashrate] = useState(0);
     const [poolNetworkHashrate, setPoolNetworkHashrate] = useState(300000000000); // Default Monero difficulty
+    const [xmrigConnection, setXmrigConnection] = useState<{ pool: string; ping: number; uptime: number } | null>(null);
     const statusRef = useRef(status);
     const userPublicKeyRef = useRef(user?.publicKey);
     const currentHashrateRef = useRef(currentHashrate);
-    const stratumSharesRef = useRef(Math.max(stratumStats?.total_stratum_shares || 0, stratumStats?.shares_found || 0));
+    const stratumSharesRef = useRef(stratumStats?.total_stratum_shares || 0);
     const workerNameRef = useRef(workerName);
     const deviceTypeRef = useRef(deviceType);
     const elapsedTimeRef = useRef(0);
@@ -192,6 +199,7 @@ const Mining: React.FC = () => {
         ? new Date(miningStats.currentWindow.updatedAt).toLocaleTimeString()
         : null;
 
+
     const refreshVerifiedShares = useCallback(async () => {
         const publicKey = userPublicKeyRef.current;
         if (!publicKey || verifiedSharesInFlightRef.current) return;
@@ -210,7 +218,7 @@ const Mining: React.FC = () => {
         statusRef.current = status;
         userPublicKeyRef.current = user?.publicKey;
         currentHashrateRef.current = currentHashrate;
-        stratumSharesRef.current = Math.max(stratumStats?.total_stratum_shares || 0, stratumStats?.shares_found || 0);
+        stratumSharesRef.current = stratumStats?.total_stratum_shares || 0;
         workerNameRef.current = workerName;
         deviceTypeRef.current = deviceType;
         elapsedTimeRef.current = elapsedTime;
@@ -242,16 +250,19 @@ const Mining: React.FC = () => {
     // Get global pool stats from store
     const poolHashrateTotal = useMinerStore((state) => state.poolHashrateTotal);
     const poolMinersCount = useMinerStore((state) => state.poolMinersCount);
-    const setPoolNetworkHashrateStore = useMinerStore((state) => state.setPoolNetworkHashrate);
     const setExchangeRates = useMinerStore((state) => state.setExchangeRates);
 
-    const poolStatusLabel = stratumStats
-        ? (stratumStats.wallet || (stratumStats.workers?.length || poolHashrateTotal > 0 || poolMinersCount > 0)
+    const poolStatusLabel = status === 'starting'
+        ? 'Connecting...'
+        : status === 'running' || status === 'paused'
+        ? 'Live'
+        : stratumStats
+        ? (stratumStats.connections || stratumStats.workers?.length || poolHashrateTotal > 0 || poolMinersCount > 0
             ? 'Live'
-            : 'No Wallet')
+            : 'No Miners')
         : (poolHashrateTotal > 0 || poolMinersCount > 0)
-            ? 'Live'
-            : 'Waiting for backend stats...';
+        ? 'Live'
+        : 'Waiting...';
     const selectedPoolEndpoint = backendPoolEndpoints.find((endpoint) => endpoint.url === poolUrl);
     const selectedPoolLabel = selectedPoolEndpoint
         ? `${selectedPoolEndpoint.label} (${selectedPoolEndpoint.region})`
@@ -417,11 +428,40 @@ const Mining: React.FC = () => {
             if (ratesIntervalRef.current) clearInterval(ratesIntervalRef.current);
             if (rewardReportIntervalRef.current) clearInterval(rewardReportIntervalRef.current);
             if (verifiedSharesIntervalRef.current) clearInterval(verifiedSharesIntervalRef.current);
+            if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
         };
     }, []);
 
     useEffect(() => {
-        const shouldPoll = status === 'running';
+        if (!(window as any).__TAURI_INTERNALS__ || backendPoolEndpoints.length === 0) return;
+
+        const pingAll = async () => {
+            const results: Record<string, number | null> = {};
+            await Promise.allSettled(
+                backendPoolEndpoints.map(async (ep) => {
+                    try {
+                        const res = await nativeApi.pool.pingEndpoint(ep.host, ep.port);
+                        const avg = Number(res?.avg ?? res?.latencyMs);
+                        results[ep.id] = Number.isFinite(avg)
+                            ? { avg, min: Number(res?.min ?? avg), max: Number(res?.max ?? avg), jitter: Number(res?.jitter ?? 0) }
+                            : null;
+                    } catch {
+                        results[ep.id] = null;
+                    }
+                })
+            );
+            setPoolPings(results);
+        };
+
+        pingAll();
+        pingIntervalRef.current = setInterval(pingAll, 30000);
+        return () => {
+            if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+        };
+    }, [backendPoolEndpoints]);
+
+    useEffect(() => {
+        const shouldPoll = status === 'running' || status === 'starting';
 
         if (!shouldPoll) {
             if (statsIntervalRef.current) {
@@ -431,9 +471,9 @@ const Mining: React.FC = () => {
             return;
         }
 
-        // Increase interval from 3.5s to 5s to reduce network load and UI updates
-        statsIntervalRef.current = setInterval(fetchStats, 5000);
-        // Call immediately for quicker initial response
+        // Poll faster while connecting so the UI transitions quickly once XMRig responds
+        const intervalMs = status === 'starting' ? 2000 : 5000;
+        statsIntervalRef.current = setInterval(fetchStats, intervalMs);
         fetchStats();
         return () => {
             if (statsIntervalRef.current) {
@@ -453,7 +493,8 @@ const Mining: React.FC = () => {
         }
 
         refreshVerifiedShares();
-        verifiedSharesIntervalRef.current = setInterval(refreshVerifiedShares, 15000);
+        // XMRig proxy syncs every 60 s on the backend; polling faster is wasted work.
+        verifiedSharesIntervalRef.current = setInterval(refreshVerifiedShares, 60000);
 
         return () => {
             if (verifiedSharesIntervalRef.current) {
@@ -463,49 +504,46 @@ const Mining: React.FC = () => {
         };
     }, [refreshVerifiedShares, user?.publicKey]);
 
-    // Fetch pool network hashrate and stats for reward calculation
+    // Fetch pool stats directly from the backend (XMRig proxy stats only — no P2Pool RPC).
+    // When a single proxy is configured, use its individual stratum snapshot so stats
+    // don't flicker between pools as each proxy pushes updates at different times.
     useEffect(() => {
         const fetchPoolStats = async () => {
             if (poolStatsInFlightRef.current) return;
             poolStatsInFlightRef.current = true;
             try {
-                const stats = await p2poolAPI.getPoolStats();
-                const newStratum = stats.stratum || null;
+                const stats = await backendJson('/api/pool/stats');
 
-                // Trigger ASCII animation if a new share was found
-                if (newStratum && newStratum.shares_found !== undefined) {
-                    if (lastShareCountRef.current !== null && newStratum.shares_found > lastShareCountRef.current) {
+                // stats.stratum is now always the XMRig-proxy-only aggregate from the backend.
+                const newStratum: P2PoolStratumSnapshot | null = stats.stratum || null;
+
+                // Fire the animation only when a new P2Pool verified share is found,
+                // not on every stratum submission. verifiedShares counts p2pool-share-found
+                // contributions in the current open reward window.
+                const incomingVerifiedShares = Number(stats.verifiedShares || 0);
+                if (incomingVerifiedShares > 0 && incomingVerifiedShares > lastShareCountRef.current) {
+                    if (lastShareCountRef.current >= 0) {
                         setShowShareAnimation(true);
                     }
-                    lastShareCountRef.current = newStratum.shares_found;
+                    lastShareCountRef.current = incomingVerifiedShares;
                 }
 
                 setStratumStats(newStratum);
-                setPoolSnapshots(Array.isArray(stats.pools) ? stats.pools : []);
-
-                const networkHashrate = stats && stats.poolDifficulty
-                    ? stats.poolDifficulty / 120
-                    : poolNetworkHashrate;
-                setPoolNetworkHashrate(networkHashrate);
-                setPoolNetworkHashrateStore(networkHashrate);
-
-                // Update global pool stats in store even when difficulty is temporarily unavailable.
-                setGlobalPoolStats(stats.poolHashrate || 0, stats.miners || 0, networkHashrate);
-                await refreshVerifiedShares();
+                setVerifiedSharesCount(Number(stats.verifiedShares || 0));
+                setGlobalPoolStats(Number(stats.poolHashrate || 0), Number(stats.miners || 0), 0);
             } catch (err) {
                 console.warn('[Mining] Failed to fetch pool stats:', err);
-                // Use default if fetch fails
             } finally {
                 poolStatsInFlightRef.current = false;
             }
         };
 
         fetchPoolStats();
-        poolStatsIntervalRef.current = setInterval(fetchPoolStats, 30000); // Update every 30s
+        poolStatsIntervalRef.current = setInterval(fetchPoolStats, 30000);
         return () => {
             if (poolStatsIntervalRef.current) clearInterval(poolStatsIntervalRef.current);
         };
-    }, [refreshVerifiedShares, setGlobalPoolStats, setPoolNetworkHashrateStore]);
+    }, [refreshVerifiedShares, setGlobalPoolStats]);
 
     useEffect(() => {
         if (status !== 'running') {
@@ -661,7 +699,7 @@ const Mining: React.FC = () => {
     };
 
     const fetchStats = async () => {
-        const shouldPoll = statusRef.current === 'running';
+        const shouldPoll = statusRef.current === 'running' || statusRef.current === 'starting';
         if (!shouldPoll) return;
         if (statsInFlightRef.current) return;
         statsInFlightRef.current = true;
@@ -704,6 +742,23 @@ const Mining: React.FC = () => {
             }
 
             if (!data) return;
+
+            // XMRig responded — if we were still in 'starting', the miner is now connected
+            if (statusRef.current === 'starting') {
+                setStatus('running');
+                addLog('✅ Miner connected to pool');
+            }
+
+            // Extract live connection info from XMRig /2/summary
+            if (data.connection) {
+                const conn = data.connection;
+                const connPool = String(conn.pool ?? conn.host ?? '');
+                const connPing = Number(conn.ping ?? conn.latency ?? 0);
+                const connUptime = Number(conn.uptime ?? conn.uptime_us ?? 0);
+                if (connPool) {
+                    setXmrigConnection({ pool: connPool, ping: connPing, uptime: connUptime });
+                }
+            }
 
             let hr = 0;
             if (deviceType === 'cpu') {
@@ -762,12 +817,17 @@ const Mining: React.FC = () => {
         const latestState = useMinerStore.getState();
         const latestPrimaryPool = latestState.pools?.['cpu'];
         const latestReservePool = env.enableBackupPool ? latestState.pools?.['cpu-backup'] : undefined;
-        const latestNodeFullySynced = env.enableBackupPool
-            ? !!((latestPrimaryPool?.isSynced && latestPrimaryPool?.progress >= 99.9) || (latestReservePool?.isSynced && latestReservePool?.progress >= 99.9))
-            : !!(latestPrimaryPool?.isSynced && latestPrimaryPool?.progress >= 99.9);
-        if (!latestNodeFullySynced) {
-            addLog('Cannot start mining: pool node is not fully synced yet.');
-            return;
+        // Skip local P2Pool sync check when using a remote/backend pool endpoint —
+        // the sync status only applies to a locally-run P2Pool node.
+        const usingRemotePool = latestState.backendPoolEndpoints.length > 0;
+        if (!usingRemotePool) {
+            const latestNodeFullySynced = env.enableBackupPool
+                ? !!((latestPrimaryPool?.isSynced && latestPrimaryPool?.progress >= 99.9) || (latestReservePool?.isSynced && latestReservePool?.progress >= 99.9))
+                : !!(latestPrimaryPool?.isSynced && latestPrimaryPool?.progress >= 99.9);
+            if (!latestNodeFullySynced) {
+                addLog('Cannot start mining: pool node is not fully synced yet.');
+                return;
+            }
         }
 
         resetSession();
@@ -1021,12 +1081,12 @@ const Mining: React.FC = () => {
                                     <span>Connect Solana wallet to start mining and receive rewards.</span>
                                 </div>
                             )}
-                            {!isNodeFullySynced && status !== 'running' && status !== 'starting' && (
+                            {!isNodeFullySynced && backendPoolEndpoints.length === 0 && status !== 'running' && status !== 'starting' && (
                                 <div className={cn("col-span-2 p-3 rounded-lg text-xs text-center border", theme === 'light' ? 'bg-yellow-50 border-yellow-200 text-yellow-700' : 'bg-yellow-500/10 border-yellow-500/20 text-yellow-400')}>
                                     Node sync must be 100% to start mining.
                                 </div>
                             )}
-                            <button onClick={status === 'paused' ? resumeMining : (status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping') ? startMining : pauseMining} disabled={status === 'starting' || ((!walletValid || !isSolanaConnected || !isNodeFullySynced) && (status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping'))} className={cn('py-3.5 px-4 rounded-xl font-semibold text-sm tracking-tight transition-all transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 cursor-pointer', status === 'running' || status === 'paused' ? 'bg-yellow-500/10 text-yellow-600 border-2 border-yellow-500/20 hover:bg-yellow-500/20' : (theme === 'light' ? 'bg-emerald-600 text-white border-2 border-emerald-600 hover:bg-emerald-500' : 'bg-emerald-500 text-zinc-950 border-2 border-emerald-500 hover:bg-emerald-400'))}>
+                            <button onClick={status === 'paused' ? resumeMining : (status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping') ? startMining : pauseMining} disabled={status === 'starting' || ((!walletValid || !isSolanaConnected || (backendPoolEndpoints.length === 0 && !isNodeFullySynced)) && (status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping'))} className={cn('py-3.5 px-4 rounded-xl font-semibold text-sm tracking-tight transition-all transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 cursor-pointer', status === 'running' || status === 'paused' ? 'bg-yellow-500/10 text-yellow-600 border-2 border-yellow-500/20 hover:bg-yellow-500/20' : (theme === 'light' ? 'bg-emerald-600 text-white border-2 border-emerald-600 hover:bg-emerald-500' : 'bg-emerald-500 text-zinc-950 border-2 border-emerald-500 hover:bg-emerald-400'))}>
                                 {status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping' ? <><Play size={16} /> Start</> : status === 'paused' ? <><Play size={16} /> Resume</> : status === 'starting' ? <><Hourglass size={16} className="animate-spin" /> Connecting</> : <><PauseSolid size={16} /> Pause</>}
                             </button>
                             <button onClick={stopMining} disabled={status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping'} className={cn('py-3.5 px-4 rounded-xl font-semibold text-sm tracking-tight transition-all transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 cursor-pointer', status === 'running' || status === 'starting' || status === 'paused' ? 'bg-red-500/10 text-red-500 border-2 border-red-500/20 hover:bg-red-500/20' : (theme === 'light' ? 'bg-zinc-200 text-zinc-500 border-2 border-zinc-200' : 'bg-zinc-800 text-zinc-600 border-2 border-zinc-800'))}>
@@ -1040,41 +1100,119 @@ const Mining: React.FC = () => {
                                 {poolStatusLabel}
                             </span>
                         </div>
-                        <div className={cn("rounded-lg border px-3 py-2 text-xs", theme === 'light' ? 'bg-zinc-50 border-zinc-200 text-zinc-700' : 'bg-zinc-950/40 border-white/10 text-zinc-300')}>
-                            <div className="flex items-center justify-between gap-3">
-                                <span className={cn("uppercase tracking-widest font-bold", theme === 'light' ? 'text-zinc-500' : 'text-zinc-500')}>Mining on</span>
-                                <span className="font-semibold text-right">{selectedPoolLabel}</span>
+                        {!stratumStats ? (
+                            <div className={cn("text-xs text-center py-3 rounded-lg border border-dashed", theme === 'light' ? 'border-zinc-200 text-zinc-400' : 'border-white/10 text-zinc-600')}>
+                                Waiting for proxy data...
                             </div>
-                            <div className={cn("mt-1 font-mono text-[11px] truncate", theme === 'light' ? 'text-zinc-500' : 'text-zinc-500')}>
-                                {poolUrl}
-                            </div>
-                        </div>
-                        <div className="grid grid-cols-2 gap-2">
-                            <StatCard label="Aggregate 15m" value={formatHashrate(stratumStats?.hashrate_15m || poolHashrateTotal || 0)} icon={<Activity size={12} />} tone="blue" theme={theme} />
-                            <StatCard label="1h Avg" value={formatHashrate(stratumStats?.hashrate_1h || 0)} icon={<TrendingUp size={12} />} tone="emerald" theme={theme} />
-                            <StatCard label="24h Avg" value={formatHashrate(stratumStats?.hashrate_24h || 0)} icon={<Clock size={12} />} tone="violet" theme={theme} />
-                            <StatCard label="Aggregate Workers" value={`${stratumStats?.workers?.length || poolMinersCount || 0}`} icon={<Cpu size={12} />} tone="sky" theme={theme} />
-                            <StatCard label="Connections" value={`${stratumStats?.connections || poolMinersCount || 0}`} icon={<Shield size={12} />} tone="cyan" theme={theme} />
-                            <StatCard label="Pool Stratum Shares" value={`${stratumStats?.total_stratum_shares || 0}`} icon={<Zap size={12} />} tone="teal" theme={theme} />
-                            <StatCard label="Failed Shares" value={`${stratumStats?.shares_failed || 0}`} icon={<Flame size={12} />} tone="rose" theme={theme} />
-                            <StatCard label="Total Hashes" value={((stratumStats?.total_hashes || 0)).toLocaleString()} icon={<Gauge size={12} />} tone="amber" theme={theme} />
-                        </div>
-                        {poolSnapshots.length > 0 && (
-                            <div className={cn("space-y-2 text-xs pt-1 border-t", theme === 'light' ? 'border-zinc-200' : 'border-white/10')}>
-                                {poolSnapshots.map((pool) => (
-                                    <div key={pool.id} className={cn("flex items-center justify-between gap-3 rounded-lg px-3 py-2", theme === 'light' ? 'bg-zinc-50 text-zinc-700' : 'bg-zinc-950/40 text-zinc-300')}>
-                                        <span className="font-semibold truncate">{pool.region || pool.id}</span>
-                                        <span className="font-mono text-right">{formatHashrate(pool.poolHashrate || 0)} · {pool.miners || 0} workers</span>
-                                    </div>
-                                ))}
+                        ) : (
+                            <div className="grid grid-cols-2 gap-2">
+                                <StatCard label="Aggregate 15m" value={formatHashrate(stratumStats.hashrate_15m || poolHashrateTotal || 0)} icon={<Activity size={12} />} tone="blue" theme={theme} />
+                                <StatCard label="60s Avg" value={formatHashrate(stratumStats.hashrate_1h || 0)} icon={<TrendingUp size={12} />} tone="emerald" theme={theme} />
+                                <StatCard label="24h Avg" value={formatHashrate(stratumStats.hashrate_24h || 0)} icon={<Clock size={12} />} tone="violet" theme={theme} />
+                                <StatCard label="Aggregate Workers" value={`${stratumStats.workers?.length || poolMinersCount || 0}`} icon={<Cpu size={12} />} tone="sky" theme={theme} />
+                                <StatCard label="Connections" value={`${stratumStats.connections || poolMinersCount || 0}`} icon={<Shield size={12} />} tone="cyan" theme={theme} />
+                                <StatCard label="Pool Stratum Shares" value={`${stratumStats.total_stratum_shares || 0}`} icon={<Zap size={12} />} tone="teal" theme={theme} />
+                                <StatCard label="Failed Shares" value={`${stratumStats.shares_failed || 0}`} icon={<Flame size={12} />} tone="rose" theme={theme} />
+                                <StatCard label="Total Hashes" value={(stratumStats.total_hashes || 0).toLocaleString()} icon={<Gauge size={12} />} tone="amber" theme={theme} />
+                                <StatCard label="Verified Shares" value={`${verifiedSharesCount}`} icon={<Award size={12} />} tone="yellow" theme={theme} />
                             </div>
                         )}
-                        <div className={cn("text-xs pt-1 border-t", theme === 'light' ? 'border-zinc-200 text-zinc-600' : 'border-white/10 text-zinc-500')}>
-                            <div>Current Effort: {(((stratumStats?.current_effort || 0) * 100)).toFixed(2)}%</div>
-                            <div>Average Effort: {(((stratumStats?.average_effort || 0) * 100)).toFixed(2)}%</div>
-                            <div>Share Found: {stratumStats?.shares_found || 0}</div>
-                            <div>Block Share Estimate: {(((stratumStats?.block_reward_share_percent || 0))).toFixed(3)}%</div>
+                        {stratumStats?.updated_at && (
+                            <div className={cn("text-xs pt-1 border-t", theme === 'light' ? 'border-zinc-200 text-zinc-500' : 'border-white/10 text-zinc-600')}>
+                                Last proxy sync: {new Date(stratumStats.updated_at).toLocaleTimeString()}
+                            </div>
+                        )}
+                    </div>
+                    {/* Connection Status card */}
+                    <div className={cn("border rounded-xl p-4 space-y-2.5", theme === 'light' ? 'bg-white border-zinc-200' : 'bg-zinc-900/50 border-white/10')}>
+                        <div className="flex items-center justify-between">
+                            <span className={cn("text-sm font-semibold", theme === 'light' ? 'text-zinc-700' : 'text-zinc-300')}>Connection</span>
+                            <div className="flex items-center gap-2">
+                                {manualPoolSelection ? (
+                                    <button
+                                        onClick={() => setManualPoolSelection(false)}
+                                        className={cn("text-[10px] uppercase tracking-widest px-1.5 py-0.5 rounded border transition-colors", theme === 'light' ? 'border-zinc-300 text-zinc-500 hover:border-zinc-400 hover:text-zinc-700' : 'border-white/10 text-zinc-500 hover:border-white/20 hover:text-zinc-300')}
+                                        title="Switch back to auto pool selection"
+                                    >Manual · Reset</button>
+                                ) : (
+                                    <span className={cn("text-[10px] uppercase tracking-widest", theme === 'light' ? 'text-zinc-400' : 'text-zinc-600')}>Auto</span>
+                                )}
+                            </div>
                         </div>
+                        {backendPoolEndpoints.length > 0 ? (
+                            <div className="space-y-1.5">
+                                {backendPoolEndpoints.slice(0, 2).map((ep) => {
+                                    const isActive = ep.url === poolUrl;
+                                    const ping = poolPings[ep.id];
+                                    const pingAvg = ping?.avg ?? null;
+                                    const livePingMs = isActive && xmrigConnection?.ping != null ? xmrigConnection.ping : null;
+                                    const displayPingMs = livePingMs ?? pingAvg;
+                                    const displayPing = displayPingMs !== null
+                                        ? (displayPingMs > 0 ? `${displayPingMs}ms` : '<1ms')
+                                        : '—';
+                                    const pingColor = displayPingMs === null
+                                        ? (theme === 'light' ? 'text-zinc-400' : 'text-zinc-600')
+                                        : displayPingMs < 50
+                                        ? (theme === 'light' ? 'text-emerald-600' : 'text-emerald-400')
+                                        : displayPingMs < 150
+                                        ? (theme === 'light' ? 'text-yellow-600' : 'text-yellow-400')
+                                        : (theme === 'light' ? 'text-red-600' : 'text-red-400');
+                                    const jitterColor = ping
+                                        ? ping.jitter <= 10
+                                            ? (theme === 'light' ? 'text-emerald-600' : 'text-emerald-400')
+                                            : ping.jitter <= 30
+                                            ? (theme === 'light' ? 'text-yellow-600' : 'text-yellow-400')
+                                            : (theme === 'light' ? 'text-red-600' : 'text-red-400')
+                                        : (theme === 'light' ? 'text-zinc-400' : 'text-zinc-600');
+                                    const isMiningActive = status === 'running' || status === 'starting';
+                                    return (
+                                        <div
+                                            key={ep.id}
+                                            onClick={!isActive && !isMiningActive ? () => { setPoolUrl(ep.url); setManualPoolSelection(true); } : undefined}
+                                            className={cn("flex items-center justify-between gap-2 px-3 py-2 rounded-lg border transition-colors", isActive
+                                                ? (theme === 'light' ? 'bg-emerald-50 border-emerald-200' : 'bg-emerald-500/5 border-emerald-500/20')
+                                                : isMiningActive
+                                                ? (theme === 'light' ? 'bg-zinc-50 border-zinc-200 opacity-50' : 'bg-zinc-950/40 border-white/10 opacity-50')
+                                                : (theme === 'light' ? 'bg-zinc-50 border-zinc-200 hover:bg-zinc-100 hover:border-zinc-300 cursor-pointer' : 'bg-zinc-950/40 border-white/10 hover:bg-zinc-800/40 hover:border-white/20 cursor-pointer')
+                                            )}
+                                        >
+                                            <div className="flex items-center gap-2 min-w-0 shrink-0">
+                                                <span className={cn("w-1.5 h-1.5 rounded-full shrink-0", isActive ? 'bg-emerald-500 animate-pulse' : (theme === 'light' ? 'bg-zinc-300' : 'bg-zinc-600'))} />
+                                                <span className={cn("text-xs font-medium truncate", isActive ? (theme === 'light' ? 'text-zinc-800' : 'text-zinc-200') : (theme === 'light' ? 'text-zinc-600' : 'text-zinc-400'))}>{ep.label}</span>
+                                                {isActive && (
+                                                    <span className={cn("text-[9px] uppercase tracking-wider font-bold px-1 rounded", theme === 'light' ? 'bg-emerald-100 text-emerald-700' : 'bg-emerald-500/15 text-emerald-400')}>Active</span>
+                                                )}
+                                            </div>
+                                            <div className={cn("flex items-center gap-2 font-mono text-[11px] shrink-0", theme === 'light' ? 'text-zinc-500' : 'text-zinc-500')}>
+                                                <span className={pingColor}>{displayPing}</span>
+                                                {ping && (<>
+                                                    <span className={theme === 'light' ? 'text-zinc-300' : 'text-zinc-700'}>·</span>
+                                                    <span>{ping.min}↓</span>
+                                                    <span>{ping.max}↑</span>
+                                                    <span className={jitterColor}>±{ping.jitter}</span>
+                                                </>)}
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        ) : (
+                            <div className={cn("rounded-lg border px-3 py-2 text-xs space-y-1", theme === 'light' ? 'bg-zinc-50 border-zinc-200 text-zinc-700' : 'bg-zinc-950/40 border-white/10 text-zinc-300')}>
+                                <div className="flex items-center justify-between gap-3">
+                                    <span className={cn("uppercase tracking-widest font-bold text-[10px]", theme === 'light' ? 'text-zinc-500' : 'text-zinc-500')}>Mining on</span>
+                                    <span className="font-semibold truncate max-w-[120px]">{selectedPoolLabel}</span>
+                                </div>
+                                <div className={cn("font-mono text-[11px] truncate", theme === 'light' ? 'text-zinc-500' : 'text-zinc-500')}>{poolUrl}</div>
+                                {xmrigConnection && (
+                                    <div className={cn("flex items-center justify-between gap-3 pt-1 border-t", theme === 'light' ? 'border-zinc-200' : 'border-white/5')}>
+                                        <span className={cn("uppercase tracking-widest font-bold text-[10px]", theme === 'light' ? 'text-zinc-500' : 'text-zinc-500')}>Ping</span>
+                                        <span className={cn("font-mono text-[11px]", theme === 'light' ? 'text-emerald-600' : 'text-emerald-400')}>
+                                            {xmrigConnection.ping > 0 ? `${xmrigConnection.ping}ms` : '<1ms'}
+                                        </span>
+                                    </div>
+                                )}
+                            </div>
+                        )}
                     </div>
                     <div className={cn("border rounded-xl p-5 space-y-4", theme === 'light' ? 'bg-white border-zinc-200' : 'bg-zinc-900/50 border-white/10')}>
                         <div className={cn("flex items-center gap-2 text-xs font-semibold uppercase tracking-wider", theme === 'light' ? 'text-sky-700' : 'text-sky-400')}>
@@ -1082,7 +1220,12 @@ const Mining: React.FC = () => {
                             Reward Window Shares
                         </div>
                         <div className={cn("text-xs mt-1", theme === 'light' ? 'text-zinc-500' : 'text-zinc-600')}>
-                            Current Monero reward window share accounting from backend{currentWindowUpdatedAt ? `, updated ${currentWindowUpdatedAt}` : ''}.
+                            Your shares in the current reward window, synced from the backend every ~60 s{currentWindowUpdatedAt ? `. Updated ${currentWindowUpdatedAt}` : ''}.
+                            {activeWindowUserShares === 0 && (status === 'running' || status === 'starting') && (
+                                <span className={cn("block mt-1", theme === 'light' ? 'text-zinc-400' : 'text-zinc-600')}>
+                                    Keep mining — your shares will appear shortly.
+                                </span>
+                            )}
                         </div>
                         <div className="grid grid-cols-2 gap-2 text-xs">
                             <div>
@@ -1109,7 +1252,7 @@ const Mining: React.FC = () => {
     );
 };
 
-const StatCard = React.memo(({ label, value, icon, tone = 'blue', theme }: { label: string; value: string; icon: React.ReactNode; tone?: 'blue' | 'emerald' | 'violet' | 'sky' | 'cyan' | 'teal' | 'rose' | 'amber'; theme: string }) => {
+const StatCard = React.memo(({ label, value, icon, tone = 'blue', theme }: { label: string; value: string; icon: React.ReactNode; tone?: 'blue' | 'emerald' | 'violet' | 'sky' | 'cyan' | 'teal' | 'rose' | 'amber' | 'yellow'; theme: string }) => {
     const tones = {
         blue: { light: 'border-l-blue-500 text-zinc-700', dark: 'border-l-blue-400 text-zinc-300' },
         emerald: { light: 'border-l-emerald-500 text-zinc-700', dark: 'border-l-emerald-400 text-zinc-300' },
@@ -1118,7 +1261,8 @@ const StatCard = React.memo(({ label, value, icon, tone = 'blue', theme }: { lab
         cyan: { light: 'border-l-cyan-500 text-zinc-700', dark: 'border-l-cyan-400 text-zinc-300' },
         teal: { light: 'border-l-teal-500 text-zinc-700', dark: 'border-l-teal-400 text-zinc-300' },
         rose: { light: 'border-l-rose-500 text-zinc-700', dark: 'border-l-rose-400 text-zinc-300' },
-        amber: { light: 'border-l-amber-500 text-zinc-700', dark: 'border-l-amber-400 text-zinc-300' }
+        amber: { light: 'border-l-amber-500 text-zinc-700', dark: 'border-l-amber-400 text-zinc-300' },
+        yellow: { light: 'border-l-yellow-500 text-zinc-700', dark: 'border-l-yellow-400 text-zinc-300' }
     } as const;
 
     return (

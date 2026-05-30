@@ -23,22 +23,21 @@ export const mapRewardsBalanceToMiningStats = (
     poolHashrate: toNumber(currentWindow.pool_hashrate),
     updatedAt: currentWindow.updated_at ?? null
   } : undefined;
-  const hasLegacyWindowFields = balanceData?.active_window_user_shares !== undefined
-    || balanceData?.active_window_pool_shares !== undefined
-    || balanceData?.active_window_reward_share_percent !== undefined;
-  const stableCurrentWindow = mappedCurrentWindow ?? (!hasLegacyWindowFields ? previousStats?.currentWindow : undefined);
-  const stableUserShares = stableCurrentWindow?.userAcceptedShares
-    ?? balanceData?.active_window_user_shares
-    ?? previousStats?.activeWindowUserShares
-    ?? 0;
-  const stablePoolShares = stableCurrentWindow?.totalAcceptedShares
-    ?? balanceData?.active_window_pool_shares
-    ?? previousStats?.activeWindowPoolShares
-    ?? 0;
-  const stableRewardSharePercent = stableCurrentWindow?.rewardSharePercent
-    ?? balanceData?.active_window_reward_share_percent
-    ?? previousStats?.activeWindowRewardSharePercent
-    ?? 0;
+  // Preserve the previous window only when the backend omits current_window.
+  // If current_window is present, its zero values are authoritative.
+  const stableCurrentWindow = mappedCurrentWindow ?? previousStats?.currentWindow ?? null;
+  const stableUserShares =
+    mappedCurrentWindow
+      ? mappedCurrentWindow.userAcceptedShares
+      : balanceData?.active_window_user_shares ?? previousStats?.activeWindowUserShares ?? 0;
+  const stablePoolShares =
+    mappedCurrentWindow
+      ? mappedCurrentWindow.totalAcceptedShares
+      : balanceData?.active_window_pool_shares ?? previousStats?.activeWindowPoolShares ?? 0;
+  const stableRewardSharePercent =
+    mappedCurrentWindow
+      ? mappedCurrentWindow.rewardSharePercent
+      : balanceData?.active_window_reward_share_percent ?? previousStats?.activeWindowRewardSharePercent ?? 0;
 
   return {
     totalRewards: bmtBalance,
