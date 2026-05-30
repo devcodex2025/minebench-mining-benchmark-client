@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "MineBench Client",
-  "version": "0.8.13",
+  "version": "0.8.14",
   "identifier": "cloud.minebench.client",
   "build": {
     "frontendDist": "../web-dist",
@@ -41,6 +41,11 @@
     "resources": [
       "../Miner/**/*"
     ],
+    "windows": {
+      "nsis": {
+        "installerHooks": "installer-hooks.nsh"
+      }
+    },
     "android": {
       "debugApplicationIdSuffix": ".debug"
     }
