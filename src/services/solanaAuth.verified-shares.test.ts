@@ -39,7 +39,7 @@ const legacyStats = mapRewardsBalanceToMiningStats({
 assert.equal(legacyStats.activeWindowUserShares, 4);
 assert.equal(legacyStats.activeWindowPoolShares, 8);
 assert.equal(legacyStats.activeWindowRewardSharePercent, 50);
-assert.equal(legacyStats.currentWindow, undefined);
+assert.equal(legacyStats.currentWindow, null);
 
 const emptyStats = mapRewardsBalanceToMiningStats({});
 

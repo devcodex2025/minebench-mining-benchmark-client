@@ -6,6 +6,8 @@ import {
   AlertIcon,
   ArrowDownIcon,
   ArrowUpIcon,
+  ChevronDown as ChevronDownSvg,
+  ChevronUp as ChevronUpSvg,
   AwardIcon,
   CalendarIcon,
   CancelIcon,
@@ -105,6 +107,8 @@ export const Terminal = makeIcon(TerminalIcon);
 export const Thermometer = makeIcon(ThermometerIcon);
 export const Timer = makeIcon(TimerIcon);
 export const Trash2 = makeIcon(Delete02Icon);
+export const ChevronDown = makeIcon(ChevronDownSvg);
+export const ChevronUp = makeIcon(ChevronUpSvg);
 export const TrendingDown = makeIcon(ArrowDownIcon);
 export const TrendingUp = makeIcon(ArrowUpIcon);
 export const Wallet = makeIcon(WalletIcon);

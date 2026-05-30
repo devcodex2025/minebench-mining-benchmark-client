@@ -136,16 +136,37 @@ pub async fn ping_pool_endpoint(host: String, port: u16) -> Result<serde_json::V
     }
 
     let addr = format!("{host}:{port}");
-    let started = Instant::now();
-    timeout(Duration::from_secs(3), TcpStream::connect(&addr))
-        .await
-        .map_err(|_| "Pool latency check timed out".to_string())?
-        .map_err(|e| e.to_string())?;
+    const SAMPLES: usize = 5;
+    let mut samples: Vec<u64> = Vec::with_capacity(SAMPLES);
+
+    for i in 0..SAMPLES {
+        if i > 0 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        let started = Instant::now();
+        if let Ok(Ok(_)) = timeout(Duration::from_secs(2), TcpStream::connect(&addr)).await {
+            samples.push(started.elapsed().as_millis() as u64);
+        }
+    }
+
+    if samples.is_empty() {
+        return Err("Pool endpoint unreachable".to_string());
+    }
+
+    let min = *samples.iter().min().unwrap();
+    let max = *samples.iter().max().unwrap();
+    let avg = samples.iter().sum::<u64>() / samples.len() as u64;
+    let jitter = max - min;
 
     Ok(serde_json::json!({
         "host": host,
         "port": port,
-        "latencyMs": started.elapsed().as_millis()
+        "latencyMs": avg,
+        "avg": avg,
+        "min": min,
+        "max": max,
+        "jitter": jitter,
+        "samples": samples.len()
     }))
 }
 
@@ -518,7 +539,7 @@ pub async fn get_premium_status(_public_key: String) -> Result<serde_json::Value
 pub async fn get_runtime_pool_config() -> Result<serde_json::Value, String> {
     let fallback = serde_json::json!({
         "primary": {
-            "poolUrl": "xmr.minebench.cloud:3333",
+            "poolUrl": "xmr-us.minebench.cloud:3333",
             "rpcHost": "143.42.22.242",
             "rpcPort": 18089,
             "stratumPort": 3333
@@ -551,7 +572,7 @@ pub async fn get_runtime_pool_config() -> Result<serde_json::Value, String> {
     };
 
     let primary = &config["pool"]["primary"];
-    let stratum_host = primary["stratumHost"].as_str().unwrap_or("xmr.minebench.cloud");
+    let stratum_host = primary["stratumHost"].as_str().unwrap_or("xmr-us.minebench.cloud");
     let stratum_port = primary["stratumPort"].as_u64().unwrap_or(3333);
     let rpc_host = primary["rpcHost"].as_str().unwrap_or("143.42.22.242");
     let rpc_port = primary["rpcPort"].as_u64().unwrap_or(18089);
@@ -1260,7 +1281,7 @@ fn build_xmrig_args(request: &MinerStartRequest, _benchmark: bool) -> Result<(St
     let pool_url = request
         .pool_url
         .clone()
-        .unwrap_or_else(|| "xmr.minebench.cloud:3333".to_string());
+        .unwrap_or_else(|| "xmr-us.minebench.cloud:3333".to_string());
     let pool_url = validate_pool_url(&pool_url)?;
     let normalized_pool = if pool_url.contains("://") {
         pool_url
@@ -1275,7 +1296,11 @@ fn build_xmrig_args(request: &MinerStartRequest, _benchmark: bool) -> Result<(St
         .map(|value| validate_miner_value(&value, "solana wallet", 160))
         .transpose()?
         .unwrap_or_else(|| worker.clone());
-    let xmrig_user = wallet.clone();
+    let rig_id = if solana_wallet == worker {
+        solana_wallet.clone()
+    } else {
+        validate_miner_value(&format!("{}.{}", solana_wallet, worker), "rig id", 220)?
+    };
     let api_port = "4077";
     let donate_level = request.donate_level.unwrap_or(0).min(5).to_string();
     let cpu_priority = request.cpu_priority.unwrap_or(2).min(5).to_string();
@@ -1294,11 +1319,11 @@ fn build_xmrig_args(request: &MinerStartRequest, _benchmark: bool) -> Result<(St
         "-o".to_string(),
         normalized_pool,
         "-u".to_string(),
-        xmrig_user,
+        wallet,
         "-p".to_string(),
         "x".to_string(),
         "--rig-id".to_string(),
-        solana_wallet,
+        rig_id,
         "--http-enabled".to_string(),
         "--http-host".to_string(),
         "127.0.0.1".to_string(),
@@ -1341,7 +1366,7 @@ fn emit_miner_launch_logs(app: &AppHandle, args: &[String]) {
 
     let _ = app.emit("miner-log", format!("[MineBench] Pool: {}", pool));
     let _ = app.emit("miner-log", format!("[MineBench] XMR payout wallet (-u): {}", payout_wallet));
-    let _ = app.emit("miner-log", format!("[MineBench] Reward tracking (--rig-id): {}", rig_id));
+    let _ = app.emit("miner-log", format!("[MineBench] Reward tracking rig (--rig-id): {}", rig_id));
 }
 
 fn validate_miner_value(value: &str, label: &str, max_len: usize) -> Result<String, String> {

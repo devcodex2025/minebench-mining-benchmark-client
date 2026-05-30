@@ -423,7 +423,7 @@ const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
         <input
           value={localPool}
           onChange={(e) => setLocalPool(e.target.value)}
-          placeholder="host:port (e.g., xmr.minebench.cloud:3333)"
+          placeholder="host:port (e.g., xmr-us.minebench.cloud:3333)"
           disabled={!isPremium}
           className={cn(
             'mt-3 w-full px-4 py-3 rounded-lg border text-sm outline-none transition-all font-mono',

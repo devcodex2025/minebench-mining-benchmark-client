@@ -413,8 +413,12 @@ export class SolanaAuthService {
         if (err instanceof BackendApiError && err.status === 401) {
           console.warn('[SolanaAuth] Session expired');
           authStorage.removeToken();
+          const empty = this.getEmptyStats();
+          useSolanaAuth.getState().setMiningStats(empty);
+          return empty;
         }
-        return this.getEmptyStats();
+        // Non-auth errors: preserve existing stats so UI doesn't blank out
+        throw err;
       }
       const bmtBalance = Number(balanceData?.bmt_available ?? balanceData?.available_bmt ?? balanceData?.balance ?? 0) || 0;
 

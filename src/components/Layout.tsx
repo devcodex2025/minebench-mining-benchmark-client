@@ -1,6 +1,6 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { NavLink } from 'react-router-dom';
-import { Activity, Flame, Hammer, Settings, BarChart3, Terminal, TrendingUp, type LucideIcon } from './icons';
+import { Activity, Flame, Hammer, Settings, BarChart3, Terminal, TrendingUp, ChevronDown, ChevronUp, type LucideIcon } from './icons';
 import { cn } from '../lib/utils';
 import { useTheme } from '../contexts/ThemeContext';
 import { useMinerStore } from '../store/useMinerStore';
@@ -12,9 +12,10 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
   const { theme } = useTheme();
   const { dbTotalBMT, status, pools, poolHashrateTotal, poolMinersCount, xmrUsd, bmtUsd, rateXmrBmt } = useMinerStore();
   const poolLabels: Record<string, string> = {
-    'cpu': 'CPU Primary',
-    'cpu-backup': 'CPU Reserve'
+    'cpu': 'MineBench US',
+    'cpu-backup': 'MineBench EU'
   };
+  const [nodeStatusVisible, setNodeStatusVisible] = useState(true);
 
   // Format hashrate function
   const formatHashrate = (hashrate: number): string => {
@@ -40,7 +41,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
           ? 'border-zinc-300 bg-zinc-100'
           : 'border-white/5 bg-zinc-900/50 backdrop-blur-xl'
       )}>
-        <div className="flex-1 overflow-y-auto sidebar-scrollbar space-y-6">
+        <div className="flex-1 overflow-y-auto sidebar-scrollbar space-y-6 -mr-3 xl:-mr-4 pr-3 xl:pr-4">
            <div className="flex items-center gap-3 px-2 mt-2">
                 <div className="w-8 h-8 rounded-lg flex items-center justify-center overflow-hidden">
                 {/* Use relative path so it works with file:// protocol in packaged app */}
@@ -60,33 +61,50 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
               <NavItem to="/logs" icon={Terminal} label="System Logs" />
            </nav>
 
-           <div className={cn("space-y-3 pt-4 border-t", 
+           <div className={cn("space-y-3 pt-4 border-t",
              theme === 'light' ? 'border-zinc-300' : 'border-white/5'
            )}>
-                <div className={cn("px-2 text-[10px] font-bold uppercase tracking-widest",
-                  theme === 'light' ? 'text-zinc-700' : 'text-zinc-600'
-                )}>Active Pools</div>
-                {Object.entries(pools).map(([id, pool]) => (
-                    <div key={id} className={cn("p-3 rounded-lg border space-y-2",
+                <div className="flex items-center justify-between px-2">
+                  <span className={cn("text-[10px] font-bold uppercase tracking-widest",
+                    theme === 'light' ? 'text-zinc-700' : 'text-zinc-600'
+                  )}>Node Status</span>
+                  <button
+                    onClick={() => setNodeStatusVisible(v => !v)}
+                    className={cn(
+                      "rounded-full p-1 transition-colors",
+                      theme === 'light'
+                        ? 'text-zinc-400 bg-zinc-200/60 hover:text-zinc-600 hover:bg-zinc-300/70'
+                        : 'text-zinc-500 bg-white/5 hover:text-zinc-300 hover:bg-white/10'
+                    )}
+                    title={nodeStatusVisible ? 'Hide node status' : 'Show node status'}
+                  >
+                    {nodeStatusVisible
+                      ? <ChevronUp size={12} />
+                      : <ChevronDown size={12} />
+                    }
+                  </button>
+                </div>
+                {nodeStatusVisible && Object.entries(pools).map(([id, pool]) => (
+                    <div key={id} className={cn("px-2.5 py-1.5 rounded-lg border space-y-1",
                       theme === 'light'
                         ? 'bg-white border-zinc-200'
                         : 'bg-zinc-800/30 border-white/5'
                     )}>
                         <div className="flex items-center justify-between text-xs">
-                            <span className={cn("uppercase font-medium tracking-wider",
+                            <span className={cn("uppercase font-medium tracking-wider text-[10px]",
                               theme === 'light' ? 'text-zinc-700' : 'text-zinc-500'
-                            )}>{poolLabels[id] ?? id} Node</span>
+                            )}>{poolLabels[id] ?? id}</span>
                             <span className={cn(
                                 "px-1.5 py-0.5 rounded text-[10px] uppercase font-bold",
                                 !pool.connected ? "bg-yellow-500/10 text-yellow-500 animate-pulse" :
                                 !pool.isSynced ? "bg-yellow-500/10 text-yellow-500 animate-pulse" :
                               (theme === 'light' ? "bg-emerald-500/10 text-emerald-500" : "bg-emerald-500/10 text-emerald-400")
                             )}>
-                                {!pool.connected ? "Sync..." : !pool.isSynced ? "Sync" : "Ready"}
+                                {!pool.connected ? "Offline" : !pool.isSynced ? "Check" : "Ready"}
                             </span>
                         </div>
-                        
-                        <div className="space-y-1">
+
+                        <div className="space-y-0.5">
                             <div className={cn("flex justify-between text-[10px] font-mono",
                               theme === 'light' ? 'text-zinc-700' : 'text-zinc-400'
                             )}>
@@ -98,7 +116,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
                             <div className={cn("w-full h-1 rounded-full overflow-hidden",
                               theme === 'light' ? 'bg-zinc-300' : 'bg-zinc-900'
                             )}>
-                                <div 
+                                <div
                                     className={cn(
                                         "h-full transition-all duration-1000",
                                         pool.isSynced ? "bg-emerald-500" : "bg-yellow-500"

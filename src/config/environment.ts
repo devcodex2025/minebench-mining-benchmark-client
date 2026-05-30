@@ -85,8 +85,8 @@ const normalizeApiBaseUrl = (value: string | undefined, fallback: string): strin
 };
 
 const fallbackDefaults = (fallbackConfig as any)?.defaults || {};
-const primaryPoolHostFallback = fallbackDefaults.primaryPoolHost || fallbackDefaults.primaryHost || 'xmr.minebench.cloud';
-const backupPoolHostFallback = fallbackDefaults.backupPoolHost || fallbackDefaults.backupHost || 'xmr2.minebench.cloud';
+const primaryPoolHostFallback = fallbackDefaults.primaryPoolHost || fallbackDefaults.primaryHost || 'xmr-us.minebench.cloud';
+const backupPoolHostFallback = fallbackDefaults.backupPoolHost || fallbackDefaults.backupHost || 'xmr-eu.minebench.cloud';
 const primaryRpcHostFallback = fallbackDefaults.primaryRpcHost || fallbackDefaults.primaryHost || primaryPoolHostFallback;
 const backupRpcHostFallback = fallbackDefaults.backupRpcHost || fallbackDefaults.backupHost || backupPoolHostFallback;
 
