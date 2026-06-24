@@ -12,8 +12,8 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
   const { theme } = useTheme();
   const { dbTotalBMT, status, pools, poolHashrateTotal, poolMinersCount, xmrUsd, bmtUsd, rateXmrBmt } = useMinerStore();
   const poolLabels: Record<string, string> = {
-    'cpu': 'XMR Pool MineBench',
-    'cpu-backup': 'XMR Pool MineBench'
+    'cpu': 'Primary Node',
+    'cpu-backup': 'Reserve Node'
   };
   const [nodeStatusVisible, setNodeStatusVisible] = useState(true);
 

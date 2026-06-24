@@ -58,6 +58,7 @@ export const nativeApi = {
   miner: {
     startMining: (config: any) => nativeApi.invoke<void>('start_mining', { request: config }),
     stopMining: () => nativeApi.invoke<void>('stop_mining'),
+    getStatus: () => nativeApi.invoke<{ running: boolean; pid?: number }>('get_miner_status'),
     pauseMining: () => nativeApi.invoke<void>('pause_mining'),
     resumeMining: () => nativeApi.invoke<void>('resume_mining'),
     startBenchmark: (config: any) => nativeApi.invoke<void>('start_benchmark', { request: config }),

@@ -753,14 +753,15 @@ fn validate_rpc_host(host: &str) -> Result<String, String> {
         return Err("Invalid RPC host".to_string());
     }
 
-    // Allow localhost and any *.minebench.cloud domain.
-    // Do not whitelist raw IPs — Akash assigns dynamic IPs on every redeploy,
-    // so an IP-based allowlist is always stale. Use DNS names instead.
+    // Allow localhost, any *.minebench.cloud domain, and known trusted public
+    // Monero nodes used as pool fallbacks. Do not whitelist raw IPs.
     let allowed = host == "localhost"
         || host == "127.0.0.1"
         || host == "::1"
         || host.ends_with(".minebench.cloud")
-        || host == "minebench.cloud";
+        || host == "minebench.cloud"
+        || host.ends_with(".monerodevs.org")
+        || host.ends_with(".sethforprivacy.com");
 
     if allowed {
         Ok(host)
@@ -1412,7 +1413,7 @@ pub async fn start_benchmark(
 
 #[tauri::command]
 pub async fn stop_benchmark(state: tauri::State<'_, MinerState>) -> Result<(), String> {
-    miner::stop_miner(state)
+    miner::stop_miner(state).await
 }
 
 #[tauri::command]
@@ -1429,7 +1430,24 @@ pub async fn start_mining(
 
 #[tauri::command]
 pub async fn stop_mining(state: tauri::State<'_, MinerState>) -> Result<(), String> {
-    miner::stop_miner(state)
+    miner::stop_miner(state).await
+}
+
+#[tauri::command]
+pub fn get_miner_status(state: tauri::State<'_, MinerState>) -> serde_json::Value {
+    let mut lock = state.child.lock().unwrap_or_else(|error| error.into_inner());
+    let (running, pid) = match lock.as_mut() {
+        Some(child) => match child.try_wait() {
+            Ok(None) => (true, child.id()),
+            _ => {
+                lock.take();
+                (false, None)
+            }
+        },
+        None => (false, None),
+    };
+
+    serde_json::json!({ "running": running, "pid": pid })
 }
 
 #[tauri::command]

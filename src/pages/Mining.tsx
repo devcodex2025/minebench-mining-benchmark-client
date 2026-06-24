@@ -10,6 +10,7 @@ import { p2poolAPI } from '../services/p2poolAPI';
 import type { P2PoolStratumSnapshot } from '../services/p2poolAPI';
 import { getEnvironmentConfig } from '../config/environment';
 import { nativeApi } from '../lib/native-api';
+import { classifyMinerOutput, shouldMarkMinerExited } from '../lib/miner-output';
 import { backendJson } from '../lib/backend-api';
 import { detectNewShare } from '../lib/share-detection';
 
@@ -105,6 +106,7 @@ const Mining: React.FC = () => {
     const { theme } = useTheme();
     const { user, miningStats } = useSolanaAuth(); // Get Solana user and lifetime stats (XMR/BMT)
     const status = useMinerStore((state) => state.status);
+    const mode = useMinerStore((state) => state.mode);
     const setStatus = useMinerStore((state) => state.setStatus);
     const addLog = useMinerStore((state) => state.addLog);
     const deviceType = useMinerStore((state) => state.deviceType);
@@ -320,8 +322,10 @@ const Mining: React.FC = () => {
     // count is computed with accurate CPU data regardless of async call ordering.
 
     const chartData = useMemo(() => (
-        history.filter((point) => Number.isFinite(point?.hashrate) && point.hashrate >= 0)
-    ), [history]);
+        mode === 'mining'
+            ? history.filter((point) => Number.isFinite(point?.hashrate) && point.hashrate >= 0)
+            : []
+    ), [history, mode]);
 
     // Load miner settings, then CPU info sequentially so setCpuInfo always has the
     // correct threadsManuallySet flag before computing the 50%-of-cores default.
@@ -384,28 +388,36 @@ const Mining: React.FC = () => {
         let unlistenLog: () => void;
         let unlistenError: () => void;
         let unlistenExit: () => void;
+        let cancelled = false;
 
         const setupListeners = async () => {
-            unlistenLog = await nativeApi.listen<string>('miner-log', (msg: string) => {
-                const line = msg.toLowerCase();
+            const handleMinerOutput = (msg: string) => {
+                const message = String(msg || '').trim();
+                if (!message) return;
+                const kind = classifyMinerOutput(message);
+                if (kind === 'auth-error') {
+                    setMiningStatus('error');
+                    addLog(`Mining auth error: ${message}`);
+                } else if (kind === 'crash') {
+                    addLog(`Miner crash: ${message}`);
+                } else if (kind === 'connected' && statusRef.current !== 'running') {
+                    setMiningStatus('running');
+                    addLog('Miner connected to pool');
+                }
+            };
+
+            const stopLog = await nativeApi.listen<string>('miner-log', (msg: string) => {
                 if (msg.startsWith('[MineBench]')) {
                     addLog(msg);
                     return;
                 }
-                // XMRig auto-retries transient connection errors; don't flip to error
-                // state for them — only miner-exit should trigger that. Auth failure
-                // ('login failed') is a persistent error that is worth surfacing.
-                if (line.includes('login failed')) {
-                    setStatus('error');
-                    addLog(`❌ Mining auth error: ${msg.trim()}`);
-                }
-                if (line.includes('connected') || line.includes('login succeeded') || line.includes('new job')) {
-                    if (statusRef.current !== 'running') {
-                        setStatus('running');
-                        addLog('✅ Miner connected to pool');
-                    }
-                }
+                handleMinerOutput(msg);
             });
+            if (cancelled) {
+                stopLog();
+                return;
+            }
+            unlistenLog = stopLog;
 
             // XMRig on Windows writes ALL log output to stderr (not stdout), so
             // every normal log line arrives here. Do NOT trigger error status from
@@ -414,39 +426,49 @@ const Mining: React.FC = () => {
             // looks like a [MineBench] tag or a genuine crash (not XMRig stdout
             // that happens to contain "error" or "failed" in normal messages like
             // "randomx: failed to lock memory" which is a non-fatal warning).
-            unlistenError = await nativeApi.listen<string>('miner-error', (msg: string) => {
-                const message = String(msg || '').trim();
-                if (!message) return;
-                const line = message.toLowerCase();
-                const isCrash =
-                    line.includes('fatal') ||
-                    line.includes('exception') ||
-                    line.includes('abort') ||
-                    line.includes('segfault') ||
-                    line.includes('access violation');
-                if (isCrash) {
-                    setStatus('error');
-                    addLog(`❌ Miner crash: ${message}`);
-                }
+            const stopError = await nativeApi.listen<string>('miner-error', (msg: string) => {
+                handleMinerOutput(msg);
             });
+            if (cancelled) {
+                stopError();
+                return;
+            }
+            unlistenError = stopError;
 
             // XMRig process exit — clear running state so the UI doesn't stay stuck.
-            unlistenExit = await nativeApi.listen<string>('miner-exit', () => {
-                if (statusRef.current === 'running' || statusRef.current === 'starting') {
-                    setStatus('error');
-                    addLog('⚠️ Miner process exited unexpectedly');
-                }
+            const stopExit = await nativeApi.listen<string>('miner-exit', () => {
+                window.setTimeout(() => {
+                    void nativeApi.miner.getStatus()
+                        .then(({ running }) => {
+                            if (shouldMarkMinerExited(statusRef.current, running)) {
+                                setMiningStatus('error');
+                                addLog('Miner process exited unexpectedly');
+                            }
+                        })
+                        .catch(() => {
+                            if (shouldMarkMinerExited(statusRef.current, false)) {
+                                setMiningStatus('error');
+                                addLog('Miner process exited unexpectedly');
+                            }
+                        });
+                }, 250);
             });
+            if (cancelled) {
+                stopExit();
+                return;
+            }
+            unlistenExit = stopExit;
         };
 
-        setupListeners();
+        void setupListeners();
 
         return () => {
+            cancelled = true;
             if (unlistenLog) unlistenLog();
             if (unlistenError) unlistenError();
             if (unlistenExit) unlistenExit();
         };
-    }, [setStatus, addLog]);
+    }, [setMiningStatus, addLog]);
 
     useEffect(() => {
         return () => {
@@ -841,6 +863,7 @@ const Mining: React.FC = () => {
 
         miningActionInFlightRef.current = true;
         cancelStartRequestedRef.current = false;
+        useMinerStore.getState().setMode('mining');
         setMiningStatus('starting');
 
         // Ensure we have the latest config

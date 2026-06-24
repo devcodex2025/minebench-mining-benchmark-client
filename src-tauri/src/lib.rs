@@ -58,6 +58,7 @@ pub fn run() {
             commands::stop_benchmark,
             commands::start_mining,
             commands::stop_mining,
+            commands::get_miner_status,
             commands::pause_mining,
             commands::resume_mining,
         ])

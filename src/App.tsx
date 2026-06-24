@@ -20,114 +20,30 @@ import { backendJson } from './lib/backend-api';
 const PoolMonitor = () => {
     const updatePoolStatus = useMinerStore(state => state.updatePoolStatus);
     const setGlobalPoolStats = useMinerStore(state => state.setGlobalPoolStats);
-    const backendPrimaryPoolUrl = useMinerStore(state => state.backendPrimaryPoolUrl);
-    const backendBackupPoolUrl = useMinerStore(state => state.backendBackupPoolUrl);
-    const backendPoolEndpoints = useMinerStore(state => state.backendPoolEndpoints);
-    const rpcHost = useMinerStore(state => state.rpcHost);
-    const rpcPort = useMinerStore(state => state.rpcPort);
-
-    const env = getEnvironmentConfig();
-    const primaryPoolUrl = backendPrimaryPoolUrl || env.poolStratumUrl;
-    const reservePoolUrl = backendBackupPoolUrl || (env.enableBackupPool ? env.poolStratumUrlBackup : '');
 
     useEffect(() => {
-        const fallbackEndpoints = [
-            {
-                id: 'global',
-                label: 'XMR Pool MineBench',
-                region: 'GLOBAL',
-                host: env.poolStratumHost,
-                port: env.poolStratumPort,
-                url: primaryPoolUrl,
-                default: true
-            }
-        ];
-
-        const updateEndpointStatus = async (poolId: string, endpoint: typeof fallbackEndpoints[number] | undefined) => {
-            if (!endpoint) return;
-
-            // Step 1: Query monerod restricted RPC for sync status.
-            // This runs regardless of stratum reachability so sync progress
-            // is visible while the node is still syncing (stratum offline).
-            if ((window as any).__TAURI_INTERNALS__ && rpcHost && rpcPort) {
-                try {
-                    const syncData = await nativeApi.pool.getSyncStatus(rpcHost, rpcPort);
-                    const height = Number(syncData?.height ?? 0);
-                    const targetHeight = Number(syncData?.target_height ?? height);
-                    const synchronized = !!syncData?.synchronized;
-                    const peers = Number(syncData?.outgoing_connections_count ?? 0) + Number(syncData?.incoming_connections_count ?? 0);
-                    const progress = targetHeight > 0 ? Math.min((height / targetHeight) * 100, 100) : 0;
-
-                    // Step 2: TCP ping stratum to determine connected badge state.
-                    let stratumReachable = false;
-                    try {
-                        await nativeApi.pool.pingEndpoint(endpoint.host, endpoint.port);
-                        stratumReachable = true;
-                    } catch { /* stratum offline while node syncs — expected */ }
-
-                    updatePoolStatus(poolId, {
-                        height,
-                        targetHeight,
-                        isSynced: synchronized && stratumReachable,
-                        progress: synchronized ? 100 : progress,
-                        connected: stratumReachable,
-                        message: synchronized ? "Ready" : `Syncing ${progress.toFixed(1)}%`,
-                        peers
+        const fetchPoolStats = async () => {
+            try {
+                const stats = await backendJson('/api/pool/stats');
+                if (stats) {
+                    setGlobalPoolStats(Number(stats.poolHashrate || 0), Number(stats.miners || 0), 0);
+                }
+                if (Array.isArray(stats?.nodes)) {
+                    stats.nodes.forEach((node: any, index: number) => {
+                        const poolId = node.label === 'Reserve' || index > 0 ? 'cpu-backup' : 'cpu';
+                        const nodeHeight = Number(node.height ?? 0);
+                        const nodeTarget = Number(node.targetHeight ?? 0);
+                        updatePoolStatus(poolId, {
+                            height: nodeHeight,
+                            targetHeight: nodeTarget > 0 ? nodeTarget : nodeHeight,
+                            isSynced: !!node.synchronized,
+                            progress: Number(node.syncPercent ?? 0),
+                            connected: node.status !== 'error',
+                            peers: Number(node.peers ?? 0),
+                            message: node.status === 'error' ? 'Offline' : node.synchronized ? 'Ready' : `Syncing ${Number(node.syncPercent ?? 0).toFixed(1)}%`,
+                            coin: 'XMR',
+                        });
                     });
-                    return;
-                } catch (e) {
-                    console.warn(`[PoolMonitor] Monerod RPC unreachable (${rpcHost}:${rpcPort}):`, e);
-                }
-            }
-
-            // Fallback: monerod RPC unreachable — check stratum only.
-            try {
-                if ((window as any).__TAURI_INTERNALS__) {
-                    await nativeApi.pool.pingEndpoint(endpoint.host, endpoint.port);
-                }
-                updatePoolStatus(poolId, {
-                    isSynced: true, progress: 100, connected: true, message: "Ready"
-                });
-            } catch {
-                updatePoolStatus(poolId, {
-                    isSynced: false, progress: 0, connected: false, message: "Offline"
-                });
-            }
-        };
-
-        const checkPools = async () => {
-            const endpoints = backendPoolEndpoints.length > 0 ? backendPoolEndpoints : fallbackEndpoints;
-            const primaryEndpoint = endpoints.find((endpoint) => endpoint.default) || endpoints[0];
-            const backupEndpoint = endpoints.find((endpoint) => endpoint.id === 'eu') || endpoints[1];
-
-            await updateEndpointStatus('cpu', primaryEndpoint);
-            if (env.enableBackupPool && backupEndpoint) {
-                await updateEndpointStatus('cpu-backup', backupEndpoint);
-            }
-        };
-
-        const fetchPoolStats = async () => {
-            try {
-                const stats = await backendJson('/api/pool/stats');
-                if (stats) {
-                    setGlobalPoolStats(Number(stats.poolHashrate || 0), Number(stats.miners || 0), 0);
-                }
-            } catch (err) {
-                console.warn('[PoolMonitor] Failed to fetch pool stats:', err);
-            }
-        };
-
-        checkPools();
-        const interval = setInterval(checkPools, 10000);
-        return () => clearInterval(interval);
-    }, [updatePoolStatus, primaryPoolUrl, reservePoolUrl, backendPoolEndpoints, rpcHost, rpcPort]);
-
-    useEffect(() => {
-        const fetchPoolStats = async () => {
-            try {
-                const stats = await backendJson('/api/pool/stats');
-                if (stats) {
-                    setGlobalPoolStats(Number(stats.poolHashrate || 0), Number(stats.miners || 0), 0);
                 }
             } catch (err) {
                 console.warn('[PoolMonitor] Failed to fetch pool stats:', err);

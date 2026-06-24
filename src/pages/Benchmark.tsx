@@ -9,33 +9,7 @@ import { cn, formatHashrate } from '../lib/utils';
 import { getEnvironmentConfig } from '../config/environment';
 import { nativeApi } from '../lib/native-api';
 import { p2poolAPI } from '../services/p2poolAPI';
-
-// Tauri: fetch pool config directly
-const fetchPoolConfig = async () => {
-    try {
-        const env = getEnvironmentConfig();
-        const primaryPool = env.poolStratumHost; // Corrected environment key
-        if (!primaryPool) {
-            throw new Error('Pool configuration not found in environment');
-        }
-        const response = await fetch(`http://${env.poolRpcHost}:${env.poolRpcPort}/json_rpc`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                jsonrpc: '2.0',
-                id: '0',
-                method: 'get_info',
-                params: []
-            })
-        });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const data = await response.json();
-        return data.result || null;
-    } catch (err) {
-        console.warn('[Benchmark] Failed to fetch pool config:', err);
-        return null;
-    }
-};
+import { classifyMinerOutput, shouldMarkMinerExited } from '../lib/miner-output';
 
 const getErrorMessage = (err: any) => {
 
@@ -55,6 +29,8 @@ const Benchmark = () => {
     // Select state individually to avoid unnecessary re-renders
     const status = useMinerStore(state => state.status);
     const setStatus = useMinerStore(state => state.setStatus);
+    const mode = useMinerStore(state => state.mode);
+    const setMode = useMinerStore(state => state.setMode);
     const addLog = useMinerStore(state => state.addLog);
     const deviceType = useMinerStore(state => state.deviceType);
     const setDeviceType = useMinerStore(state => state.setDeviceType);
@@ -77,6 +53,7 @@ const Benchmark = () => {
     const [sysInfo, setSysInfo] = useState<{ cpu: string, cores: number, ram: string } | null>(null);
     const [showAuthWarning, setShowAuthWarning] = useState(false);
     const [pendingStart, setPendingStart] = useState(false);
+    const [isStartPending, setIsStartPending] = useState(false);
     const env = getEnvironmentConfig();
     const primaryPool = pools?.['cpu'];
     const reservePool = env.enableBackupPool ? pools?.['cpu-backup'] : undefined;
@@ -90,6 +67,7 @@ const Benchmark = () => {
     const isBenchmarkPollingRef = useRef(false);
     const lastBenchmarkRewardReportAtRef = useRef(0);
     const benchmarkRewardSeqRef = useRef(0);
+    const benchmarkStartingRef = useRef(false);
     // Keep local tracks for final calculation to avoid dependency on store sampling rate
     const localStatsRef = useRef<number[]>([]);
     const benchmarkApiStateRef = useRef<{ connectedUrl: string | null; errorLogged: boolean }>({
@@ -98,6 +76,8 @@ const Benchmark = () => {
     });
 
     const isSolanaConnected = !!user?.publicKey;
+    const isBenchmarkActive = mode === 'benchmark' && (status === 'starting' || status === 'running');
+    const benchmarkHistory = mode === 'benchmark' ? history : [];
 
     // Multi-Device Sync initialization
     useEffect(() => {
@@ -162,10 +142,10 @@ const Benchmark = () => {
 
     // Auto-stop when timer reaches 0
     useEffect(() => {
-        if (timeLeft === 0 && status === 'running') {
+        if (timeLeft === 0 && isBenchmarkActive) {
             stopBenchmark();
         }
-    }, [timeLeft, status]);
+    }, [timeLeft, isBenchmarkActive]);
 
     // Cleanup on unmount
     useEffect(() => {
@@ -208,47 +188,67 @@ const Benchmark = () => {
     useEffect(() => {
         if (!(window as any).__TAURI_INTERNALS__) return;
 
-        let unlistenLog: () => void;
-        let unlistenError: () => void;
-        let unlistenExit: () => void;
+        let cancelled = false;
+        const unlisteners: Array<() => void> = [];
 
         const setupListeners = async () => {
-            unlistenLog = await nativeApi.listen<string>('miner-log', (msg) => {
+            const register = async <T,>(event: string, handler: (payload: T) => void) => {
+                const unlisten = await nativeApi.listen<T>(event, handler);
+                if (cancelled) unlisten();
+                else unlisteners.push(unlisten);
+            };
+
+            await register<string>('miner-log', (msg) => {
                 const message = String(msg || '').trim();
                 console.log(`Miner: ${message}`);
                 if (message) addLog(message);
-            });
-
-            unlistenError = await nativeApi.listen<string>('miner-error', (msg) => {
-                console.error(`Miner Error: ${msg}`);
-                addLog(`Error: ${msg}`);
-                if (msg.includes('CuDa') || msg.includes('error') || msg.includes('exited')) {
-                    setStatus('error');
+                if (
+                    useMinerStore.getState().mode === 'benchmark'
+                    && useMinerStore.getState().status === 'starting'
+                    && classifyMinerOutput(message) === 'connected'
+                ) {
+                    setStatus('running');
                 }
             });
 
-            unlistenExit = await nativeApi.listen<{ code: number; signal: any }>('miner-exit', ({ code }) => {
-                console.log(`Miner exited with code ${code}`);
-                if (code !== 0 && status === 'running') {
+            await register<string>('miner-error', (msg) => {
+                const message = String(msg || '').trim();
+                console.error(`Miner stderr: ${message}`);
+                if (message) addLog(message);
+                if (useMinerStore.getState().mode !== 'benchmark') return;
+
+                const kind = classifyMinerOutput(message);
+                if (kind === 'auth-error') {
                     setStatus('error');
-                    addLog(`Miner exited unexpectedly (Code: ${code})`);
-                } else if (status === 'stopping') {
-                    setStatus('completed');
+                } else if (kind === 'connected' && useMinerStore.getState().status === 'starting') {
+                    setStatus('running');
+                }
+            });
+
+            await register<string>('miner-exit', async (message) => {
+                console.log(`Miner exited: ${String(message || '')}`);
+                if (benchmarkStartingRef.current || useMinerStore.getState().mode !== 'benchmark') return;
+
+                await new Promise(resolve => setTimeout(resolve, 250));
+                const nativeStatus = await nativeApi.miner.getStatus().catch(() => ({ running: false }));
+                const currentStatus = useMinerStore.getState().status;
+                if (shouldMarkMinerExited(currentStatus, nativeStatus.running)) {
+                    setStatus('error');
+                    addLog('Benchmark miner exited unexpectedly.');
                 }
             });
         };
 
-        setupListeners();
+        void setupListeners();
 
         return () => {
-            if (unlistenLog) unlistenLog();
-            if (unlistenError) unlistenError();
-            if (unlistenExit) unlistenExit();
+            cancelled = true;
+            unlisteners.forEach(unlisten => unlisten());
         };
-    }, [status, setStatus, addLog]);
+    }, [setStatus, addLog]);
 
     const startBenchmark = async () => {
-        if (status === 'running') return;
+        if (isBenchmarkActive) return;
         const usingRemotePool = backendPoolEndpoints.length > 0;
         if (!usingRemotePool && !isNodeFullySynced) {
             addLog('Node is not fully synced (100%). Benchmark is disabled until sync completes.');
@@ -267,28 +267,30 @@ const Benchmark = () => {
     };
 
     const runBenchmark = async () => {
-        resetSession();
-        isBenchmarkPollingRef.current = true;
-        localStatsRef.current = [];
-        lastBenchmarkRewardReportAtRef.current = 0;
-        benchmarkRewardSeqRef.current = 0;
-        benchmarkApiStateRef.current = { connectedUrl: null, errorLogged: false };
-        setFinalResults(null);
-        setTimeLeft(duration);
-        setShowAuthWarning(false);
-
-        // Ensure we have the latest config
-        console.log("Invalidating pool config cache...");
-        p2poolAPI.invalidateCache();
-        console.log("Fetching latest pool config...");
+        if (benchmarkStartingRef.current) return;
+        benchmarkStartingRef.current = true;
+        setIsStartPending(true);
+        setMode('benchmark');
+        setStatus('stopping');
         try {
-            const config = await fetchPoolConfig();
-            console.log("Pool config fetched successfully:", config);
-        } catch (configErr) {
-            console.error("Failed to fetch pool config:", configErr);
-        }
+            try {
+                await nativeApi.miner.stopBenchmark();
+            } catch {
+                // stop_miner is a no-op when no managed miner is running.
+            }
 
-        try {
+            resetSession();
+            setStatus('starting');
+            isBenchmarkPollingRef.current = true;
+            localStatsRef.current = [];
+            lastBenchmarkRewardReportAtRef.current = 0;
+            benchmarkRewardSeqRef.current = 0;
+            benchmarkApiStateRef.current = { connectedUrl: null, errorLogged: false };
+            setFinalResults(null);
+            setTimeLeft(duration);
+            setShowAuthWarning(false);
+            p2poolAPI.invalidateCache();
+
             await nativeApi.miner.startBenchmark({
                 type: deviceType,
                 wallet,
@@ -319,6 +321,9 @@ const Benchmark = () => {
             console.error(err);
             setStatus('error');
             addLog(`Error starting benchmark: ${getErrorMessage(err)}`);
+        } finally {
+            benchmarkStartingRef.current = false;
+            setIsStartPending(false);
         }
     };
 
@@ -657,7 +662,7 @@ const Benchmark = () => {
                             <select
                                 value={duration}
                                 onChange={(e) => setDuration(Number(e.target.value))}
-                                disabled={status === 'running'}
+                                disabled={isBenchmarkActive || isStartPending}
                                 className={cn("border rounded px-2 py-1 text-sm outline-none focus:border-emerald-500/50",
                                     theme === 'light'
                                         ? 'bg-zinc-100 border-zinc-300 text-zinc-900'
@@ -675,20 +680,20 @@ const Benchmark = () => {
                             <div className={cn("text-5xl font-mono font-light tracking-tighter",
                                 theme === 'light' ? 'text-zinc-900' : 'text-white'
                             )}>
-                                {status === 'running' && timeLeft !== null ? timeLeft : duration}
+                                {isBenchmarkActive && timeLeft !== null ? timeLeft : duration}
                                 <span className={cn("text-lg ml-1", theme === 'light' ? 'text-zinc-500' : 'text-zinc-600')}> s</span>
                             </div>
                             <span className="text-xs text-zinc-500 mt-2 uppercase tracking-widest">
-                                {status === 'running' ? 'Time Remaining' : 'Duration'}
+                                {isBenchmarkActive ? 'Time Remaining' : 'Duration'}
                             </span>
                         </div>
 
                         <button
-                            onClick={status === 'running' ? stopBenchmark : startBenchmark}
-                            disabled={status === 'stopping' || (backendPoolEndpoints.length === 0 && !isNodeFullySynced && status !== 'running')}
+                            onClick={isBenchmarkActive ? stopBenchmark : startBenchmark}
+                            disabled={isStartPending || status === 'stopping' || (backendPoolEndpoints.length === 0 && !isNodeFullySynced && !isBenchmarkActive)}
                             className={cn(
                                 "w-full py-4 rounded-lg font-bold text-sm tracking-wide transition-all transform active:scale-[0.98] cursor-pointer disabled:cursor-not-allowed",
-                                status === 'running'
+                                isBenchmarkActive
                                     ? "bg-red-500/10 text-red-500 border border-red-500/20 hover:bg-red-500/20"
                                     : (theme === 'light'
                                         ? "bg-emerald-600 text-white hover:bg-emerald-500 hover:shadow-[0_0_20px_rgba(16,185,129,0.25)]"
@@ -696,7 +701,9 @@ const Benchmark = () => {
                             )}
                         >
                             <div className="flex items-center justify-center gap-2">
-                                {status === 'running' ? (
+                                {isStartPending ? (
+                                    <><Timer size={18} /> STARTING...</>
+                                ) : isBenchmarkActive ? (
                                     <><Square size={18} fill="currentColor" /> STOP TEST</>
                                 ) : (
                                     <><Play size={18} fill="currentColor" /> START BENCHMARK</>
@@ -704,7 +711,7 @@ const Benchmark = () => {
                             </div>
                         </button>
 
-                        {backendPoolEndpoints.length === 0 && !isNodeFullySynced && status !== 'running' && (
+                        {backendPoolEndpoints.length === 0 && !isNodeFullySynced && !isBenchmarkActive && (
                             <div className={cn("mt-3 p-3 rounded-lg border text-xs",
                                 theme === 'light'
                                     ? 'bg-yellow-50 border-yellow-200 text-yellow-700'
@@ -715,7 +722,7 @@ const Benchmark = () => {
                         )}
 
                         {/* Status Indicator */}
-                        {status === 'running' && (
+                        {isBenchmarkActive && (
                             <div className={cn("p-3 rounded-lg border text-xs",
                                 theme === 'light'
                                     ? 'bg-blue-50 border-blue-200 text-blue-700'
@@ -802,7 +809,7 @@ const Benchmark = () => {
 
                     <div className="flex-1 w-full min-h-[300px]">
                         <ResponsiveContainer width="100%" height="100%">
-                            <AreaChart data={history}>
+                            <AreaChart data={benchmarkHistory}>
                                 <defs>
                                     <linearGradient id="colorHr" x1="0" y1="0" x2="0" y2="1">
                                         <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />

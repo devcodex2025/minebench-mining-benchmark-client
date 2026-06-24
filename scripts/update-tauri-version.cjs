@@ -12,4 +12,6 @@ const updated = tauriConf.replace(
   `$1${packageJson.version}$2`,
 );
 
-fs.writeFileSync(tauriConfPath, updated, 'utf8');
+if (updated !== tauriConf) {
+  fs.writeFileSync(tauriConfPath, updated, 'utf8');
+}

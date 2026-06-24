@@ -24,6 +24,24 @@ fn lock_child(child: &Mutex<Option<Child>>) -> std::sync::MutexGuard<'_, Option<
     child.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+async fn stop_child(child_state: &Arc<Mutex<Option<Child>>>) -> Result<(), String> {
+    let child = {
+        let mut lock = lock_child(child_state);
+        lock.take()
+    };
+
+    if let Some(mut child) = child {
+        match tokio::time::timeout(tokio::time::Duration::from_secs(5), child.kill()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::InvalidInput => {}
+            Ok(Err(error)) => return Err(format!("Failed to stop miner process: {}", error)),
+            Err(_) => return Err("Timed out waiting for miner process to stop".to_string()),
+        }
+    }
+
+    Ok(())
+}
+
 pub async fn spawn_miner(
     app: AppHandle,
     miner_path: String,
@@ -95,6 +113,7 @@ pub async fn spawn_miner(
 
     let app_handle_exit = app.clone();
     let miner_state_clone = miner_state.child.clone();
+    let miner_pid = child.id();
 
     *lock = Some(child);
     drop(lock); // Release the lock before spawning the monitoring task
@@ -105,12 +124,12 @@ pub async fn spawn_miner(
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         loop {
-            let is_running = {
+            let is_current_process = {
                 let lock = lock_child(&miner_state_clone);
-                lock.is_some()
+                lock.as_ref().and_then(Child::id) == miner_pid
             };
 
-            if !is_running {
+            if !is_current_process {
                 break;
             }
 
@@ -118,6 +137,9 @@ pub async fn spawn_miner(
             let should_clear = {
                 let mut lock = lock_child(&miner_state_clone);
                 if let Some(child) = lock.as_mut() {
+                    if child.id() != miner_pid {
+                        break;
+                    }
                     // Non-blocking check if process has exited
                     match child.try_wait() {
                         Ok(Some(_status)) => true,  // Process exited
@@ -131,8 +153,10 @@ pub async fn spawn_miner(
 
             if should_clear {
                 let mut lock = lock_child(&miner_state_clone);
-                lock.take();
-                let _ = app_handle_exit.emit("miner-exit", "Miner process has exited");
+                if lock.as_ref().and_then(Child::id) == miner_pid {
+                    lock.take();
+                    let _ = app_handle_exit.emit("miner-exit", "Miner process has exited");
+                }
                 break;
             }
 
@@ -143,13 +167,8 @@ pub async fn spawn_miner(
     Ok(())
 }
 
-pub fn stop_miner(miner_state: tauri::State<'_, MinerState>) -> Result<(), String> {
-    let mut lock = lock_child(&miner_state.child);
-    if let Some(mut child) = lock.take() {
-        let _ = child.start_kill();
-    }
-
-    Ok(())
+pub async fn stop_miner(miner_state: tauri::State<'_, MinerState>) -> Result<(), String> {
+    stop_child(&miner_state.child).await
 }
 
 /// Kill any running miner process without needing a `tauri::State` wrapper.
@@ -168,6 +187,22 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 mod tests {
     use super::*;
 
+    fn sleeping_child() -> Child {
+        #[cfg(target_os = "windows")]
+        let mut command = {
+            let mut command = Command::new("powershell");
+            command.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"]);
+            command
+        };
+        #[cfg(not(target_os = "windows"))]
+        let mut command = {
+            let mut command = Command::new("sh");
+            command.args(["-c", "sleep 30"]);
+            command
+        };
+        command.spawn().expect("sleep process should start")
+    }
+
     #[test]
     fn stop_miner_on_exit_with_no_child_does_not_panic() {
         let state = MinerState {
@@ -182,6 +217,23 @@ mod tests {
             child: Arc::new(Mutex::new(None)),
         };
         drop(state);
+    }
+
+    #[tokio::test]
+    async fn stop_child_waits_for_process_exit_and_clears_state() {
+        let state = Arc::new(Mutex::new(Some(sleeping_child())));
+        stop_child(&state).await.expect("process should stop");
+        assert!(lock_child(&state).is_none());
+    }
+
+    #[tokio::test]
+    async fn repeated_start_stop_cycles_leave_no_managed_child() {
+        let state = Arc::new(Mutex::new(None));
+        for _ in 0..3 {
+            *lock_child(&state) = Some(sleeping_child());
+            stop_child(&state).await.expect("process should stop");
+            assert!(lock_child(&state).is_none());
+        }
     }
 
     #[test]

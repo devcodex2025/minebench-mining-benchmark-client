@@ -2,19 +2,10 @@ import { create } from 'zustand';
 import { getEnvironmentConfig } from '../config/environment';
 import { nativeApi } from '../lib/native-api';
 import { backendJson } from '../lib/backend-api';
+import { normalizeBackendPoolEndpoints, type PoolEndpoint } from './poolEndpoints';
 
 export type AppMode = 'benchmark' | 'mining';
 export type DeviceType = 'cpu' | 'gpu';
-
-export interface PoolEndpoint {
-    id: string;
-    label: string;
-    region: string;
-    host: string;
-    port: number;
-    url: string;
-    default?: boolean;
-}
 
 interface StatsPoint {
     time: string;
@@ -58,6 +49,7 @@ interface MiningState {
     poolUrl: string;
     backendPrimaryPoolUrl: string;
     backendBackupPoolUrl: string;
+    backendBackupPoolEnabled: boolean;
     backendPoolEndpoints: PoolEndpoint[];
     cpuPriority: number; // 0-5, higher = more aggressive
     randomxMode: 'auto' | 'fast' | 'light'; // fast uses 2GB RAM, light uses 256MB
@@ -211,6 +203,7 @@ export const useMinerStore = create<MiningState>((set, get) => ({
     poolUrl: env.poolStratumUrl,
     backendPrimaryPoolUrl: env.poolStratumUrl,
     backendBackupPoolUrl: env.poolStratumUrlBackup,
+    backendBackupPoolEnabled: env.enableBackupPool,
     backendPoolEndpoints: [
         {
             id: 'global',
@@ -246,7 +239,6 @@ export const useMinerStore = create<MiningState>((set, get) => ({
 
     rpcHost: env.poolRpcHost,
     rpcPort: env.poolRpcPort,
-
     setMode: (mode) => set({ mode }),
     setDeviceType: (deviceType) => set({ deviceType }),
     setWallet: (wallet) => set({ wallet }),
@@ -454,32 +446,18 @@ export const useMinerStore = create<MiningState>((set, get) => ({
             console.log('🌐 Public configuration loaded from backend');
 
             if (data.pool?.primary) {
-                const { rpcHost, rpcPort, stratumHost, stratumPort } = data.pool.primary;
+                const { stratumHost, stratumPort } = data.pool.primary;
                 const newPrimaryPoolUrl = `${stratumHost}:${stratumPort}`;
                 const backupPrimaryPoolUrl = data.pool.backup ? `${data.pool.backup.stratumHost}:${data.pool.backup.stratumPort}` : env.poolStratumUrlBackup;
-                const backendPoolEndpoints = Array.isArray(data.pool.endpoints)
-                    ? data.pool.endpoints
-                        .map((endpoint: any) => ({
-                            id: String(endpoint.id || endpoint.region || endpoint.url || ''),
-                            label: String(endpoint.label || endpoint.region || endpoint.host || 'MineBench Pool'),
-                            region: String(endpoint.region || endpoint.id || 'GLOBAL'),
-                            host: String(endpoint.host || ''),
-                            port: Number(endpoint.port || 0),
-                            url: String(endpoint.url || `${endpoint.host}:${endpoint.port}`),
-                            default: !!endpoint.default
-                        }))
-                        .filter((endpoint: PoolEndpoint) => endpoint.id && endpoint.host && endpoint.port > 0 && endpoint.url.includes(':'))
-                    : [];
+                const backendPoolEndpoints = normalizeBackendPoolEndpoints(data.pool);
 
                 // Update runtime config in store
                 set({
-                    rpcHost,
-                    rpcPort,
                     backendPrimaryPoolUrl: newPrimaryPoolUrl,
                     backendBackupPoolUrl: backupPrimaryPoolUrl,
+                    backendBackupPoolEnabled: !!data.pool.backup,
                     backendPoolEndpoints: backendPoolEndpoints.length > 0 ? backendPoolEndpoints : get().backendPoolEndpoints
                 });
-                console.log(`📡 Updated RPC node to ${rpcHost}:${rpcPort}`);
                 console.log(`📡 Backend primary pool URL is ${newPrimaryPoolUrl}`);
                 if (backupPrimaryPoolUrl) {
                     console.log(`📡 Backend backup pool URL is ${backupPrimaryPoolUrl}`);
