@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-appimage_path="${1:?usage: wayland-appimage-smoke-test.sh <AppImage>}"
+appimage_path="$(realpath "${1:?usage: wayland-appimage-smoke-test.sh <AppImage>}")"
 
 # Keep Weston, GTK and the AppImage in one session. GTK's Wayland backend is
 # initialized by Tao before the app creates its WebView, so this must be a real
