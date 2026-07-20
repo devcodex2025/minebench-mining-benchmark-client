@@ -37,7 +37,29 @@ if [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
   exit 1
 fi
 
-APPIMAGE_EXTRACT_AND_RUN=1 "$appimage_path" >"$app_log" 2>&1 &
+if ! kill -0 "$weston_pid" 2>/dev/null; then
+  cat "$weston_log" >&2
+  echo "Wayland compositor exited before clients could connect" >&2
+  exit 1
+fi
+
+gtk_ready=false
+for _ in $(seq 1 40); do
+  if dbus-run-session -- gtk-query-settings >"$runtime_dir/gtk.log" 2>&1; then
+    gtk_ready=true
+    break
+  fi
+  sleep 0.25
+done
+
+if [ "$gtk_ready" != true ]; then
+  cat "$weston_log" >&2
+  cat "$runtime_dir/gtk.log" >&2
+  echo "GTK could not connect to the native Wayland compositor" >&2
+  exit 1
+fi
+
+dbus-run-session -- env APPIMAGE_EXTRACT_AND_RUN=1 "$appimage_path" >"$app_log" 2>&1 &
 app_pid=$!
 
 for _ in $(seq 1 40); do
