@@ -31,6 +31,19 @@ export WAYLAND_DISPLAY="minebench-wayland-0"
 export XDG_SESSION_TYPE="wayland"
 export GDK_BACKEND="wayland"
 
+appimage_root="$runtime_dir/appimage-root"
+mkdir "$appimage_root"
+(
+  cd "$appimage_root"
+  "$appimage_path" --appimage-extract >/dev/null
+  gtk_hook="squashfs-root/apprun-hooks/linuxdeploy-plugin-gtk.sh"
+  test -f "$gtk_hook"
+  env -u GDK_BACKEND WAYLAND_DISPLAY="$WAYLAND_DISPLAY" bash -c '
+    source "$1"
+    test "${GDK_BACKEND:-}" != x11
+  ' bash "$gtk_hook"
+)
+
 # GitHub-hosted runners have no GPU/DRM device. Force Weston's software
 # renderer so the compositor exposes a usable output to native GTK clients.
 weston --backend=headless-backend.so --use-pixman --socket="$WAYLAND_DISPLAY" --no-config --log="$weston_log" &
