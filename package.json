@@ -1,7 +1,7 @@
 {
   "name": "MineBench-Client",
   "private": true,
-  "version": "0.8.22",
+  "version": "0.8.23",
   "productName": "MineBench Client",
   "description": "Mining benchmark desktop client with native Wayland support.",
   "author": "MineBench Team",
