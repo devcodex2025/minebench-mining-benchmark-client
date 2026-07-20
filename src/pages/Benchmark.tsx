@@ -9,7 +9,7 @@ import { cn, formatHashrate } from '../lib/utils';
 import { getEnvironmentConfig } from '../config/environment';
 import { nativeApi } from '../lib/native-api';
 import { p2poolAPI } from '../services/p2poolAPI';
-import { classifyMinerOutput, shouldMarkMinerExited } from '../lib/miner-output';
+import { classifyMinerOutput, isTransientPoolNetworkError, shouldMarkMinerExited } from '../lib/miner-output';
 
 const getErrorMessage = (err: any) => {
 
@@ -50,7 +50,7 @@ const Benchmark = () => {
     const [duration, setDuration] = useState<number>(60);
     const [timeLeft, setTimeLeft] = useState<number | null>(null);
     const [finalResults, setFinalResults] = useState<{ avg: number, max: number } | null>(null);
-    const [sysInfo, setSysInfo] = useState<{ cpu: string, cores: number, ram: string } | null>(null);
+    const [sysInfo, setSysInfo] = useState<{ cpu: string, cores: number, ram: string, ramBytes: number } | null>(null);
     const [showAuthWarning, setShowAuthWarning] = useState(false);
     const [pendingStart, setPendingStart] = useState(false);
     const [isStartPending, setIsStartPending] = useState(false);
@@ -68,6 +68,7 @@ const Benchmark = () => {
     const lastBenchmarkRewardReportAtRef = useRef(0);
     const benchmarkRewardSeqRef = useRef(0);
     const benchmarkStartingRef = useRef(false);
+    const lastPoolNetworkWarningAtRef = useRef(0);
     // Keep local tracks for final calculation to avoid dependency on store sampling rate
     const localStatsRef = useRef<number[]>([]);
     const benchmarkApiStateRef = useRef<{ connectedUrl: string | null; errorLogged: boolean }>({
@@ -131,7 +132,8 @@ const Benchmark = () => {
                 setSysInfo({
                     cpu: cpu || 'Unknown CPU',
                     cores: cores || 0,
-                    ram: ramGB
+                    ram: ramGB,
+                    ramBytes: Number(stats?.ramTotal || 0)
                 });
             } catch (e) {
                 console.error("Failed to load sys info", e);
@@ -214,7 +216,17 @@ const Benchmark = () => {
             await register<string>('miner-error', (msg) => {
                 const message = String(msg || '').trim();
                 console.error(`Miner stderr: ${message}`);
-                if (message) addLog(message);
+                if (message) {
+                    if (isTransientPoolNetworkError(message)) {
+                        const now = Date.now();
+                        if (now - lastPoolNetworkWarningAtRef.current > 60000) {
+                            lastPoolNetworkWarningAtRef.current = now;
+                            addLog('Pool connection interrupted; XMRig will retry automatically.');
+                        }
+                    } else {
+                        addLog(message);
+                    }
+                }
                 if (useMinerStore.getState().mode !== 'benchmark') return;
 
                 const kind = classifyMinerOutput(message);
@@ -291,16 +303,27 @@ const Benchmark = () => {
             setShowAuthWarning(false);
             p2poolAPI.invalidateCache();
 
+            const lowEndCpu = (sysInfo?.cores || 0) > 0 && (sysInfo?.cores || 0) <= 2;
+            const lowEndRam = (sysInfo?.ramBytes || 0) > 0 && (sysInfo?.ramBytes || 0) <= 4 * 1024 * 1024 * 1024;
+            const knownLowEndCpu = /celeron|n4000/i.test(sysInfo?.cpu || '');
+            const useLowEndSafeMode = deviceType === 'cpu' && (lowEndCpu || lowEndRam || knownLowEndCpu);
+
             await nativeApi.miner.startBenchmark({
                 type: deviceType,
                 wallet,
                 worker: workerName,
                 poolUrl: useMinerStore.getState().poolUrl,
-                solanaWallet: user?.publicKey // Raw Solana address (no encoding)
+                solanaWallet: user?.publicKey, // Raw Solana address (no encoding)
+                threads: useLowEndSafeMode ? 1 : undefined,
+                randomxMode: useLowEndSafeMode ? 'light' : undefined,
+                hugePages: useLowEndSafeMode ? false : undefined
             });
 
             setStatus('running');
             addLog(`Benchmark started: ${deviceType.toUpperCase()} | ${duration}s`);
+            if (useLowEndSafeMode) {
+                addLog('Low-end CPU/RAM detected: using RandomX light mode, 1 thread, huge pages disabled');
+            }
 
             // Start Countdown
             timerRef.current = setInterval(() => {

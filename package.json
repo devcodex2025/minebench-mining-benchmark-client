@@ -1,7 +1,7 @@
 {
   "name": "MineBench-Client",
   "private": true,
-  "version": "0.8.19",
+  "version": "0.8.22",
   "productName": "MineBench Client",
   "description": "Mining benchmark desktop client with native Wayland support.",
   "author": "MineBench Team",
@@ -81,5 +81,8 @@
   },
   "overrides": {
     "bn.js": "5.2.3"
+  },
+  "optionalDependencies": {
+    "@tauri-apps/cli-win32-x64-msvc": "^2.11.2"
   }
 }

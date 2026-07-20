@@ -51,6 +51,31 @@ jobs:
       - name: cargo test
         run: cargo test --locked
 
+  wayland-appimage:
+    name: Wayland AppImage smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Linux build and Wayland dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf rpm weston
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build Linux AppImage
+        run: npm run dist:linux
+      - name: Launch AppImage in native Wayland
+        run: |
+          appimage=$(find src-tauri/target -path '*/bundle/appimage/*.AppImage' -type f -print -quit)
+          test -n "$appimage"
+          bash scripts/wayland-appimage-smoke-test.sh "$appimage"
+
   miner-binaries:
     name: Miner binaries are executable
     runs-on: ubuntu-latest

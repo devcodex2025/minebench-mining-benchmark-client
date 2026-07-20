@@ -18,6 +18,20 @@ export function classifyMinerOutput(message: string): MinerOutputKind {
     return 'other';
 }
 
+export function isTransientPoolNetworkError(message: string): boolean {
+    const line = String(message || '').toLowerCase();
+    return (
+        line.includes('stratum')
+        && (
+            line.includes('connection reset by peer')
+            || line.includes('read error')
+            || line.includes('end of file')
+            || line.includes('connection refused')
+            || line.includes('connection timed out')
+        )
+    );
+}
+
 export function shouldMarkMinerExited(
     status: string,
     nativeRunning: boolean,

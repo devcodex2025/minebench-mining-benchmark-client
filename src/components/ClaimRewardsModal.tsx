@@ -22,18 +22,49 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
 }) => {
   const [amount, setAmount] = useState<string>('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isQuoteLoading, setIsQuoteLoading] = useState(false);
+  const [quote, setQuote] = useState<any | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
   const isDark = theme === 'dark';
-  const MIN_WITHDRAWAL = 100;
+  const MIN_WITHDRAWAL = 0.000001;
+  const amountNum = parseFloat(amount);
+  const netAmount = Number(quote?.netAmountBmt ?? 0);
+  const canClaim = !!amount && !isNaN(amountNum) && amountNum >= MIN_WITHDRAWAL && amountNum <= availableBalance && (!quote || quote.canClaim);
 
   React.useEffect(() => {
     if (!isOpen) return;
     setError(null);
     setSuccess(null);
-    setAmount(availableBalance >= MIN_WITHDRAWAL ? Math.floor(availableBalance).toString() : '');
+    setQuote(null);
+    setAmount(availableBalance > 0 ? availableBalance.toString() : '');
   }, [isOpen, availableBalance]);
+
+  React.useEffect(() => {
+    if (!isOpen || !amount || isNaN(amountNum) || amountNum <= 0 || amountNum > availableBalance) {
+      setQuote(null);
+      return;
+    }
+
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      setIsQuoteLoading(true);
+      try {
+        const data = await SolanaAuthService.getInstance().quotePayout(amountNum);
+        if (!cancelled) setQuote(data);
+      } catch (err: any) {
+        if (!cancelled) setQuote(null);
+      } finally {
+        if (!cancelled) setIsQuoteLoading(false);
+      }
+    }, 350);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [isOpen, amount, amountNum, availableBalance]);
 
   const handleMaxClick = () => {
     setAmount(Math.floor(availableBalance).toString());
@@ -42,8 +73,6 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
   const handleClaim = async () => {
     setError(null);
     setSuccess(null);
-
-    const amountNum = parseFloat(amount);
 
     // Validation
     if (!amount || isNaN(amountNum)) {
@@ -61,12 +90,18 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
       return;
     }
 
+    if (quote && !quote.canClaim) {
+      setError('Claim amount is lower than the estimated Solana network cost');
+      return;
+    }
+
     setIsLoading(true);
 
     try {
       const data = await SolanaAuthService.getInstance().requestPayout(amountNum);
       const payoutId = data?.id ? `ID: ${data.id}` : 'pending processing';
-      setSuccess(`Withdrawal request submitted — ${payoutId}`);
+      const received = Number(data?.amount_bmt ?? data?.quote?.netAmountBmt ?? 0);
+      setSuccess(`Withdrawal request submitted — ${received.toFixed(6)} BMT to receive, ${payoutId}`);
       setAmount('');
       await onClaimed?.();
 
@@ -130,7 +165,7 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
               isDark ? 'text-zinc-500' : 'text-zinc-500'
             )}
           >
-            Minimum withdrawal: {MIN_WITHDRAWAL} BMT
+            No fixed minimum. Claim must be greater than the Solana payout cost.
           </p>
         </div>
 
@@ -149,7 +184,7 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
               type="number"
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
-              placeholder={`Min: ${MIN_WITHDRAWAL}`}
+              placeholder="Amount to claim"
               disabled={isLoading}
               className={cn(
                 'flex-1 px-4 py-2 rounded-lg border text-sm',
@@ -174,6 +209,39 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
             </button>
           </div>
         </div>
+
+        {amount && !isNaN(amountNum) && amountNum > 0 && (
+          <div
+            className={cn(
+              'p-3 rounded-lg mb-6 text-sm space-y-1',
+              isDark ? 'bg-zinc-800 border border-zinc-700 text-zinc-200' : 'bg-zinc-50 border border-zinc-200 text-zinc-700'
+            )}
+          >
+            {isQuoteLoading ? (
+              <p>Estimating Solana payout cost...</p>
+            ) : quote ? (
+              <>
+                <div className="flex justify-between gap-3">
+                  <span>Solana payout cost</span>
+                  <span>{Number(quote.totalSolCost || 0).toFixed(9)} SOL (~{Number(quote.feeBmt || 0).toFixed(6)} BMT)</span>
+                </div>
+                {Number(quote.ataRentSol || 0) > 0 && (
+                  <div className={cn('text-xs', isDark ? 'text-zinc-400' : 'text-zinc-500')}>
+                    Includes first-time BMT token account rent: {Number(quote.ataRentSol).toFixed(9)} SOL
+                  </div>
+                )}
+                <div className="flex justify-between gap-3 font-semibold">
+                  <span>You receive</span>
+                  <span className={netAmount > 0 ? 'text-yellow-400' : 'text-red-400'}>
+                    {netAmount.toFixed(6)} BMT
+                  </span>
+                </div>
+              </>
+            ) : (
+              <p>Fee quote is unavailable. You can still submit; backend will verify before creating payout.</p>
+            )}
+          </div>
+        )}
 
         {/* Error Message */}
         {error && (
@@ -236,7 +304,7 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
           </button>
           <button
             onClick={handleClaim}
-            disabled={isLoading || !amount || parseFloat(amount) < MIN_WITHDRAWAL}
+            disabled={isLoading || isQuoteLoading || !canClaim}
             className={cn(
               'flex-1 px-4 py-2 rounded-lg font-medium flex items-center justify-center gap-2',
               'disabled:opacity-50 disabled:cursor-not-allowed',

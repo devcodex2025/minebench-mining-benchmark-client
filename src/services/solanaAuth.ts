@@ -473,6 +473,19 @@ export class SolanaAuthService {
     });
   }
 
+  async quotePayout(amount: number): Promise<any> {
+    const storedToken = authStorage.getToken();
+    if (!storedToken) {
+      throw new Error('Authentication required');
+    }
+
+    return backendJson('/api/rewards/claim/quote', {
+      method: 'POST',
+      token: storedToken,
+      body: { amount }
+    });
+  }
+
   async reportMiningStats(params: {
     hashrate?: number;
     shares?: number;
