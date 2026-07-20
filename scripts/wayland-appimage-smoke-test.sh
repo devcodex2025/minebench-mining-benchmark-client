@@ -2,6 +2,14 @@
 set -euo pipefail
 
 appimage_path="${1:?usage: wayland-appimage-smoke-test.sh <AppImage>}"
+
+# Keep Weston, GTK and the AppImage in one session. GTK's Wayland backend is
+# initialized by Tao before the app creates its WebView, so this must be a real
+# GTK display check rather than a settings-only probe.
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+  exec dbus-run-session -- bash "$0" "$@"
+fi
+
 runtime_dir="$(mktemp -d)"
 weston_log="$runtime_dir/weston.log"
 app_log="$runtime_dir/minebench.log"
@@ -23,7 +31,9 @@ export WAYLAND_DISPLAY="minebench-wayland-0"
 export XDG_SESSION_TYPE="wayland"
 export GDK_BACKEND="wayland"
 
-weston --backend=headless-backend.so --socket="$WAYLAND_DISPLAY" --no-config --log="$weston_log" &
+# GitHub-hosted runners have no GPU/DRM device. Force Weston's software
+# renderer so the compositor exposes a usable output to native GTK clients.
+weston --backend=headless-backend.so --use-pixman --socket="$WAYLAND_DISPLAY" --no-config --log="$weston_log" &
 weston_pid=$!
 
 for _ in $(seq 1 40); do
@@ -45,7 +55,19 @@ fi
 
 gtk_ready=false
 for _ in $(seq 1 40); do
-  if dbus-run-session -- gtk-query-settings >"$runtime_dir/gtk.log" 2>&1; then
+  if python3 - >"$runtime_dir/gtk.log" 2>&1 <<'PY'
+import gi
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk
+
+initialized = Gtk.init_check()
+if isinstance(initialized, tuple):
+    initialized = initialized[0]
+if not initialized:
+    raise SystemExit("Gtk.init_check() could not connect to the Wayland display")
+PY
+  then
     gtk_ready=true
     break
   fi
@@ -59,11 +81,12 @@ if [ "$gtk_ready" != true ]; then
   exit 1
 fi
 
-dbus-run-session -- env APPIMAGE_EXTRACT_AND_RUN=1 "$appimage_path" >"$app_log" 2>&1 &
+env APPIMAGE_EXTRACT_AND_RUN=1 "$appimage_path" >"$app_log" 2>&1 &
 app_pid=$!
 
 for _ in $(seq 1 40); do
   if ! kill -0 "$app_pid" 2>/dev/null; then
+    cat "$weston_log" >&2
     cat "$app_log" >&2
     echo "MineBench AppImage exited before its Wayland WebView became stable" >&2
     exit 1

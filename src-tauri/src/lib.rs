@@ -83,3 +83,20 @@ pub fn run() {
             }
         });
 }
+
+#[cfg(all(test, feature = "custom-protocol"))]
+mod production_renderer_tests {
+    use tauri::utils::assets::AssetKey;
+
+    #[test]
+    fn production_renderer_embeds_index_html() {
+        let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+        let asset = context
+            .assets()
+            .get(&AssetKey::from("index.html"))
+            .expect("production Tauri context must embed index.html");
+        let html = std::str::from_utf8(&asset).expect("index.html must be valid UTF-8");
+
+        assert!(html.contains("<div id=\"root\""));
+    }
+}

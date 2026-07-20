@@ -14,6 +14,11 @@ rust-version = "1.77.2"
 name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Required by `tauri build` to embed frontendDist into the production protocol.
+# Without it, Tauri builds a development context with no index.html asset.
+custom-protocol = ["tauri/custom-protocol"]
+
 [package.metadata.bundle]
 windows = { subsystem = "windows" }
 

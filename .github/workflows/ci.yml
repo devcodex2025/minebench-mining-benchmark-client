@@ -66,10 +66,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
-            librsvg2-dev patchelf rpm weston wayland-utils libgtk-3-bin
+            librsvg2-dev patchelf rpm weston wayland-utils libgtk-3-bin \
+            python3-gi gir1.2-gtk-3.0
       - uses: dtolnay/rust-toolchain@stable
       - name: Build Linux AppImage
         run: npm run dist:linux
+      - name: Verify production renderer assets
+        working-directory: src-tauri
+        run: cargo test --release --locked --features custom-protocol production_renderer_embeds_index_html
       - name: Launch AppImage in native Wayland
         run: |
           appimage=$(find src-tauri/target -path '*/bundle/appimage/*.AppImage' -type f -print -quit)
