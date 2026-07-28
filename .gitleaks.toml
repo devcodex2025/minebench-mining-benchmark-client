@@ -1,0 +1,39 @@
+title = "MineBench secret detection"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "solana-private-key-array"
+description = "Solana private key stored as a 64-byte JSON array"
+regex = '''(?i)(?:solana[_-]?[a-z0-9_-]*(?:secret|private)[_-]?key|(?:secret|private)[_-]?key)\s*[:=]\s*["']?\[\s*(?:[0-9]{1,3}\s*,\s*){63}[0-9]{1,3}\s*\]'''
+keywords = ["private", "secret", "solana"]
+
+[[allowlists]]
+description = "Explicit non-secret placeholders"
+targetRules = ["generic-api-key"]
+stopwords = [
+  "example",
+  "placeholder",
+  "redacted",
+  "your_",
+  "your-",
+]
+
+[[allowlists]]
+description = "Public BMT mint and token addresses"
+targetRules = ["generic-api-key"]
+regexTarget = "line"
+regexes = [
+  '''67ipDsgK6D7bqTW89H8T1KTxUvVuaFy92GX7Q2XFVdev''',
+  '''(?i)BMT_(?:TOKEN_)?(?:MINT|ADDRESS)[^=:\n]*(?:=|:|\|\|)\s*["']?[1-9A-HJ-NP-Za-km-z]{32,44}''',
+  '''(?i)Token Address:\s*[1-9A-HJ-NP-Za-km-z]{32,44}''',
+]
+
+[[rules]]
+id = "solana-private-key-base58"
+description = "Solana private key stored as base58"
+regex = '''(?i)(?:solana[_-]?[a-z0-9_-]*(?:secret|private)[_-]?key|(?:secret|private)[_-]?key)\s*[:=]\s*["']?([1-9A-HJ-NP-Za-km-z]{80,100})["']?'''
+secretGroup = 1
+entropy = 3.5
+keywords = ["private", "secret", "solana"]

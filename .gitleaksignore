@@ -1,0 +1,3 @@
+# Public Supabase anon JWTs in historical client configuration commits.
+d54c08936cc13a218f9db54ecc9fd4bc3a0809b8:config/fallback.json:jwt:5
+543e3a522a2316ed48c5df0a3d82ee54f888c7e8:electron/main.cjs:jwt:12
