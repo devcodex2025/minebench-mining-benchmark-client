@@ -6,12 +6,16 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 export function formatHashrate(hr: number) {
-  const val = Number(hr);
-  if (typeof val !== 'number' || isNaN(val)) return '0.00 H/s';
+  let value = Number(hr);
+  if (!Number.isFinite(value) || value <= 0) return '0.00 H/s';
 
-  if (val >= 1e9) return (val / 1e9).toFixed(2) + ' GH/s';
-  if (val >= 1e6) return (val / 1e6).toFixed(2) + ' MH/s';
-  if (val >= 1e3) return (val / 1e3).toFixed(2) + ' KH/s';
-  return val.toFixed(2) + ' H/s';
+  const units = ['H/s', 'kH/s', 'MH/s', 'GH/s', 'TH/s', 'PH/s'];
+  let unitIndex = 0;
+  while (value >= 1000 && unitIndex < units.length - 1) {
+    value /= 1000;
+    unitIndex++;
+  }
+
+  return `${value.toFixed(2)} ${units[unitIndex]}`;
 }
 
