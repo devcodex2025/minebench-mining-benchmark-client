@@ -8,9 +8,10 @@ Chromium/Ozone.
 - Native Wayland is used whenever the desktop session provides `WAYLAND_DISPLAY`.
 - Linux uses native window decorations and an opaque window. This avoids relying
   on compositor-specific transparent, frameless-window behaviour.
-- On Wayland only, MineBench disables WebKitGTK's DMA-BUF renderer. This is a
-  targeted compatibility setting for the upstream WebKitGTK driver crash; normal
-  accelerated compositing remains enabled.
+- On Linux, MineBench disables WebKitGTK's DMA-BUF renderer. WebKitGTK uses this
+  path under Wayland, native X11 and XWayland, and incompatible Mesa/GBM drivers
+  can otherwise leave the application with a blank WebView after its
+  `WebKitWebProcess` aborts. Normal accelerated compositing remains enabled.
 - The application never overwrites an explicit
   `WEBKIT_DISABLE_DMABUF_RENDERER` value supplied by the user or distributor.
 
@@ -20,9 +21,11 @@ The policy is implemented before Tauri creates a WebView in
 
 ## Supported environments
 
-The release build is tested with a native Wayland socket and headless Weston.
-This verifies the AppImage, Tauri, WebKitGTK and the Linux window configuration
-together. It is not an X11/XWayland test.
+The release build is tested with both a native Wayland socket under headless
+Weston and an X11 display under Xvfb. CI also launches the AppImage inside an
+Ubuntu 26.04 userspace. Each smoke test verifies that the child
+`WebKitWebProcess` is created and remains alive, rather than checking only the
+Tauri parent process.
 
 ## Local verification
 
@@ -41,6 +44,7 @@ The CI-equivalent smoke test requires Weston:
 sudo apt install weston
 appimage=$(find src-tauri/target -path '*/bundle/appimage/*.AppImage' -print -quit)
 bash scripts/wayland-appimage-smoke-test.sh "$appimage"
+bash scripts/x11-appimage-smoke-test.sh "$appimage"
 ```
 
 `APPIMAGE_EXTRACT_AND_RUN=1` avoids a FUSE requirement during automated testing;
@@ -58,5 +62,5 @@ echo "$WEBKIT_DISABLE_DMABUF_RENDERER"
 
 If an issue reproduces only with a specific GPU driver, retain the GPU model,
 driver version, compositor version and the complete `WebKitWebProcess` crash
-output. Do not force `GDK_BACKEND=x11` as a general workaround: that would hide
-a native Wayland regression from the supported path.
+output. Do not force `GDK_BACKEND=x11` as a general workaround: WebKitGTK can
+use the failing DMA-BUF path under X11 too.
