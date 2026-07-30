@@ -55,6 +55,10 @@ process_is_running() {
 
 export GDK_BACKEND="x11"
 export XDG_SESSION_TYPE="x11"
+# GitHub-hosted runners and Docker/Xvfb have no DRM device. Exercise WebKitGTK
+# through Mesa's software renderer instead of failing while creating an EGL
+# display that cannot exist in the headless environment.
+export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
 unset WAYLAND_DISPLAY
 
 env APPIMAGE_EXTRACT_AND_RUN=1 "$appimage_path" >"$app_log" 2>&1 &
