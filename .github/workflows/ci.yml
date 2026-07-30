@@ -96,7 +96,7 @@ jobs:
                 dbus-x11 xvfb xauth procps libwebkit2gtk-4.1-0 libgtk-3-0t64
               appimage=$(find src-tauri/target -path "*/bundle/appimage/*.AppImage" -type f -print -quit)
               test -n "$appimage"
-              bash scripts/x11-appimage-smoke-test.sh "$appimage"
+              WEBKIT_DISABLE_COMPOSITING_MODE=1 bash scripts/x11-appimage-smoke-test.sh "$appimage"
             '
 
   miner-binaries:
