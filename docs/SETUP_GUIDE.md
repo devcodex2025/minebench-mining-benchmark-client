@@ -31,7 +31,7 @@ git commit -m "Initial commit: MineBench Desktop Client v0.2.0
 Features:
 - Cross-platform Electron app (Windows, macOS, Linux)
 - Multi-architecture support (x64, ARM64)
-- CPU mining with XMRig 6.25.0
+- CPU mining with XMRig 6.26.0
 - Custom UI with React + Three.js + Tailwind
 - Real-time mining statistics
 - Node synchronization monitoring

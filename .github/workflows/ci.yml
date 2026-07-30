@@ -100,3 +100,22 @@ jobs:
             fi
           done
           exit $status
+      - name: Bundled Linux XMRig must start and match the pinned version
+        run: |
+          expected=$(tr -d '\r\n' < Miner/Xmrig/VERSION)
+          actual=$(Miner/Xmrig/linux-x64/xmrig --version | awk 'NR == 1 { print $2 }')
+          test "$actual" = "$expected"
+
+  miner-windows:
+    name: Windows XMRig starts with the pinned version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run bundled Windows XMRig
+        shell: pwsh
+        run: |
+          $expected = (Get-Content Miner/Xmrig/VERSION -Raw).Trim()
+          $actual = (& Miner/Xmrig/win-x64/xmrig.exe --version | Select-Object -First 1).Split()[-1]
+          if ($actual -ne $expected) {
+            throw "Bundled XMRig version $actual does not match pinned version $expected"
+          }

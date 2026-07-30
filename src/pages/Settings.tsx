@@ -6,18 +6,27 @@ import { useMinerStore } from '../store/useMinerStore';
 import { useEnvironment } from '../hooks/useEnvironment';
 import { nativeApi } from '../lib/native-api';
 import { getAppUpdateStatus, getInitialAppUpdateStatus, RELEASES_URL } from '../services/appUpdate';
+import {
+  getInitialXmrigVersionInfo,
+  getXmrigVersionPresentation,
+} from '../services/xmrigVersion';
 
 export const Settings = () => {
   const { theme, toggleTheme } = useTheme();
   const [checkingUpdates, setCheckingUpdates] = useState(false);
   const [updateChecked, setUpdateChecked] = useState(false);
-  const [updateAvailable, setUpdateAvailable] = useState(false);
+  const [checkingXmrig, setCheckingXmrig] = useState(false);
+  const [xmrigVersion, setXmrigVersion] = useState(getInitialXmrigVersionInfo);
   const [autoStart, setAutoStart] = useState(false);
   const [autoStartSupported, setAutoStartSupported] = useState(true);
   const [autoStartLoading, setAutoStartLoading] = useState(false);
   const isNative = (window as any).__TAURI_INTERNALS__;
   const autoStartDisabled = autoStartLoading || !autoStartSupported || !isNative;
   const [updateStatus, setUpdateStatus] = useState(getInitialAppUpdateStatus);
+  const xmrigPresentation = useMemo(
+    () => getXmrigVersionPresentation(xmrigVersion),
+    [xmrigVersion]
+  );
 
   const openExternal = useCallback(async (url: string) => {
     try {
@@ -53,17 +62,38 @@ export const Settings = () => {
     theme === 'light' ? 'text-zinc-600' : 'text-zinc-500'
   );
 
+  const refreshXmrigVersion = useCallback(async () => {
+    if (!isNative) return;
+    setCheckingXmrig(true);
+    try {
+      setXmrigVersion(await nativeApi.miner.getVersionInfo());
+    } catch (err) {
+      setXmrigVersion((current) => ({
+        ...current,
+        error: err instanceof Error ? err.message : 'Failed to detect XMRig version',
+      }));
+    } finally {
+      setCheckingXmrig(false);
+    }
+  }, [isNative]);
+
   const handleCheckUpdates = async () => {
     setCheckingUpdates(true);
-    const status = await getAppUpdateStatus();
+    const [status] = await Promise.all([
+      getAppUpdateStatus(),
+      refreshXmrigVersion(),
+    ]);
     setUpdateStatus(status);
-    setUpdateAvailable(status.updateAvailable);
     setUpdateChecked(true);
     setCheckingUpdates(false);
   };
 
   const handleDownloadUpdate = () => {
     openExternal(RELEASES_URL);
+  };
+
+  const handleXmrigUpdate = () => {
+    openExternal(xmrigVersion.releaseUrl);
   };
 
   const refreshAutoStart = useCallback(async () => {
@@ -102,6 +132,10 @@ export const Settings = () => {
   }, [refreshAutoStart]);
 
   useEffect(() => {
+    refreshXmrigVersion();
+  }, [refreshXmrigVersion]);
+
+  useEffect(() => {
     let active = true;
 
     getAppUpdateStatus().then((status) => {
@@ -124,13 +158,103 @@ export const Settings = () => {
         <div className="flex items-start gap-3">
           <Info size={20} className="text-yellow-400 mt-1 flex-shrink-0" />
           <div className="flex-1">
-            <h2 className={cn("text-lg font-semibold", theme === 'light' ? 'text-zinc-900' : 'text-white')}>Application Version</h2>
-            <p className={cn("mt-1", textClass)}>Current version: <span className="text-yellow-400 font-mono font-bold">v{updateStatus.currentVersion}</span></p>
-            {updateStatus.updateAvailable && (
-              <p className={cn("mt-1 text-xs", theme === 'light' ? 'text-yellow-700' : 'text-yellow-400')}>
-                Update required: v{updateStatus.latestVersion} is available.
-              </p>
-            )}
+            <h2 className={cn("text-lg font-semibold", theme === 'light' ? 'text-zinc-900' : 'text-white')}>Runtime Versions</h2>
+            <p className={cn("mt-1", textClass)}>Installed application and mining engine</p>
+          </div>
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-2">
+          <div className={cn(
+            "rounded-lg border p-4",
+            theme === 'light' ? 'bg-zinc-50 border-zinc-200' : 'bg-black/20 border-white/10'
+          )}>
+            <div className="flex items-center justify-between gap-3">
+              <span className={labelClass}>MineBench Client</span>
+              <span className="font-mono text-sm font-bold text-yellow-400">v{updateStatus.currentVersion}</span>
+            </div>
+            <p className={cn("mt-2 min-h-4", subLabelClass)}>
+              {updateStatus.error
+                ? 'Latest-version check unavailable'
+                : updateStatus.updateAvailable
+                  ? `v${updateStatus.latestVersion} available`
+                  : updateChecked
+                    ? 'Latest installed'
+                    : 'Ready to check'}
+            </p>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={handleCheckUpdates}
+                disabled={checkingUpdates}
+                className={cn(
+                  "inline-flex items-center gap-2 rounded border px-3 py-2 text-xs font-semibold transition-colors",
+                  theme === 'light'
+                    ? 'border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-100'
+                    : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10',
+                  checkingUpdates && 'cursor-wait opacity-60'
+                )}
+              >
+                <RefreshCw size={14} className={checkingUpdates ? 'animate-spin' : ''} />
+                Check updates
+              </button>
+              {updateStatus.updateAvailable && (
+                <button
+                  type="button"
+                  onClick={handleDownloadUpdate}
+                  className="inline-flex items-center gap-2 rounded bg-yellow-400 px-3 py-2 text-xs font-bold text-zinc-950 transition-colors hover:bg-yellow-300"
+                >
+                  <Download size={14} />
+                  Get v{updateStatus.latestVersion}
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className={cn(
+            "rounded-lg border p-4",
+            theme === 'light' ? 'bg-zinc-50 border-zinc-200' : 'bg-black/20 border-white/10'
+          )}>
+            <div className="flex items-center justify-between gap-3">
+              <span className={labelClass}>XMRig Engine</span>
+              <span
+                data-testid="xmrig-current-version"
+                className="font-mono text-sm font-bold text-emerald-400"
+              >
+                {xmrigPresentation.currentLabel}
+              </span>
+            </div>
+            <p className={cn("mt-2 min-h-4", subLabelClass)}>
+              {xmrigPresentation.statusLabel}
+              {xmrigVersion.platform ? ` · ${xmrigVersion.platform}` : ''}
+            </p>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={refreshXmrigVersion}
+                disabled={!isNative || checkingXmrig}
+                className={cn(
+                  "inline-flex items-center gap-2 rounded border px-3 py-2 text-xs font-semibold transition-colors",
+                  theme === 'light'
+                    ? 'border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-100'
+                    : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10',
+                  (!isNative || checkingXmrig) && 'cursor-not-allowed opacity-60'
+                )}
+              >
+                <RefreshCw size={14} className={checkingXmrig ? 'animate-spin' : ''} />
+                Check engine
+              </button>
+              {xmrigPresentation.showUpdateAction && (
+                <button
+                  type="button"
+                  data-testid="xmrig-update-button"
+                  onClick={handleXmrigUpdate}
+                  className="inline-flex items-center gap-2 rounded bg-emerald-400 px-3 py-2 text-xs font-bold text-zinc-950 transition-colors hover:bg-emerald-300"
+                >
+                  <ExternalLink size={14} />
+                  {xmrigPresentation.updateActionLabel}
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </div>
