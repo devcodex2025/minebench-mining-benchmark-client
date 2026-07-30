@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import { Activity, Flame, Hammer, Settings, BarChart3, Terminal, TrendingUp, ChevronDown, ChevronUp, type LucideIcon } from './icons';
-import { cn } from '../lib/utils';
+import { cn, formatHashrate } from '../lib/utils';
 import { useTheme } from '../contexts/ThemeContext';
 import { useMinerStore } from '../store/useMinerStore';
 import { useIsDevelopment } from '../hooks/useEnvironment';
@@ -16,16 +16,6 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
     'cpu-backup': 'Reserve Node'
   };
   const [nodeStatusVisible, setNodeStatusVisible] = useState(true);
-
-  // Format hashrate function
-  const formatHashrate = (hashrate: number): string => {
-    if (hashrate === 0) return '0.00 H/s';
-    if (hashrate < 1000) return `${hashrate.toFixed(2)} H/s`;
-    if (hashrate < 1000000) return `${(hashrate / 1000).toFixed(2)} kH/s`;
-    if (hashrate < 1000000000) return `${(hashrate / 1000000).toFixed(2)} MH/s`;
-    if (hashrate < 1000000000000) return `${(hashrate / 1000000000).toFixed(2)} GH/s`;
-    return `${(hashrate / 1000000000000).toFixed(2)} TH/s`;
-  };
 
   return (
     <div className={cn(
