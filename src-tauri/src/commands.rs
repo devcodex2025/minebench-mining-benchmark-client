@@ -1379,7 +1379,7 @@ fn parse_xmrig_version(output: &str) -> Option<String> {
 fn normalize_version(version: &str) -> Option<String> {
     let version = version
         .trim()
-        .trim_start_matches(|character| character == 'v' || character == 'V');
+        .trim_start_matches(['v', 'V']);
     let valid = !version.is_empty()
         && version
             .split('.')
