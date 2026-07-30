@@ -97,11 +97,30 @@ fi
 env APPIMAGE_EXTRACT_AND_RUN=1 "$appimage_path" >"$app_log" 2>&1 &
 app_pid=$!
 
+webkit_pid=""
 for _ in $(seq 1 40); do
   if ! kill -0 "$app_pid" 2>/dev/null; then
     cat "$weston_log" >&2
     cat "$app_log" >&2
-    echo "MineBench AppImage exited before its Wayland WebView became stable" >&2
+    echo "MineBench AppImage exited before creating its Wayland WebView" >&2
+    exit 1
+  fi
+  webkit_pid="$(pgrep -P "$app_pid" -f '/WebKitWebProcess' | head -n 1 || true)"
+  [ -n "$webkit_pid" ] && break
+  sleep 0.25
+done
+
+if [ -z "$webkit_pid" ]; then
+  cat "$app_log" >&2
+  echo "MineBench AppImage did not create a WebKitWebProcess" >&2
+  exit 1
+fi
+
+for _ in $(seq 1 40); do
+  if ! kill -0 "$app_pid" 2>/dev/null || ! kill -0 "$webkit_pid" 2>/dev/null; then
+    cat "$weston_log" >&2
+    cat "$app_log" >&2
+    echo "MineBench Wayland WebKitWebProcess exited before becoming stable" >&2
     exit 1
   fi
   sleep 0.25
