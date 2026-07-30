@@ -63,7 +63,7 @@ jobs:
           if-no-files-found: ignore
 
   build_linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -75,13 +75,35 @@ jobs:
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf rpm
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf rpm weston wayland-utils libgtk-3-bin \
+            python3-gi gir1.2-gtk-3.0 xvfb xauth procps
       - name: Build renderer
         run: npm run build
       - name: Build Linux (x64)
         run: npm run dist:linux
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Smoke test Linux AppImage
+        run: |
+          appimage=$(find src-tauri/target -path '*/bundle/appimage/*.AppImage' -type f -print -quit)
+          test -n "$appimage"
+          bash scripts/wayland-appimage-smoke-test.sh "$appimage"
+          bash scripts/x11-appimage-smoke-test.sh "$appimage"
+      - name: Test AppImage on Ubuntu 26.04 userspace
+        run: |
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            ubuntu:26.04 \
+            bash -lc '
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                dbus-x11 xvfb xauth procps libwebkit2gtk-4.1-0 libgtk-3-0t64
+              appimage=$(find src-tauri/target -path "*/bundle/appimage/*.AppImage" -type f -print -quit)
+              test -n "$appimage"
+              bash scripts/x11-appimage-smoke-test.sh "$appimage"
+            '
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
         with:

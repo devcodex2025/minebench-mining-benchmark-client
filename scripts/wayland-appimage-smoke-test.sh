@@ -25,6 +25,37 @@ cleanup() {
 }
 trap cleanup EXIT
 
+find_webkit_descendant() {
+  local frontier="$1"
+  local child executable next pid
+
+  for _ in $(seq 1 8); do
+    next=""
+    for pid in $frontier; do
+      while read -r child; do
+        [ -n "$child" ] || continue
+        executable="$(readlink "/proc/$child/exe" 2>/dev/null || true)"
+        if [[ "$executable" == */WebKitWebProcess ]]; then
+          echo "$child"
+          return 0
+        fi
+        next="$next $child"
+      done < <(pgrep -P "$pid" || true)
+    done
+    frontier="$next"
+    [ -n "$frontier" ] || break
+  done
+
+  return 1
+}
+
+process_is_running() {
+  local state
+  kill -0 "$1" 2>/dev/null || return 1
+  state="$(ps -o stat= -p "$1" 2>/dev/null || true)"
+  [ -n "$state" ] && [[ "$state" != *Z* ]]
+}
+
 chmod 700 "$runtime_dir"
 export XDG_RUNTIME_DIR="$runtime_dir"
 export WAYLAND_DISPLAY="minebench-wayland-0"
@@ -97,11 +128,30 @@ fi
 env APPIMAGE_EXTRACT_AND_RUN=1 "$appimage_path" >"$app_log" 2>&1 &
 app_pid=$!
 
+webkit_pid=""
 for _ in $(seq 1 40); do
   if ! kill -0 "$app_pid" 2>/dev/null; then
     cat "$weston_log" >&2
     cat "$app_log" >&2
-    echo "MineBench AppImage exited before its Wayland WebView became stable" >&2
+    echo "MineBench AppImage exited before creating its Wayland WebView" >&2
+    exit 1
+  fi
+  webkit_pid="$(find_webkit_descendant "$app_pid" || true)"
+  [ -n "$webkit_pid" ] && break
+  sleep 0.25
+done
+
+if [ -z "$webkit_pid" ]; then
+  cat "$app_log" >&2
+  echo "MineBench AppImage did not create a WebKitWebProcess" >&2
+  exit 1
+fi
+
+for _ in $(seq 1 40); do
+  if ! process_is_running "$app_pid" || ! process_is_running "$webkit_pid"; then
+    cat "$weston_log" >&2
+    cat "$app_log" >&2
+    echo "MineBench Wayland WebKitWebProcess exited before becoming stable" >&2
     exit 1
   fi
   sleep 0.25
