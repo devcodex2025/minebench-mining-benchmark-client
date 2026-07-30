@@ -8,6 +8,9 @@ assert.equal(classifyMinerOutput('login failed: invalid user'), 'auth-error');
 assert.equal(classifyMinerOutput('randomx failed to allocate 1GB pages'), 'other');
 assert.equal(classifyMinerOutput('read error: "end of file"'), 'other');
 assert.equal(classifyMinerOutput('FATAL: access violation'), 'crash');
+assert.equal(isTransientPoolNetworkError('net stratum+tcp://xmr.minebench.cloud:3333 read error: "connection reset by peer"'), true);
+assert.equal(isTransientPoolNetworkError('net stratum+tcp://xmr.minebench.cloud:3333 read error: "end of file"'), true);
+assert.equal(isTransientPoolNetworkError('randomx failed to allocate 1GB pages'), false);
 
 // Regression: a dropped pool link must NOT be classified as 'connected'.
 // "disconnected" contains the substring "connected".

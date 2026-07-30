@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
+import type { XmrigVersionInfo } from '../services/xmrigVersion';
 
 /**
  * Type-safe native API bridge for Tauri v2
@@ -59,6 +60,7 @@ export const nativeApi = {
     startMining: (config: any) => nativeApi.invoke<void>('start_mining', { request: config }),
     stopMining: () => nativeApi.invoke<void>('stop_mining'),
     getStatus: () => nativeApi.invoke<{ running: boolean; pid?: number }>('get_miner_status'),
+    getVersionInfo: () => nativeApi.invoke<XmrigVersionInfo>('get_xmrig_version_info'),
     pauseMining: () => nativeApi.invoke<void>('pause_mining'),
     resumeMining: () => nativeApi.invoke<void>('resume_mining'),
     startBenchmark: (config: any) => nativeApi.invoke<void>('start_benchmark', { request: config }),

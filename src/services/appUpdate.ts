@@ -5,9 +5,11 @@ export const RELEASES_URL = 'https://github.com/devcodex2025/minebench-mining-be
 
 const LATEST_RELEASE_URL = 'https://api.github.com/repos/devcodex2025/minebench-mining-benchmark-client/releases/latest';
 
+export const normalizeVersionLabel = (version: string): string =>
+  version.trim().replace(/^v/i, '');
+
 const normalizeVersion = (version: string): number[] =>
-  version
-    .replace(/^v/i, '')
+  normalizeVersionLabel(version)
     .split('.')
     .map(part => Number.parseInt(part, 10))
     .map(part => (Number.isFinite(part) ? part : 0));
@@ -45,7 +47,9 @@ export const getAppUpdateStatus = async (): Promise<AppUpdateStatus> => {
     if (!response.ok) throw new Error(`GitHub release check failed: ${response.status}`);
 
     const release = await response.json();
-    const latestVersion = String(release.tag_name || release.name || APP_VERSION).trim();
+    const latestVersion = normalizeVersionLabel(
+      String(release.tag_name || release.name || APP_VERSION)
+    );
 
     return {
       currentVersion: APP_VERSION,

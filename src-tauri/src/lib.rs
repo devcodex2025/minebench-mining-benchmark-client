@@ -54,6 +54,7 @@ pub fn run() {
             commands::open_logs_directory,
             commands::get_logs_directory,
             commands::get_miner_path,
+            commands::get_xmrig_version_info,
             commands::start_benchmark,
             commands::stop_benchmark,
             commands::start_mining,

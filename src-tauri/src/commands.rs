@@ -329,6 +329,17 @@ pub struct MinerStartRequest {
     donate_level: Option<u8>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct XmrigVersionInfo {
+    current_version: String,
+    latest_version: String,
+    update_available: bool,
+    platform: String,
+    release_url: String,
+    error: Option<String>,
+}
+
 fn default_device_type() -> String {
     "cpu".to_string()
 }
@@ -1151,6 +1162,7 @@ fn validate_external_url(url: &str) -> Result<String, String> {
         "minebench.cloud"
             | "minebench.app"
             | "backend.minebench.cloud"
+            | "github.com"
             | "phantom.app"
             | "discord.gg"
             | "x.com"
@@ -1180,10 +1192,10 @@ fn resolve_miner_path(app: &AppHandle, miner_name: &str) -> Result<PathBuf, Stri
 
     let platform_dir = match (platform, arch) {
         ("windows", "aarch64") => "win-arm64",
-        ("windows", _) => "win-x64",
+        ("windows", "x86_64") => "win-x64",
         ("macos", "aarch64") => "macos-arm64",
-        ("macos", _) => "macos-x64",
-        ("linux", _) => "linux-x64",
+        ("macos", "x86_64") => "macos-x64",
+        ("linux", "x86_64") => "linux-x64",
         _ => return Err(format!("Unsupported platform/arch: {}/{}", platform, arch)),
     };
 
@@ -1271,6 +1283,128 @@ pub async fn get_miner_path(app: AppHandle, miner_name: String) -> Result<String
     Ok(resolve_miner_path(&app, &miner_name)?.to_string_lossy().to_string())
 }
 
+const XMRIG_LATEST_RELEASE_API: &str = "https://api.github.com/repos/xmrig/xmrig/releases/latest";
+const XMRIG_RELEASES_URL: &str = "https://github.com/xmrig/xmrig/releases/latest";
+
+#[tauri::command]
+pub async fn get_xmrig_version_info(app: AppHandle) -> Result<XmrigVersionInfo, String> {
+    let miner_path = resolve_miner_path(&app, "xmrig")?;
+    let current_version = read_xmrig_version(&miner_path)?;
+    let mut error = None;
+
+    let latest_version = match fetch_latest_xmrig_version().await {
+        Ok(version) => version,
+        Err(fetch_error) => {
+            error = Some(fetch_error);
+            current_version.clone()
+        }
+    };
+
+    Ok(XmrigVersionInfo {
+        update_available: is_newer_version(&latest_version, &current_version),
+        current_version,
+        latest_version,
+        platform: format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
+        release_url: XMRIG_RELEASES_URL.to_string(),
+        error,
+    })
+}
+
+fn read_xmrig_version(miner_path: &std::path::Path) -> Result<String, String> {
+    let mut command = std::process::Command::new(miner_path);
+    command.arg("--version");
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    if let Ok(output) = command.output() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(version) = parse_xmrig_version(&stdout) {
+            return Ok(version);
+        }
+    }
+
+    for ancestor in miner_path.ancestors() {
+        let version_file = ancestor.join("VERSION");
+        if let Ok(version) = std::fs::read_to_string(version_file) {
+            let version = version.trim();
+            if !version.is_empty() {
+                return Ok(version.to_string());
+            }
+        }
+    }
+
+    Err(format!(
+        "Unable to determine XMRig version from {}",
+        miner_path.to_string_lossy()
+    ))
+}
+
+async fn fetch_latest_xmrig_version() -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("MineBench-Client")
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response = client
+        .get(XMRIG_LATEST_RELEASE_API)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|error| format!("Failed to check XMRig releases: {}", error))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "XMRig release check failed with status {}",
+            response.status()
+        ));
+    }
+
+    let release: serde_json::Value = response.json().await.map_err(|error| error.to_string())?;
+    release
+        .get("tag_name")
+        .and_then(serde_json::Value::as_str)
+        .and_then(normalize_version)
+        .ok_or_else(|| "Latest XMRig release has no valid tag".to_string())
+}
+
+fn parse_xmrig_version(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("XMRig ")
+            .and_then(|version| version.split_whitespace().next())
+            .and_then(normalize_version)
+    })
+}
+
+fn normalize_version(version: &str) -> Option<String> {
+    let version = version
+        .trim()
+        .trim_start_matches(['v', 'V']);
+    let valid = !version.is_empty()
+        && version
+            .split('.')
+            .all(|part| !part.is_empty() && part.chars().all(|character| character.is_ascii_digit()));
+    valid.then(|| version.to_string())
+}
+
+fn is_newer_version(latest: &str, current: &str) -> bool {
+    let mut latest = latest.split('.').map(|part| part.parse::<u64>().unwrap_or(0));
+    let mut current = current.split('.').map(|part| part.parse::<u64>().unwrap_or(0));
+
+    loop {
+        match (latest.next(), current.next()) {
+            (None, None) => return false,
+            (latest_part, current_part) => {
+                let latest_part = latest_part.unwrap_or(0);
+                let current_part = current_part.unwrap_or(0);
+                if latest_part != current_part {
+                    return latest_part > current_part;
+                }
+            }
+        }
+    }
+}
+
 fn build_xmrig_args(request: &MinerStartRequest, _benchmark: bool) -> Result<(String, Vec<String>), String> {
     if request.device_type.to_lowercase() == "gpu" {
         return Err("GPU mining is not implemented in the Tauri backend yet".to_string());
@@ -1342,9 +1476,11 @@ fn build_xmrig_args(request: &MinerStartRequest, _benchmark: bool) -> Result<(St
         randomx_mode,
     ];
 
-    if request.huge_pages.unwrap_or(true) {
-        args.push("--randomx-1gb-pages".to_string());
-    }
+    append_huge_page_args(
+        &mut args,
+        request.huge_pages.unwrap_or(true),
+        std::env::consts::OS,
+    );
 
     let threads = request
         .threads
@@ -1356,6 +1492,16 @@ fn build_xmrig_args(request: &MinerStartRequest, _benchmark: bool) -> Result<(St
     args.push(threads.to_string());
 
     Ok(("xmrig".to_string(), args))
+}
+
+fn append_huge_page_args(args: &mut Vec<String>, enabled: bool, platform: &str) {
+    if !enabled {
+        args.push("--no-huge-pages".to_string());
+    } else if platform == "linux" {
+        // Regular huge pages are enabled by default on every supported OS.
+        // 1 GB RandomX pages are an additional optimization available only on Linux.
+        args.push("--randomx-1gb-pages".to_string());
+    }
 }
 
 fn get_arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
@@ -1458,4 +1604,52 @@ pub async fn pause_mining() -> Result<String, String> {
 #[tauri::command]
 pub async fn resume_mining() -> Result<String, String> {
     Ok("Resume is not implemented in the Tauri backend yet".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{append_huge_page_args, is_newer_version, parse_xmrig_version};
+
+    #[test]
+    fn windows_uses_default_large_pages_without_linux_only_flag() {
+        let mut args = Vec::new();
+        append_huge_page_args(&mut args, true, "windows");
+
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn linux_enables_randomx_one_gigabyte_pages() {
+        let mut args = Vec::new();
+        append_huge_page_args(&mut args, true, "linux");
+
+        assert_eq!(args, ["--randomx-1gb-pages"]);
+    }
+
+    #[test]
+    fn disabled_huge_pages_are_explicitly_disabled_on_every_platform() {
+        for platform in ["windows", "linux", "macos"] {
+            let mut args = Vec::new();
+            append_huge_page_args(&mut args, false, platform);
+
+            assert_eq!(args, ["--no-huge-pages"]);
+        }
+    }
+
+    #[test]
+    fn parses_xmrig_version_output() {
+        assert_eq!(
+            parse_xmrig_version("XMRig 6.26.0\n built on Mar 28 2026"),
+            Some("6.26.0".to_string())
+        );
+        assert_eq!(parse_xmrig_version("invalid output"), None);
+    }
+
+    #[test]
+    fn compares_xmrig_versions_numerically() {
+        assert!(is_newer_version("6.27.0", "6.26.0"));
+        assert!(is_newer_version("6.26.1", "6.26.0"));
+        assert!(!is_newer_version("6.26.0", "6.26.0"));
+        assert!(!is_newer_version("6.25.0", "6.26.0"));
+    }
 }
