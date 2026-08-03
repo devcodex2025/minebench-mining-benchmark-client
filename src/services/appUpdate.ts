@@ -1,9 +1,10 @@
 declare const __APP_VERSION__: string;
 
 export const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '0.0.0';
-export const RELEASES_URL = 'https://github.com/devcodex2025/minebench-mining-benchmark-client/releases';
+export const RELEASES_URL = 'https://bitbucket.org/minebenchapp/minebench-client/downloads/';
 
-const LATEST_RELEASE_URL = 'https://api.github.com/repos/devcodex2025/minebench-mining-benchmark-client/releases/latest';
+const TAGS_URL =
+  'https://api.bitbucket.org/2.0/repositories/minebenchapp/minebench-client/refs/tags?sort=-target.date&pagelen=1';
 
 export const normalizeVersionLabel = (version: string): string =>
   version.trim().replace(/^v/i, '');
@@ -39,16 +40,16 @@ export type AppUpdateStatus = {
 
 export const getAppUpdateStatus = async (): Promise<AppUpdateStatus> => {
   try {
-    const response = await fetch(LATEST_RELEASE_URL, {
-      headers: { Accept: 'application/vnd.github+json' },
+    const response = await fetch(TAGS_URL, {
+      headers: { Accept: 'application/json' },
       cache: 'no-store',
     });
 
-    if (!response.ok) throw new Error(`GitHub release check failed: ${response.status}`);
+    if (!response.ok) throw new Error(`Bitbucket release check failed: ${response.status}`);
 
-    const release = await response.json();
+    const tags = await response.json();
     const latestVersion = normalizeVersionLabel(
-      String(release.tag_name || release.name || APP_VERSION)
+      String(tags.values?.[0]?.name || APP_VERSION)
     );
 
     return {
@@ -63,7 +64,7 @@ export const getAppUpdateStatus = async (): Promise<AppUpdateStatus> => {
       latestVersion: APP_VERSION,
       updateAvailable: false,
       checked: true,
-      error: err instanceof Error ? err.message : 'Failed to check GitHub release',
+      error: err instanceof Error ? err.message : 'Failed to check Bitbucket release',
     };
   }
 };

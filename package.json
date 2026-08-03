@@ -75,11 +75,6 @@
     "vite": "^7.1.7",
     "wait-on": "^9.0.1"
   },
-  "publish": {
-    "provider": "github",
-    "owner": "devcodex2025",
-    "repo": "minebench-mining-benchmark-client"
-  },
   "overrides": {
     "bn.js": "5.2.3"
   },
