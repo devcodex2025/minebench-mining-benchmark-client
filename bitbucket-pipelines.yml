@@ -79,3 +79,12 @@ pipelines:
             - step: *release-linux
             - step: *release-windows
       - step: *publish-downloads
+
+  custom:
+    release:
+      - parallel:
+          fail-fast: true
+          steps:
+            - step: *release-linux
+            - step: *release-windows
+      - step: *publish-downloads
