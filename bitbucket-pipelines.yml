@@ -1,0 +1,91 @@
+image: node:24-bookworm
+
+definitions:
+  steps:
+    - step: &frontend-checks
+        name: Frontend build and tests
+        caches:
+          - node
+        script:
+          - npm ci
+          - npm run build
+          - npm test
+
+    - step: &release-linux
+        name: Build Linux packages
+        image: node:24-bookworm
+        size: 2x
+        caches:
+          - node
+        script:
+          - apt-get update
+          - apt-get install -y curl build-essential libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf rpm weston libgtk-3-bin python3-gi gir1.2-gtk-3.0 xvfb xauth procps
+          - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          - export PATH="$HOME/.cargo/bin:$PATH"
+          - npm ci
+          - npm run dist:linux
+          - node scripts/collect-release-artifacts.mjs linux
+        artifacts:
+          - release-artifacts/**
+
+    - step: &release-windows
+        name: Build Windows packages
+        runs-on:
+          - self.hosted
+          - windows
+          - minebench-windows
+        script:
+          - npm ci
+          - rustup target add x86_64-pc-windows-msvc
+          - npm run dist:win
+          - node scripts/collect-release-artifacts.mjs windows
+        artifacts:
+          - release-artifacts/**
+
+    - step: &release-macos
+        name: Build macOS package
+        runs-on:
+          - self.hosted
+          - macos
+          - minebench-macos
+        script:
+          - npm ci
+          - rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          - npm run dist:mac
+          - node scripts/collect-release-artifacts.mjs macos
+        artifacts:
+          - release-artifacts/**
+
+    - step: &publish-downloads
+        name: Publish Bitbucket Downloads
+        image: atlassian/default-image:5
+        script:
+          - test -n "$BITBUCKET_RELEASE_TOKEN"
+          - test -n "$(find release-artifacts -type f -print -quit)"
+          - |
+            for file in release-artifacts/*; do
+              curl --fail-with-body \
+                --request POST \
+                --header "Authorization: Bearer $BITBUCKET_RELEASE_TOKEN" \
+                --form "files=@${file}" \
+                "https://api.bitbucket.org/2.0/repositories/minebenchapp/minebench-client/downloads"
+            done
+
+pipelines:
+  pull-requests:
+    '**':
+      - step: *frontend-checks
+
+  branches:
+    main:
+      - step: *frontend-checks
+
+  tags:
+    'v*':
+      - parallel:
+          fail-fast: true
+          steps:
+            - step: *release-linux
+            - step: *release-windows
+            - step: *release-macos
+      - step: *publish-downloads
