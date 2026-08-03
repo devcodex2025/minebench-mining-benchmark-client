@@ -29,30 +29,21 @@ definitions:
           - release-artifacts/**
 
     - step: &release-windows
-        name: Build Windows packages
-        runs-on:
-          - self.hosted
-          - windows
-          - minebench-windows
+        name: Cross-build Windows NSIS package
+        image: node:24-bookworm
+        size: 2x
+        caches:
+          - node
         script:
-          - npm ci
+          - apt-get update
+          - apt-get install -y curl build-essential clang lld llvm nsis
+          - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          - export PATH="$HOME/.cargo/bin:$PATH"
           - rustup target add x86_64-pc-windows-msvc
-          - npm run dist:win
-          - node scripts/collect-release-artifacts.mjs windows
-        artifacts:
-          - release-artifacts/**
-
-    - step: &release-macos
-        name: Build macOS package
-        runs-on:
-          - self.hosted
-          - macos
-          - minebench-macos
-        script:
+          - cargo install --locked cargo-xwin
           - npm ci
-          - rustup target add x86_64-apple-darwin aarch64-apple-darwin
-          - npm run dist:mac
-          - node scripts/collect-release-artifacts.mjs macos
+          - npm run tauri:build -- --bundles nsis --runner cargo-xwin --target x86_64-pc-windows-msvc
+          - node scripts/collect-release-artifacts.mjs windows
         artifacts:
           - release-artifacts/**
 
@@ -87,5 +78,4 @@ pipelines:
           steps:
             - step: *release-linux
             - step: *release-windows
-            - step: *release-macos
       - step: *publish-downloads

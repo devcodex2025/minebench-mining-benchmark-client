@@ -4,13 +4,12 @@ import process from 'node:process';
 
 const platform = process.argv[2];
 const expectedExtensions = {
-  windows: ['.exe', '.msi'],
-  macos: ['.dmg'],
+  windows: ['.exe'],
   linux: ['.AppImage', '.deb', '.rpm'],
 };
 
 if (!expectedExtensions[platform]) {
-  throw new Error('Usage: node scripts/collect-release-artifacts.mjs <windows|macos|linux>');
+  throw new Error('Usage: node scripts/collect-release-artifacts.mjs <windows|linux>');
 }
 
 const packageJson = JSON.parse(await readFile('package.json', 'utf8'));
