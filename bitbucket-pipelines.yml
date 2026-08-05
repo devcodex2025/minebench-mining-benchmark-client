@@ -19,7 +19,7 @@ definitions:
           - node
         script:
           - apt-get update
-          - apt-get install -y curl build-essential libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf rpm weston libgtk-3-bin python3-gi gir1.2-gtk-3.0 xvfb xauth procps
+          - apt-get install -y curl build-essential libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf rpm weston libgtk-3-bin python3-gi gir1.2-gtk-3.0 xvfb xauth procps xdg-utils
           - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           - export PATH="$HOME/.cargo/bin:$PATH"
           - npm ci
