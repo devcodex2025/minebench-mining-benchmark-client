@@ -10,6 +10,7 @@ import { getEnvironmentConfig } from '../config/environment';
 import { nativeApi } from '../lib/native-api';
 import { p2poolAPI } from '../services/p2poolAPI';
 import { classifyMinerOutput, isTransientPoolNetworkError, shouldMarkMinerExited } from '../lib/miner-output';
+import { getVerifiedSharesDelta, getVerifiedSharesTotal } from '../lib/benchmark-results';
 
 const getErrorMessage = (err: any) => {
 
@@ -49,7 +50,13 @@ const Benchmark = () => {
 
     const [duration, setDuration] = useState<number>(60);
     const [timeLeft, setTimeLeft] = useState<number | null>(null);
-    const [finalResults, setFinalResults] = useState<{ avg: number, max: number } | null>(null);
+    const [finalResults, setFinalResults] = useState<{
+        avg: number;
+        max: number;
+        verifiedShares: number | null;
+        submissionStatus: 'pending' | 'submitted' | 'failed';
+        benchmarkId?: string;
+    } | null>(null);
     const [sysInfo, setSysInfo] = useState<{ cpu: string, cores: number, ram: string, ramBytes: number } | null>(null);
     const [showAuthWarning, setShowAuthWarning] = useState(false);
     const [pendingStart, setPendingStart] = useState(false);
@@ -69,6 +76,8 @@ const Benchmark = () => {
     const benchmarkRewardSeqRef = useRef(0);
     const benchmarkStartingRef = useRef(false);
     const lastPoolNetworkWarningAtRef = useRef(0);
+    const benchmarkStartVerifiedSharesRef = useRef<number | null>(null);
+    const verifiedSharesRefreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     // Keep local tracks for final calculation to avoid dependency on store sampling rate
     const localStatsRef = useRef<number[]>([]);
     const benchmarkApiStateRef = useRef<{ connectedUrl: string | null; errorLogged: boolean }>({
@@ -155,6 +164,7 @@ const Benchmark = () => {
             isBenchmarkPollingRef.current = false;
             if (timerRef.current) clearInterval(timerRef.current);
             if (statsIntervalRef.current) clearInterval(statsIntervalRef.current);
+            if (verifiedSharesRefreshTimeoutRef.current) clearTimeout(verifiedSharesRefreshTimeoutRef.current);
         };
     }, []);
 
@@ -292,6 +302,19 @@ const Benchmark = () => {
                 // stop_miner is a no-op when no managed miner is running.
             }
 
+            if (verifiedSharesRefreshTimeoutRef.current) {
+                clearTimeout(verifiedSharesRefreshTimeoutRef.current);
+                verifiedSharesRefreshTimeoutRef.current = null;
+            }
+            if (user?.publicKey) {
+                await SolanaAuthService.getInstance().fetchMiningStats(user.publicKey);
+                benchmarkStartVerifiedSharesRef.current = getVerifiedSharesTotal(
+                    useSolanaAuth.getState().miningStats
+                );
+            } else {
+                benchmarkStartVerifiedSharesRef.current = null;
+            }
+
             resetSession();
             setStatus('starting');
             isBenchmarkPollingRef.current = true;
@@ -382,7 +405,7 @@ const Benchmark = () => {
     const submitBenchmarkResult = async (avg: number, max: number) => {
         if (!Number.isFinite(avg) || avg <= 0) {
             addLog('Benchmark result was not submitted: no positive hashrate samples were captured.');
-            return;
+            throw new Error('No positive hashrate samples were captured');
         }
 
         const state = useMinerStore.getState();
@@ -413,6 +436,18 @@ const Benchmark = () => {
             detail: submittedBenchmark
         }));
         addLog(`Benchmark result submitted${submittedId ? ` (#${submittedId})` : ''}.`);
+        return { id: submittedId ? String(submittedId) : undefined };
+    };
+
+    const refreshVerifiedShares = async () => {
+        if (!user?.publicKey) return;
+
+        await SolanaAuthService.getInstance().fetchMiningStats(user.publicKey);
+        const verifiedShares = getVerifiedSharesDelta(
+            benchmarkStartVerifiedSharesRef.current,
+            getVerifiedSharesTotal(useSolanaAuth.getState().miningStats)
+        );
+        setFinalResults((previous) => previous ? { ...previous, verifiedShares } : previous);
     };
 
     const stopBenchmark = async () => {
@@ -425,10 +460,10 @@ const Benchmark = () => {
 
         // Calculate Results
         const storeHistory = useMinerStore.getState().history || [];
-        const samples = [
-            ...localStatsRef.current,
-            ...storeHistory.map((point) => point.hashrate)
-        ].filter((value) => Number.isFinite(value) && value > 0);
+        const samples = (localStatsRef.current.length > 0
+            ? localStatsRef.current
+            : storeHistory.map((point) => point.hashrate)
+        ).filter((value) => Number.isFinite(value) && value > 0);
         let avg = 0;
         let max = 0;
 
@@ -444,7 +479,12 @@ const Benchmark = () => {
             }
         }
 
-        setFinalResults({ avg, max });
+        setFinalResults({
+            avg,
+            max,
+            verifiedShares: null,
+            submissionStatus: 'pending'
+        });
 
         try {
             // Save logs to disk before stopping
@@ -466,15 +506,29 @@ const Benchmark = () => {
                 wallet: user?.publicKey || null
             };
 
-            await submitBenchmarkResult(avg, max).catch((err: any) => {
+            await submitBenchmarkResult(avg, max).then((submitted) => {
+                setFinalResults((previous) => previous ? {
+                    ...previous,
+                    submissionStatus: 'submitted',
+                    benchmarkId: submitted?.id
+                } : previous);
+            }).catch((err: any) => {
                 console.error('[Benchmark] Submit failed:', err);
                 addLog(`Benchmark finished, but submit failed: ${getErrorMessage(err)}`);
+                setFinalResults((previous) => previous ? {
+                    ...previous,
+                    submissionStatus: 'failed'
+                } : previous);
             });
 
             console.log('[Benchmark] Sending to stop-benchmark:', payload);
             await nativeApi.miner.stopBenchmark();
             setStatus('completed');
             addLog(`Benchmark finished. Avg: ${formatHashrate(avg)}`);
+            await refreshVerifiedShares();
+            verifiedSharesRefreshTimeoutRef.current = setTimeout(() => {
+                void refreshVerifiedShares();
+            }, 5000);
         } catch (err: any) {
             console.error('[Benchmark] Error stopping:', err);
             addLog(`Error stopping benchmark: ${getErrorMessage(err)}`);
@@ -873,7 +927,11 @@ const Benchmark = () => {
                     <h3 className={cn("font-medium mb-4 flex items-center gap-2",
                         theme === 'light' ? 'text-emerald-600' : 'text-emerald-400'
                     )}>
-                        Included in 1.0 DB Report
+                        {finalResults.submissionStatus === 'submitted'
+                            ? `Saved to Benchmark Database${finalResults.benchmarkId ? ` (#${finalResults.benchmarkId})` : ''}`
+                            : finalResults.submissionStatus === 'failed'
+                                ? 'Local Benchmark Result — Database Submit Failed'
+                                : 'Saving Benchmark Result…'}
                     </h3>
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-8">
                         <div>
@@ -897,9 +955,11 @@ const Benchmark = () => {
                             <div className="text-2xl font-mono text-white mt-1">{deviceType === 'cpu' ? 'RandomX' : 'XMR-GPU'}</div>
                         </div>
                         <div>
-                            <div className="text-xs text-emerald-500/60 uppercase tracking-widest">Reported Shares</div>
+                            <div className="text-xs text-emerald-500/60 uppercase tracking-widest">Verified Shares</div>
                             <div className="text-2xl font-mono text-white mt-1">
-                                {localStatsRef.current.length.toLocaleString()}
+                                {finalResults.verifiedShares === null
+                                    ? '—'
+                                    : finalResults.verifiedShares.toLocaleString()}
                             </div>
                         </div>
                     </div>
