@@ -1220,7 +1220,7 @@ const Mining: React.FC = () => {
                         ) : (
                             <div className="grid grid-cols-2 gap-2">
                                 <StatCard label="Aggregate 15m" value={formatHashrate(stratumStats.hashrate_15m || poolHashrateTotal || 0)} icon={<Activity size={12} />} tone="blue" theme={theme} />
-                                <StatCard label="60s Avg" value={formatHashrate(stratumStats.hashrate_1h || 0)} icon={<TrendingUp size={12} />} tone="emerald" theme={theme} />
+                                <StatCard label="1h Avg" value={formatHashrate(stratumStats.hashrate_1h || 0)} icon={<TrendingUp size={12} />} tone="emerald" theme={theme} />
                                 <StatCard label="24h Avg" value={formatHashrate(stratumStats.hashrate_24h || 0)} icon={<Clock size={12} />} tone="violet" theme={theme} />
                                 <StatCard label="Aggregate Workers" value={`${stratumStats.workers?.length || poolMinersCount || 0}`} icon={<Cpu size={12} />} tone="sky" theme={theme} />
                                 <StatCard label="Connections" value={`${stratumStats.connections || poolMinersCount || 0}`} icon={<Shield size={12} />} tone="cyan" theme={theme} />
