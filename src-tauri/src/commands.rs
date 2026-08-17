@@ -1608,7 +1608,35 @@ pub async fn resume_mining() -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{append_huge_page_args, is_newer_version, parse_xmrig_version};
+    use super::{
+        append_huge_page_args, build_xmrig_args, get_arg_value, is_newer_version,
+        parse_xmrig_version, MinerStartRequest,
+    };
+
+    fn reward_tracked_request() -> MinerStartRequest {
+        MinerStartRequest {
+            device_type: "cpu".to_string(),
+            wallet: "4A1moneroWallet".to_string(),
+            worker: "worker-1".to_string(),
+            threads: Some(1),
+            pool_url: Some("xmr.minebench.cloud:3333".to_string()),
+            solana_wallet: Some("9xQeWvG816bUx9EPjHmaT23yvVM2ZW7Y1rGQ9oTzF1Ab".to_string()),
+            cpu_priority: None,
+            randomx_mode: None,
+            huge_pages: None,
+            donate_level: None,
+        }
+    }
+
+    #[test]
+    fn benchmark_and_mining_use_the_same_verified_share_identity() {
+        let (_, mining_args) = build_xmrig_args(&reward_tracked_request(), false).unwrap();
+        let (_, benchmark_args) = build_xmrig_args(&reward_tracked_request(), true).unwrap();
+        let expected = "mb_9xQeWvG816bUx9EPjHmaT23yvVM2ZW7Y1rGQ9oTzF1Ab.worker-1";
+
+        assert_eq!(get_arg_value(&mining_args, "--rig-id"), Some(expected));
+        assert_eq!(get_arg_value(&benchmark_args, "--rig-id"), Some(expected));
+    }
 
     #[test]
     fn windows_uses_default_large_pages_without_linux_only_flag() {

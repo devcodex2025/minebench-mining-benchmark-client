@@ -266,7 +266,7 @@ const Dashboard = () => {
     const safeDbTotalBMT = Number.isFinite(miningStats?.totalRewards)
         ? Number(miningStats?.totalRewards)
         : (Number.isFinite(dbTotalBMT) ? dbTotalBMT : 0);
-    const MIN_CLAIM_AMOUNT = 100;
+    const MIN_CLAIM_AMOUNT = Math.max(Number(miningStats?.minClaimBmt ?? 100), 0.000001);
     const canClaim = safeDbTotalBMT >= MIN_CLAIM_AMOUNT;
     const claimProgress = Math.min((safeDbTotalBMT / MIN_CLAIM_AMOUNT) * 100, 100);
     const [claiming, setClaiming] = useState(false);
@@ -501,6 +501,7 @@ const Dashboard = () => {
                 onClose={() => setShowClaimModal(false)}
                 wallet={user?.publicKey || ''}
                 availableBalance={safeDbTotalBMT}
+                minWithdrawal={MIN_CLAIM_AMOUNT}
                 theme={theme}
                 onClaimed={async () => {
                     await refreshConfirmedRewards();

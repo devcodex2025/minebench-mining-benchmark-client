@@ -16,12 +16,16 @@ const balanceData = {
     bmt_available: '25.75',
     total_bmt_earned: '100.00',
     total_bmt_withdrawn: '74.25',
+    paid_bmt: '74.25',
+    minClaimBmt: '100',
 };
 
 const balanceStats = mapRewardsBalanceToMiningStats(balanceData);
 assert.equal(balanceStats.totalRewards, 25.75, 'totalRewards maps from bmt_available');
 assert.equal(balanceStats.totalBmtEarned, 100.0, 'totalBmtEarned maps from total_bmt_earned');
 assert.equal(balanceStats.totalBmtWithdrawn, 74.25, 'totalBmtWithdrawn maps from total_bmt_withdrawn');
+assert.equal(balanceStats.paidBmt, 74.25, 'paidBmt maps from completed payout total');
+assert.equal(balanceStats.minClaimBmt, 100, 'minClaimBmt maps from backend configuration');
 
 // Alternate field names (legacy)
 const legacyBalance = mapRewardsBalanceToMiningStats({ available_bmt: '7.5' });

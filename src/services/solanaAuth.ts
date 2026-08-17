@@ -87,6 +87,7 @@ export interface MiningDevice {
 
 export interface UserMiningStats {
   totalRewards: number; // BMT available (bmt_available)
+  minClaimBmt?: number;
   totalXmrMined?: number; // total XMR earned from pool
   totalBmtEarned?: number; // total BMT ever credited
   totalBmtWithdrawn?: number; // total BMT withdrawn
@@ -521,6 +522,7 @@ export class SolanaAuthService {
   private getEmptyStats(): UserMiningStats {
     return {
       totalRewards: 0,
+      minClaimBmt: 0.000001,
       totalXmrMined: 0,
       totalBmtEarned: 0,
       totalBmtWithdrawn: 0,

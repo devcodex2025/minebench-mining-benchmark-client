@@ -170,14 +170,15 @@ const Benchmark = () => {
         SolanaAuthService.getInstance()
             .reportMiningStats({
                 hashrate: currentHashrate,
-                shares: localStatsRef.current.length,
+                shares: 0,
                 source: 'benchmark',
                 referenceId: `benchmark-${user.publicKey}-${now}-${seq}`,
                 metadata: {
                     deviceType,
                     workerName,
                     duration,
-                    samples: localStatsRef.current.length
+                    samples: localStatsRef.current.length,
+                    shareSource: 'pool-verified-only'
                 }
             })
             .then(() => SolanaAuthService.getInstance().fetchMiningStats(user.publicKey))

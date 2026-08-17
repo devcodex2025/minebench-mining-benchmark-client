@@ -227,15 +227,16 @@ const StressTest: React.FC = () => {
             if (user?.publicKey) {
                 await SolanaAuthService.getInstance().reportMiningStats({
                     hashrate: hashrates.length ? hashrates.reduce((sum, value) => sum + value, 0) / hashrates.length : 0,
-                    shares: currentSamples.length,
+                    shares: 0,
                     source: 'stress-test',
                     referenceId: `stress-test-${user.publicKey}-${Date.now()}`,
                     metadata: {
                         workerName,
                         duration,
-                        samples: currentSamples.length
+                        samples: currentSamples.length,
+                        shareSource: 'pool-verified-only'
                     }
-                }).catch((err) => {
+                }).then(() => SolanaAuthService.getInstance().fetchMiningStats(user.publicKey)).catch((err) => {
                     console.warn('[StressTest] Failed to report mining stats:', err);
                 });
             }
