@@ -160,13 +160,11 @@ const Mining: React.FC = () => {
     const poolStatsIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const ratesIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const rewardReportIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const verifiedSharesIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const pingIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const statsInFlightRef = useRef(false);
     const poolStatsInFlightRef = useRef(false);
     const ratesInFlightRef = useRef(false);
     const rewardReportInFlightRef = useRef(false);
-    const verifiedSharesInFlightRef = useRef(false);
     const lastRewardReportAtRef = useRef(0);
     const lastTimerPersistAtRef = useRef(0);
     // Tracks the session maximum of shares_found so the animation fires only on a genuine new share,
@@ -204,20 +202,6 @@ const Mining: React.FC = () => {
         ? new Date(miningStats.currentWindow.updatedAt).toLocaleTimeString()
         : null;
 
-
-    const refreshVerifiedShares = useCallback(async () => {
-        const publicKey = userPublicKeyRef.current;
-        if (!publicKey || verifiedSharesInFlightRef.current) return;
-
-        verifiedSharesInFlightRef.current = true;
-        try {
-            await SolanaAuthService.getInstance().fetchMiningStats(publicKey);
-        } catch (err) {
-            console.warn('[Mining] Failed to refresh verified shares:', err);
-        } finally {
-            verifiedSharesInFlightRef.current = false;
-        }
-    }, []);
 
     useEffect(() => {
         statusRef.current = status;
@@ -477,7 +461,6 @@ const Mining: React.FC = () => {
             if (poolStatsIntervalRef.current) clearInterval(poolStatsIntervalRef.current);
             if (ratesIntervalRef.current) clearInterval(ratesIntervalRef.current);
             if (rewardReportIntervalRef.current) clearInterval(rewardReportIntervalRef.current);
-            if (verifiedSharesIntervalRef.current) clearInterval(verifiedSharesIntervalRef.current);
             if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
         };
     }, []);
@@ -533,29 +516,6 @@ const Mining: React.FC = () => {
         };
     }, [status, deviceType]);
 
-    useEffect(() => {
-        if (!user?.publicKey) {
-            if (verifiedSharesIntervalRef.current) {
-                clearInterval(verifiedSharesIntervalRef.current);
-                verifiedSharesIntervalRef.current = null;
-            }
-            return;
-        }
-
-        refreshVerifiedShares();
-        // Poll more frequently while actively mining so reward window shares and
-        // wallet balance reflect the latest backend state with less delay.
-        const isActivelyMining = status === 'running' || status === 'starting';
-        verifiedSharesIntervalRef.current = setInterval(refreshVerifiedShares, isActivelyMining ? 30000 : 60000);
-
-        return () => {
-            if (verifiedSharesIntervalRef.current) {
-                clearInterval(verifiedSharesIntervalRef.current);
-                verifiedSharesIntervalRef.current = null;
-            }
-        };
-    }, [refreshVerifiedShares, user?.publicKey, status]);
-
     // Fetch pool stats directly from the backend (XMRig proxy stats only — no P2Pool RPC).
     // When a single proxy is configured, use its individual stratum snapshot so stats
     // don't flicker between pools as each proxy pushes updates at different times.
@@ -580,9 +540,6 @@ const Mining: React.FC = () => {
                 lastShareCountRef.current = detection.newLastShareCount;
                 if (detection.shouldAnimate) {
                     setShowShareAnimation(true);
-                    // Immediately pull fresh balance + reward-window shares so the UI
-                    // reflects the credited reward as soon as the share is confirmed.
-                    refreshVerifiedShares();
                 }
 
                 setStratumStats(newStratum);
@@ -600,7 +557,7 @@ const Mining: React.FC = () => {
         return () => {
             if (poolStatsIntervalRef.current) clearInterval(poolStatsIntervalRef.current);
         };
-    }, [refreshVerifiedShares, setGlobalPoolStats]);
+    }, [setGlobalPoolStats]);
 
     useEffect(() => {
         if (status !== 'running') {
@@ -727,7 +684,6 @@ const Mining: React.FC = () => {
                         shareSource: 'pool-verified-only'
                     }
                 });
-                await SolanaAuthService.getInstance().fetchMiningStats(publicKey);
             } catch (err) {
                 console.warn('[Mining] Failed to report mining stats:', err);
             } finally {

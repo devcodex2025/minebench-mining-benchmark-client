@@ -41,6 +41,7 @@ export const mapRewardsBalanceToMiningStats = (
 
   return {
     totalRewards: bmtBalance,
+    minClaimBmt: toNumber(balanceData?.minClaimBmt ?? balanceData?.min_claim_bmt ?? 0.000001),
     totalXmrMined: toNumber(balanceData?.total_xmr_mined ?? balanceData?.xmr_total_earned ?? 0),
     totalBmtEarned: toNumber(balanceData?.total_bmt_earned ?? balanceData?.bmt_total_earned ?? 0),
     totalBmtWithdrawn,

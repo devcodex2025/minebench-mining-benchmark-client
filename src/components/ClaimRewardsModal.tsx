@@ -8,29 +8,48 @@ interface ClaimRewardsModalProps {
   onClose: () => void;
   wallet: string;
   availableBalance: number;
+  minWithdrawal: number;
   theme: 'light' | 'dark';
   onClaimed?: () => void | Promise<void>;
 }
+
+interface PayoutQuote {
+  requestedAmountBmt: number;
+  netAmountBmt: number;
+  feeBmt: number;
+  networkFeeSol: number;
+  ataRentSol: number;
+  totalSolCost: number;
+  recipientAtaExists: boolean;
+  canClaim: boolean;
+}
+
+const toFiniteAmount = (value: unknown) => {
+  const amount = Number(value);
+  return Number.isFinite(amount) ? amount : 0;
+};
 
 export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
   isOpen,
   onClose,
   wallet,
   availableBalance,
+  minWithdrawal,
   theme,
   onClaimed,
 }) => {
   const [amount, setAmount] = useState<string>('');
   const [isLoading, setIsLoading] = useState(false);
   const [isQuoteLoading, setIsQuoteLoading] = useState(false);
-  const [quote, setQuote] = useState<any | null>(null);
+  const [quote, setQuote] = useState<PayoutQuote | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
   const isDark = theme === 'dark';
-  const MIN_WITHDRAWAL = 0.000001;
+  const MIN_WITHDRAWAL = Math.max(minWithdrawal, 0.000001);
   const amountNum = parseFloat(amount);
-  const netAmount = Number(quote?.netAmountBmt ?? 0);
+  const grossAmount = toFiniteAmount(quote?.requestedAmountBmt ?? amountNum);
+  const netAmount = toFiniteAmount(quote?.netAmountBmt);
   const canClaim = !!amount && !isNaN(amountNum) && amountNum >= MIN_WITHDRAWAL && amountNum <= availableBalance && (!quote || quote.canClaim);
 
   React.useEffect(() => {
@@ -44,16 +63,18 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
   React.useEffect(() => {
     if (!isOpen || !amount || isNaN(amountNum) || amountNum <= 0 || amountNum > availableBalance) {
       setQuote(null);
+      setIsQuoteLoading(false);
       return;
     }
 
     let cancelled = false;
+    setQuote(null);
+    setIsQuoteLoading(true);
     const timer = window.setTimeout(async () => {
-      setIsQuoteLoading(true);
       try {
-        const data = await SolanaAuthService.getInstance().quotePayout(amountNum);
+        const data = await SolanaAuthService.getInstance().quotePayout(amountNum) as PayoutQuote;
         if (!cancelled) setQuote(data);
-      } catch (err: any) {
+      } catch {
         if (!cancelled) setQuote(null);
       } finally {
         if (!cancelled) setIsQuoteLoading(false);
@@ -67,7 +88,7 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
   }, [isOpen, amount, amountNum, availableBalance]);
 
   const handleMaxClick = () => {
-    setAmount(Math.floor(availableBalance).toString());
+    setAmount(availableBalance.toFixed(6).replace(/\.?0+$/, ''));
   };
 
   const handleClaim = async () => {
@@ -165,7 +186,7 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
               isDark ? 'text-zinc-500' : 'text-zinc-500'
             )}
           >
-            No fixed minimum. Claim must be greater than the Solana payout cost.
+            Minimum claim: {MIN_WITHDRAWAL.toFixed(6).replace(/\.?0+$/, '')} BMT. The payout fee is deducted from the claim amount.
           </p>
         </div>
 
@@ -177,7 +198,7 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
               isDark ? 'text-zinc-300' : 'text-zinc-700'
             )}
           >
-            Withdrawal Amount (BMT)
+            Claim Amount, including fee (BMT)
           </label>
           <div className="flex gap-2">
             <input
@@ -222,16 +243,24 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
             ) : quote ? (
               <>
                 <div className="flex justify-between gap-3">
-                  <span>Solana payout cost</span>
-                  <span>{Number(quote.totalSolCost || 0).toFixed(9)} SOL (~{Number(quote.feeBmt || 0).toFixed(6)} BMT)</span>
+                  <span>Amount deducted</span>
+                  <span>{grossAmount.toFixed(6)} BMT</span>
                 </div>
-                {Number(quote.ataRentSol || 0) > 0 && (
+                <div className="flex justify-between gap-3">
+                  <span>Solana payout cost</span>
+                  <span>{Number(quote.totalSolCost || 0).toFixed(9)} SOL</span>
+                </div>
+                <div className="flex justify-between gap-3">
+                  <span>Payout fee</span>
+                  <span>{Number(quote.feeBmt || 0).toFixed(6)} BMT</span>
+                </div>
+                {toFiniteAmount(quote.ataRentSol) > 0 && (
                   <div className={cn('text-xs', isDark ? 'text-zinc-400' : 'text-zinc-500')}>
-                    Includes first-time BMT token account rent: {Number(quote.ataRentSol).toFixed(9)} SOL
+                    Includes first-time BMT token account rent: {toFiniteAmount(quote.ataRentSol).toFixed(9)} SOL
                   </div>
                 )}
                 <div className="flex justify-between gap-3 font-semibold">
-                  <span>You receive</span>
+                  <span>You receive after fee</span>
                   <span className={netAmount > 0 ? 'text-yellow-400' : 'text-red-400'}>
                     {netAmount.toFixed(6)} BMT
                   </span>

@@ -1405,7 +1405,10 @@ fn is_newer_version(latest: &str, current: &str) -> bool {
     }
 }
 
-fn build_xmrig_args(request: &MinerStartRequest, _benchmark: bool) -> Result<(String, Vec<String>), String> {
+fn build_xmrig_args(
+    request: &MinerStartRequest,
+    benchmark: bool,
+) -> Result<(String, Vec<String>), String> {
     if request.device_type.to_lowercase() == "gpu" {
         return Err("GPU mining is not implemented in the Tauri backend yet".to_string());
     }
@@ -1440,12 +1443,26 @@ fn build_xmrig_args(request: &MinerStartRequest, _benchmark: bool) -> Result<(St
         validate_miner_value(&format!("mb_{}.{}", solana_wallet, worker), "rig id", 220)?
     };
     let api_port = "4077";
-    let donate_level = request.donate_level.unwrap_or(0).min(5).to_string();
-    let cpu_priority = request.cpu_priority.unwrap_or(2).min(5).to_string();
-    let randomx_mode = request
-        .randomx_mode
-        .clone()
-        .unwrap_or_else(|| "auto".to_string());
+    let donate_level = if benchmark {
+        0
+    } else {
+        request.donate_level.unwrap_or(0).min(5)
+    }
+    .to_string();
+    let cpu_priority = if benchmark {
+        5
+    } else {
+        request.cpu_priority.unwrap_or(2).min(5)
+    }
+    .to_string();
+    let randomx_mode = if benchmark {
+        "fast".to_string()
+    } else {
+        request
+            .randomx_mode
+            .clone()
+            .unwrap_or_else(|| "auto".to_string())
+    };
     let randomx_mode = match randomx_mode.as_str() {
         "auto" | "fast" | "light" => randomx_mode,
         _ => return Err("Invalid RandomX mode".to_string()),
@@ -1478,18 +1495,29 @@ fn build_xmrig_args(request: &MinerStartRequest, _benchmark: bool) -> Result<(St
 
     append_huge_page_args(
         &mut args,
-        request.huge_pages.unwrap_or(true),
+        benchmark || request.huge_pages.unwrap_or(true),
         std::env::consts::OS,
     );
 
-    let threads = request
-        .threads
-        .filter(|&threads| threads > 0)
-        .map(|threads| threads.min(get_cpu_cores() as u16))
-        .unwrap_or_else(default_thread_count);
+    let cpu_cores = get_cpu_cores().max(1) as u16;
+    let threads = if benchmark {
+        cpu_cores
+    } else {
+        request
+            .threads
+            .filter(|&threads| threads > 0)
+            .map(|threads| threads.min(cpu_cores))
+            .unwrap_or_else(default_thread_count)
+    };
 
     args.push("-t".to_string());
     args.push(threads.to_string());
+    args.push("--randomx-init".to_string());
+    args.push(if benchmark { threads } else { threads.min(2) }.to_string());
+
+    if benchmark {
+        args.push("--cpu-no-yield".to_string());
+    }
 
     Ok(("xmrig".to_string(), args))
 }
@@ -1608,7 +1636,62 @@ pub async fn resume_mining() -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{append_huge_page_args, is_newer_version, parse_xmrig_version};
+    use super::{
+        append_huge_page_args, build_xmrig_args, get_arg_value, get_cpu_cores, is_newer_version,
+        parse_xmrig_version, MinerStartRequest,
+    };
+
+    fn reward_tracked_request() -> MinerStartRequest {
+        MinerStartRequest {
+            device_type: "cpu".to_string(),
+            wallet: "4A1moneroWallet".to_string(),
+            worker: "worker-1".to_string(),
+            threads: Some(1),
+            pool_url: Some("xmr.minebench.cloud:3333".to_string()),
+            solana_wallet: Some("9xQeWvG816bUx9EPjHmaT23yvVM2ZW7Y1rGQ9oTzF1Ab".to_string()),
+            cpu_priority: None,
+            randomx_mode: None,
+            huge_pages: None,
+            donate_level: None,
+        }
+    }
+
+    #[test]
+    fn benchmark_and_mining_use_the_same_verified_share_identity() {
+        let (_, mining_args) = build_xmrig_args(&reward_tracked_request(), false).unwrap();
+        let (_, benchmark_args) = build_xmrig_args(&reward_tracked_request(), true).unwrap();
+        let expected = "mb_9xQeWvG816bUx9EPjHmaT23yvVM2ZW7Y1rGQ9oTzF1Ab.worker-1";
+
+        assert_eq!(get_arg_value(&mining_args, "--rig-id"), Some(expected));
+        assert_eq!(get_arg_value(&benchmark_args, "--rig-id"), Some(expected));
+    }
+
+    #[test]
+    fn benchmark_forces_maximum_cpu_performance() {
+        let (_, args) = build_xmrig_args(&reward_tracked_request(), true).unwrap();
+        let cores = get_cpu_cores().max(1).to_string();
+
+        assert_eq!(get_arg_value(&args, "-t"), Some(cores.as_str()));
+        assert_eq!(get_arg_value(&args, "--randomx-init"), Some(cores.as_str()));
+        assert_eq!(get_arg_value(&args, "--cpu-priority"), Some("5"));
+        assert_eq!(get_arg_value(&args, "--randomx-mode"), Some("fast"));
+        assert!(args.iter().any(|arg| arg == "--cpu-no-yield"));
+        assert!(!args.iter().any(|arg| arg == "--no-huge-pages"));
+    }
+
+    #[test]
+    fn mining_limits_randomx_initialization_spike() {
+        let mut request = reward_tracked_request();
+        request.threads = Some(8);
+        let (_, args) = build_xmrig_args(&request, false).unwrap();
+        let expected = get_cpu_cores().max(1).min(8).min(2).to_string();
+
+        assert_eq!(
+            get_arg_value(&args, "--randomx-init"),
+            Some(expected.as_str())
+        );
+        assert!(!args.iter().any(|arg| arg == "--cpu-no-yield"));
+    }
 
     #[test]
     fn windows_uses_default_large_pages_without_linux_only_flag() {

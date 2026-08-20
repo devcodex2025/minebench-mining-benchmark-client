@@ -30,6 +30,7 @@ import { useTheme } from '../contexts/ThemeContext';
 import { useMinerStore } from '../store/useMinerStore';
 import { cn, formatHashrate } from '../lib/utils';
 import { p2poolAPI } from '../services/p2poolAPI';
+import { REWARDS_DISTRIBUTED_EVENT } from '../lib/reward-events';
 
 interface RewardData {
   date: string;
@@ -191,10 +192,10 @@ export const MiningStatistics: React.FC = () => {
     };
 
     loadRewardHistory();
-    const interval = setInterval(loadRewardHistory, 30000);
+    window.addEventListener(REWARDS_DISTRIBUTED_EVENT, loadRewardHistory);
     return () => {
       cancelled = true;
-      clearInterval(interval);
+      window.removeEventListener(REWARDS_DISTRIBUTED_EVENT, loadRewardHistory);
     };
   }, [user?.publicKey]);
 

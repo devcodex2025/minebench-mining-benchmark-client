@@ -137,23 +137,6 @@ const Dashboard = () => {
     const { user, isConnected, miningStats } = useSolanaAuth();
     const { theme } = useTheme();
 
-    // Periodically sync confirmed balance from DB
-    useEffect(() => {
-        if (!isConnected || !user?.publicKey) return;
-
-        const syncConfirmed = async () => {
-            try {
-                await SolanaAuthService.getInstance().fetchMiningStats(user.publicKey);
-            } catch (e) {
-                console.error('[Dashboard] Error syncing confirmed balance:', e);
-            }
-        };
-
-        syncConfirmed();
-        const interval = setInterval(syncConfirmed, 60000); // Sync every minute
-        return () => clearInterval(interval);
-    }, [isConnected, user?.publicKey]);
-
     // Fetch exchange rates on Dashboard mount
     useEffect(() => {
         const fetchRates = async () => {
@@ -266,7 +249,7 @@ const Dashboard = () => {
     const safeDbTotalBMT = Number.isFinite(miningStats?.totalRewards)
         ? Number(miningStats?.totalRewards)
         : (Number.isFinite(dbTotalBMT) ? dbTotalBMT : 0);
-    const MIN_CLAIM_AMOUNT = 100;
+    const MIN_CLAIM_AMOUNT = Math.max(Number(miningStats?.minClaimBmt ?? 100), 0.000001);
     const canClaim = safeDbTotalBMT >= MIN_CLAIM_AMOUNT;
     const claimProgress = Math.min((safeDbTotalBMT / MIN_CLAIM_AMOUNT) * 100, 100);
     const [claiming, setClaiming] = useState(false);
@@ -279,8 +262,7 @@ const Dashboard = () => {
         if (claiming) return;
         try {
             setClaiming(true);
-            const latestStats = await refreshConfirmedRewards();
-            const latestBalance = Number(latestStats?.totalRewards ?? useMinerStore.getState().dbTotalBMT ?? 0);
+            const latestBalance = Number(miningStats?.totalRewards ?? useMinerStore.getState().dbTotalBMT ?? 0);
 
             if (latestBalance < MIN_CLAIM_AMOUNT) {
                 alert(`${(MIN_CLAIM_AMOUNT - latestBalance).toFixed(2)} $BMT more to claim`);
@@ -501,6 +483,7 @@ const Dashboard = () => {
                 onClose={() => setShowClaimModal(false)}
                 wallet={user?.publicKey || ''}
                 availableBalance={safeDbTotalBMT}
+                minWithdrawal={MIN_CLAIM_AMOUNT}
                 theme={theme}
                 onClaimed={async () => {
                     await refreshConfirmedRewards();
