@@ -789,7 +789,13 @@ fn validate_rpc_port(port: u16) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn get_cpu_temp() -> Result<serde_json::Value, String> {
+pub async fn get_cpu_temp() -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(collect_cpu_temp)
+        .await
+        .map_err(|error| format!("CPU temperature task failed: {error}"))?
+}
+
+fn collect_cpu_temp() -> Result<serde_json::Value, String> {
     let components = Components::new_with_refreshed_list();
 
     // Look for CPU temperature component
@@ -819,7 +825,13 @@ pub fn get_cpu_temp() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-pub fn get_cpu_power() -> Result<serde_json::Value, String> {
+pub async fn get_cpu_power() -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(collect_cpu_power)
+        .await
+        .map_err(|error| format!("CPU power task failed: {error}"))?
+}
+
+fn collect_cpu_power() -> Result<serde_json::Value, String> {
     if let Some(power) = read_linux_rapl_power_watts() {
         return Ok(serde_json::json!({
             "success": true,
@@ -1450,13 +1462,16 @@ fn build_xmrig_args(
     }
     .to_string();
     let cpu_priority = if benchmark {
-        3
+        request.cpu_priority.unwrap_or(3).min(3)
     } else {
         request.cpu_priority.unwrap_or(2).min(5)
     }
     .to_string();
     let randomx_mode = if benchmark {
-        "fast".to_string()
+        request
+            .randomx_mode
+            .clone()
+            .unwrap_or_else(|| "fast".to_string())
     } else {
         request
             .randomx_mode
@@ -1495,13 +1510,17 @@ fn build_xmrig_args(
 
     append_huge_page_args(
         &mut args,
-        benchmark || request.huge_pages.unwrap_or(true),
+        request.huge_pages.unwrap_or(true),
         std::env::consts::OS,
     );
 
     let cpu_cores = get_cpu_cores().max(1) as u16;
     let threads = if benchmark {
-        cpu_cores
+        request
+            .threads
+            .filter(|&threads| threads > 0)
+            .map(|threads| threads.min(cpu_cores))
+            .unwrap_or(cpu_cores)
     } else {
         request
             .threads
@@ -1514,10 +1533,6 @@ fn build_xmrig_args(
     args.push(threads.to_string());
     args.push("--randomx-init".to_string());
     args.push(if benchmark { threads } else { threads.min(2) }.to_string());
-
-    if benchmark {
-        args.push("--cpu-no-yield".to_string());
-    }
 
     Ok(("xmrig".to_string(), args))
 }
@@ -1666,16 +1681,37 @@ mod tests {
         assert_eq!(get_arg_value(&benchmark_args, "--rig-id"), Some(expected));
     }
     #[test]
-    fn benchmark_forces_maximum_cpu_performance() {
-        let (_, args) = build_xmrig_args(&reward_tracked_request(), true).unwrap();
+    fn benchmark_uses_all_cpu_threads_with_yield_enabled() {
+        let mut request = reward_tracked_request();
+        request.threads = None;
+        let (_, args) = build_xmrig_args(&request, true).unwrap();
         let cores = get_cpu_cores().max(1).to_string();
 
         assert_eq!(get_arg_value(&args, "-t"), Some(cores.as_str()));
         assert_eq!(get_arg_value(&args, "--randomx-init"), Some(cores.as_str()));
         assert_eq!(get_arg_value(&args, "--cpu-priority"), Some("3"));
         assert_eq!(get_arg_value(&args, "--randomx-mode"), Some("fast"));
-        assert!(args.iter().any(|arg| arg == "--cpu-no-yield"));
+        assert!(!args.iter().any(|arg| arg == "--cpu-no-yield"));
         assert!(!args.iter().any(|arg| arg == "--no-huge-pages"));
+    }
+
+    #[test]
+    fn benchmark_honors_safe_mode_request() {
+        let mut request = reward_tracked_request();
+        request.threads = Some(2);
+        request.cpu_priority = Some(2);
+        request.randomx_mode = Some("light".to_string());
+        request.huge_pages = Some(false);
+
+        let (_, args) = build_xmrig_args(&request, true).unwrap();
+        let safe_threads = get_cpu_cores().max(1).min(2).to_string();
+
+        assert_eq!(get_arg_value(&args, "-t"), Some(safe_threads.as_str()));
+        assert_eq!(get_arg_value(&args, "--randomx-init"), Some(safe_threads.as_str()));
+        assert_eq!(get_arg_value(&args, "--cpu-priority"), Some("2"));
+        assert_eq!(get_arg_value(&args, "--randomx-mode"), Some("light"));
+        assert!(args.iter().any(|arg| arg == "--no-huge-pages"));
+        assert!(!args.iter().any(|arg| arg == "--cpu-no-yield"));
     }
 
     #[test]
