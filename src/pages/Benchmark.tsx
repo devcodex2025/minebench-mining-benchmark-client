@@ -9,7 +9,17 @@ import { cn, formatHashrate } from '../lib/utils';
 import { getEnvironmentConfig } from '../config/environment';
 import { nativeApi } from '../lib/native-api';
 import { p2poolAPI } from '../services/p2poolAPI';
-import { classifyMinerOutput, isTransientPoolNetworkError, shouldMarkMinerExited } from '../lib/miner-output';
+import {
+    classifyMinerOutput,
+    getAcceptedShareCount,
+    getAcceptedShareCountFromOutput,
+    getCpuHashrate,
+    isTransientPoolNetworkError,
+    shouldAutoStopBenchmark,
+    shouldMarkMinerExited,
+    shouldStartBenchmarkMeasurement,
+} from '../lib/miner-output';
+import { getBenchmarkSafetyMode } from '../lib/benchmark-safety';
 
 const getErrorMessage = (err: any) => {
 
@@ -50,7 +60,14 @@ const Benchmark = () => {
     const [duration, setDuration] = useState<number>(60);
     const [timeLeft, setTimeLeft] = useState<number | null>(null);
     const [finalResults, setFinalResults] = useState<{ avg: number, max: number } | null>(null);
-    const [sysInfo, setSysInfo] = useState<{ cpu: string, cores: number, ram: string, ramBytes: number } | null>(null);
+    const [isWarmingUp, setIsWarmingUp] = useState(false);
+    const [acceptedShares, setAcceptedShares] = useState(0);
+    const [sysInfo, setSysInfo] = useState<{
+        cpu: string;
+        cores: number;
+        ram: string;
+        ramBytes: number;
+    } | null>(null);
     const [showAuthWarning, setShowAuthWarning] = useState(false);
     const [pendingStart, setPendingStart] = useState(false);
     const [isStartPending, setIsStartPending] = useState(false);
@@ -60,6 +77,10 @@ const Benchmark = () => {
     const isNodeFullySynced = env.enableBackupPool
         ? !!((primaryPool?.isSynced && primaryPool?.progress >= 99.9) || (reservePool?.isSynced && reservePool?.progress >= 99.9))
         : !!(primaryPool?.isSynced && primaryPool?.progress >= 99.9);
+    const benchmarkSafety = getBenchmarkSafetyMode({
+        cores: sysInfo?.cores || 1,
+        ramBytes: sysInfo?.ramBytes || 0
+    });
 
 
     const timerRef = useRef<NodeJS.Timeout | null>(null);
@@ -68,6 +89,17 @@ const Benchmark = () => {
     const lastBenchmarkRewardReportAtRef = useRef(0);
     const benchmarkRewardSeqRef = useRef(0);
     const benchmarkStartingRef = useRef(false);
+    const benchmarkMeasurementStartedRef = useRef(false);
+    const benchmarkStopInFlightRef = useRef(false);
+    const acceptedSharesRef = useRef(0);
+    const statsFetchInFlightRef = useRef(false);
+    const startBenchmarkMeasurementRef = useRef<(firstHashrate?: number) => boolean>(() => false);
+    const cpuTelemetryInFlightRef = useRef(false);
+    const cpuTelemetryRef = useRef<{ sampledAt: number; temp: number | null; power: number | null }>({
+        sampledAt: 0,
+        temp: null,
+        power: null,
+    });
     const lastPoolNetworkWarningAtRef = useRef(0);
     // Keep local tracks for final calculation to avoid dependency on store sampling rate
     const localStatsRef = useRef<number[]>([]);
@@ -120,9 +152,10 @@ const Benchmark = () => {
             try {
                 if (!(window as any).__TAURI_INTERNALS__) return;
 
-                const cpu = await nativeApi.invoke<string>('get_cpu_name');
-                const cores = await nativeApi.invoke<number>('get_cpu_cores');
-                const stats = await nativeApi.system.getSystemStats();
+                const [cpuInfo, stats] = await Promise.all([
+                    nativeApi.system.getCpuInfo(),
+                    nativeApi.system.getSystemStats()
+                ]);
 
                 // Format RAM to GB
                 const ramGB = stats && stats.ramTotal
@@ -130,8 +163,8 @@ const Benchmark = () => {
                     : 'N/A';
 
                 setSysInfo({
-                    cpu: cpu || 'Unknown CPU',
-                    cores: cores || 0,
+                    cpu: cpuInfo.name || 'Unknown CPU',
+                    cores: cpuInfo.cores || 0,
                     ram: ramGB,
                     ramBytes: Number(stats?.ramTotal || 0)
                 });
@@ -144,8 +177,13 @@ const Benchmark = () => {
 
     // Auto-stop when timer reaches 0
     useEffect(() => {
-        if (timeLeft === 0 && isBenchmarkActive) {
-            stopBenchmark();
+        if (shouldAutoStopBenchmark(
+            timeLeft,
+            isBenchmarkActive,
+            benchmarkMeasurementStartedRef.current,
+            benchmarkStopInFlightRef.current,
+        )) {
+            void stopBenchmark();
         }
     }, [timeLeft, isBenchmarkActive]);
 
@@ -159,7 +197,7 @@ const Benchmark = () => {
     }, []);
 
     useEffect(() => {
-        if (status !== 'running' || !user?.publicKey) return;
+        if (status !== 'running' || isWarmingUp || !user?.publicKey) return;
 
         const now = Date.now();
         if (now - lastBenchmarkRewardReportAtRef.current < 15000) return;
@@ -184,7 +222,7 @@ const Benchmark = () => {
             .catch((err) => {
                 console.warn('[Benchmark] Failed to report mining stats:', err);
             });
-    }, [status, user?.publicKey, currentHashrate, deviceType, workerName, duration]);
+    }, [status, isWarmingUp, user?.publicKey, currentHashrate, deviceType, workerName, duration]);
 
     // Listen for miner events
     useEffect(() => {
@@ -204,6 +242,16 @@ const Benchmark = () => {
                 const message = String(msg || '').trim();
                 console.log(`Miner: ${message}`);
                 if (message) addLog(message);
+                const shareCount = getAcceptedShareCountFromOutput(message);
+                if (
+                    shareCount !== null
+                    && useMinerStore.getState().mode === 'benchmark'
+                    && ['starting', 'running'].includes(useMinerStore.getState().status)
+                ) {
+                    acceptedSharesRef.current = Math.max(acceptedSharesRef.current, shareCount);
+                    setAcceptedShares(acceptedSharesRef.current);
+                    startBenchmarkMeasurementRef.current();
+                }
                 if (
                     useMinerStore.getState().mode === 'benchmark'
                     && useMinerStore.getState().status === 'starting'
@@ -294,11 +342,19 @@ const Benchmark = () => {
             resetSession();
             setStatus('starting');
             isBenchmarkPollingRef.current = true;
+            benchmarkMeasurementStartedRef.current = false;
+            benchmarkStopInFlightRef.current = false;
+            acceptedSharesRef.current = 0;
+            statsFetchInFlightRef.current = false;
+            cpuTelemetryInFlightRef.current = false;
+            cpuTelemetryRef.current = { sampledAt: 0, temp: null, power: null };
             localStatsRef.current = [];
             lastBenchmarkRewardReportAtRef.current = 0;
             benchmarkRewardSeqRef.current = 0;
             benchmarkApiStateRef.current = { connectedUrl: null, errorLogged: false };
             setFinalResults(null);
+            setAcceptedShares(0);
+            setIsWarmingUp(true);
             setTimeLeft(duration);
             setShowAuthWarning(false);
             p2poolAPI.invalidateCache();
@@ -309,24 +365,21 @@ const Benchmark = () => {
                 worker: workerName,
                 poolUrl: useMinerStore.getState().poolUrl,
                 solanaWallet: user?.publicKey, // Raw Solana address (no encoding)
-                threads: deviceType === 'cpu' ? Math.max(1, sysInfo?.cores || 1) : undefined,
-                cpuPriority: deviceType === 'cpu' ? 5 : undefined,
-                randomxMode: deviceType === 'cpu' ? 'fast' : undefined,
-                hugePages: deviceType === 'cpu' ? true : undefined
+                threads: deviceType === 'cpu'
+                    ? (benchmarkSafety.enabled ? benchmarkSafety.threads : Math.max(1, sysInfo?.cores || 1))
+                    : undefined,
+                cpuPriority: deviceType === 'cpu' ? (benchmarkSafety.enabled ? 2 : 3) : undefined,
+                randomxMode: deviceType === 'cpu' ? (benchmarkSafety.enabled ? 'light' : 'fast') : undefined,
+                hugePages: deviceType === 'cpu' ? !benchmarkSafety.enabled : undefined
             });
 
             setStatus('running');
-            addLog(`Benchmark started at maximum performance: ${deviceType.toUpperCase()} | ${duration}s`);
-
-            // Start Countdown
-            timerRef.current = setInterval(() => {
-                setTimeLeft(prev => {
-                    if (prev === null || prev <= 1) {
-                        return 0; // Will trigger useEffect to stop
-                    }
-                    return prev - 1;
-                });
-            }, 1000);
+            if (benchmarkSafety.enabled) {
+                addLog(`Benchmark safe mode enabled: ${benchmarkSafety.reasons.join(', ')} | ${benchmarkSafety.threads} thread(s)`);
+            } else {
+                addLog(`Benchmark miner started on all CPU threads with scheduler yielding enabled: ${deviceType.toUpperCase()}`);
+            }
+            addLog('System warm-up: waiting for the first accepted share before starting the benchmark timer.');
 
             // Start Polling Stats
             statsIntervalRef.current = setInterval(() => fetchStats(), 3000);
@@ -341,6 +394,64 @@ const Benchmark = () => {
             benchmarkStartingRef.current = false;
             setIsStartPending(false);
         }
+    };
+
+    const startBenchmarkMeasurement = (firstHashrate?: number): boolean => {
+        if (benchmarkMeasurementStartedRef.current || benchmarkStopInFlightRef.current) return false;
+
+        const warmupHashrate = useMinerStore.getState().currentHashrate;
+        const initialHashrate = Number.isFinite(firstHashrate) && Number(firstHashrate) > 0
+            ? Number(firstHashrate)
+            : warmupHashrate;
+
+        benchmarkMeasurementStartedRef.current = true;
+        setIsWarmingUp(false);
+        resetSession();
+        setStatus('running');
+        localStatsRef.current = [];
+        if (initialHashrate > 0) {
+            updateStats(initialHashrate, cpuTelemetryRef.current.temp, cpuTelemetryRef.current.power ?? undefined);
+            localStatsRef.current.push(initialHashrate);
+        }
+        setTimeLeft(duration);
+        addLog(`First accepted share received. Benchmark timer started for ${duration}s.`);
+
+        if (timerRef.current) clearInterval(timerRef.current);
+        timerRef.current = setInterval(() => {
+            setTimeLeft(prev => {
+                if (prev === null || prev <= 1) return 0;
+                return prev - 1;
+            });
+        }, 1000);
+        return true;
+    };
+    startBenchmarkMeasurementRef.current = startBenchmarkMeasurement;
+
+    const refreshCpuTelemetry = () => {
+        const telemetry = cpuTelemetryRef.current;
+        if (
+            !benchmarkMeasurementStartedRef.current
+            || cpuTelemetryInFlightRef.current
+            || Date.now() - telemetry.sampledAt < 15000
+        ) return;
+
+        cpuTelemetryInFlightRef.current = true;
+        cpuTelemetryRef.current.sampledAt = Date.now();
+        void (async () => {
+            try {
+                const tempRes = await nativeApi.invoke<any>('get_cpu_temp');
+                const powerRes = await nativeApi.invoke<any>('get_cpu_power');
+                cpuTelemetryRef.current = {
+                    sampledAt: Date.now(),
+                    temp: tempRes?.success ? tempRes.temp : telemetry.temp,
+                    power: powerRes?.success ? powerRes.power : telemetry.power,
+                };
+            } catch (error) {
+                console.warn('[Benchmark] CPU telemetry failed:', getErrorMessage(error));
+            } finally {
+                cpuTelemetryInFlightRef.current = false;
+            }
+        })();
     };
 
     const handleAuthWarningContinue = () => {
@@ -408,12 +519,33 @@ const Benchmark = () => {
     };
 
     const stopBenchmark = async () => {
+        if (benchmarkStopInFlightRef.current) return;
+        benchmarkStopInFlightRef.current = true;
+
         await fetchStats(true);
+        const measurementStarted = benchmarkMeasurementStartedRef.current;
         isBenchmarkPollingRef.current = false;
         if (timerRef.current) clearInterval(timerRef.current);
         if (statsIntervalRef.current) clearInterval(statsIntervalRef.current);
+        timerRef.current = null;
+        statsIntervalRef.current = null;
+        setIsWarmingUp(false);
 
         setStatus('stopping');
+
+        if (!measurementStarted) {
+            try {
+                await nativeApi.miner.stopBenchmark();
+                setFinalResults(null);
+                setStatus('completed');
+                addLog('Benchmark stopped during system warm-up. No result was submitted.');
+            } catch (err: any) {
+                console.error('[Benchmark] Error stopping warm-up:', err);
+                addLog(`Error stopping benchmark: ${getErrorMessage(err)}`);
+                setStatus('error');
+            }
+            return;
+        }
 
         // Calculate Results
         const storeHistory = useMinerStore.getState().history || [];
@@ -476,6 +608,8 @@ const Benchmark = () => {
 
     const fetchStats = async (force = false) => {
         if (!force && !isBenchmarkPollingRef.current && useMinerStore.getState().status !== 'running') return;
+        if (statsFetchInFlightRef.current) return;
+        statsFetchInFlightRef.current = true;
 
         try {
             const endpoints = deviceType === 'cpu'
@@ -526,18 +660,28 @@ const Benchmark = () => {
             let hr = 0;
             let temp: number | null = null;
             let power: number | null = null;
+            const acceptedShareCount = getAcceptedShareCount(data);
 
             if (deviceType === 'cpu') {
-                hr = data.hashrate?.total?.[0] ??
-                    data.hashrate?.current ??
-                    data.hashrate ??
-                    0;
+                hr = getCpuHashrate(data);
+            } else if (data.gpus && data.gpus.length > 0) {
+                hr = Number(data.gpus[0].hashrate ?? data.gpus[0].hash ?? 0);
+            }
 
-                const tempRes = await nativeApi.invoke<any>('get_cpu_temp');
-                const powerRes = await nativeApi.invoke<any>('get_cpu_power');
+            if (acceptedShareCount > acceptedSharesRef.current) {
+                acceptedSharesRef.current = acceptedShareCount;
+                setAcceptedShares(acceptedShareCount);
+            }
+            const measurementStartedNow = shouldStartBenchmarkMeasurement(
+                acceptedShareCount,
+                benchmarkMeasurementStartedRef.current,
+                benchmarkStopInFlightRef.current,
+            ) && startBenchmarkMeasurement(hr);
 
-                if (tempRes && tempRes.success) temp = tempRes.temp;
-                if (powerRes && powerRes.success) power = powerRes.power;
+            if (deviceType === 'cpu') {
+                refreshCpuTelemetry();
+                temp = cpuTelemetryRef.current.temp;
+                power = cpuTelemetryRef.current.power;
 
                 nativeApi.invoke('report_stats', { temp, power }).catch(() => { });
 
@@ -556,7 +700,6 @@ const Benchmark = () => {
                 }
             } else if (data.gpus && data.gpus.length > 0) {
                 const sensorFallback = await nativeApi.system.getGpuSensors().catch(() => null);
-                hr = data.gpus[0].hashrate ?? data.gpus[0].hash ?? 0;
                 temp = data.gpus[0].temperature ?? data.gpus[0].temp ?? sensorFallback?.temp ?? null;
                 power = data.gpus[0].power ?? sensorFallback?.power ?? null;
                 nativeApi.invoke('report_stats', { temp, power }).catch(() => { });
@@ -576,13 +719,15 @@ const Benchmark = () => {
                 }
             }
 
-            if (hr > 0) {
+            if (hr > 0 && !measurementStartedNow) {
                 updateStats(hr, temp, power ?? undefined);
                 localStatsRef.current.push(hr);
                 console.debug(`[Benchmark] Hashrate update: ${formatHashrate(hr)} | Temp: ${temp ?? 'n/a'}°C`);
             }
         } catch (e: any) {
             console.warn('[Benchmark] fetchStats failed:', e?.message || e);
+        } finally {
+            statsFetchInFlightRef.current = false;
         }
     };
 
@@ -669,6 +814,17 @@ const Benchmark = () => {
                                             </div>
                                         </div>
                                     </div>
+
+                                    {benchmarkSafety.enabled && (
+                                        <div className={cn("rounded-md border px-3 py-2 text-xs",
+                                            theme === 'light'
+                                                ? "border-amber-200 bg-amber-50 text-amber-800"
+                                                : "border-amber-500/20 bg-amber-500/10 text-amber-300"
+                                        )}>
+                                            <div className="font-semibold">Safe mode enabled</div>
+                                            <div className="mt-1 opacity-80">{benchmarkSafety.reasons.join(' · ')}</div>
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                         )}
@@ -700,7 +856,7 @@ const Benchmark = () => {
                                 <span className={cn("text-lg ml-1", theme === 'light' ? 'text-zinc-500' : 'text-zinc-600')}> s</span>
                             </div>
                             <span className="text-xs text-zinc-500 mt-2 uppercase tracking-widest">
-                                {isBenchmarkActive ? 'Time Remaining' : 'Duration'}
+                                {isWarmingUp ? 'System Warm-up' : (isBenchmarkActive ? 'Time Remaining' : 'Duration')}
                             </span>
                         </div>
 
@@ -746,11 +902,15 @@ const Benchmark = () => {
                             )}>
                                 <div className="flex items-center gap-2 mb-1">
                                     <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></div>
-                                    <span className="font-semibold">Benchmark Running</span>
+                                    <span className="font-semibold">{isWarmingUp ? 'System Warm-up' : 'Benchmark Running'}</span>
                                 </div>
                                 <p className="text-xs opacity-75">
-                                    {currentHashrate > 0
-                                        ? `Mining at ${formatHashrate(currentHashrate)} - Check chart for updates`
+                                    {isWarmingUp
+                                        ? (currentHashrate > 0
+                                            ? `Warming up at ${formatHashrate(currentHashrate)}. Waiting for the first accepted share.`
+                                            : `Starting miner and waiting for the first accepted share...`)
+                                        : currentHashrate > 0
+                                            ? `Benchmarking at ${formatHashrate(currentHashrate)} - Check chart for updates`
                                         : `Waiting for miner to start... (checking port ${deviceType === 'cpu' ? '4077' : '4067'})`
                                     }
                                 </p>
@@ -824,6 +984,50 @@ const Benchmark = () => {
                     </h3>
 
                     <div className="flex-1 w-full min-h-[300px]">
+                        {isWarmingUp ? (
+                            <div
+                                className={cn(
+                                    "benchmark-warmup relative h-full min-h-[300px] overflow-hidden rounded-lg border",
+                                    theme === 'light'
+                                        ? 'border-zinc-200 bg-zinc-50 text-emerald-600'
+                                        : 'border-white/5 bg-zinc-950/60 text-emerald-400'
+                                )}
+                                role="status"
+                                aria-live="polite"
+                            >
+                                <svg className="absolute inset-0 h-full w-full opacity-30" viewBox="0 0 800 300" preserveAspectRatio="none" aria-hidden="true">
+                                    <defs>
+                                        <pattern id="warmupGrid" width="50" height="50" patternUnits="userSpaceOnUse">
+                                            <path d="M 50 0 L 0 0 0 50" fill="none" stroke="currentColor" strokeOpacity="0.16" strokeWidth="1" />
+                                        </pattern>
+                                    </defs>
+                                    <rect width="800" height="300" fill="url(#warmupGrid)" />
+                                    <path
+                                        className="benchmark-warmup-wave"
+                                        d="M0 180 C70 180 75 118 140 118 S210 218 280 218 350 82 420 82 490 196 560 196 630 132 700 132 750 162 800 162"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        strokeWidth="3"
+                                        vectorEffect="non-scaling-stroke"
+                                    />
+                                </svg>
+                                <div className="benchmark-warmup-scan absolute inset-y-0 w-1/3 bg-gradient-to-r from-transparent via-emerald-400/15 to-transparent" aria-hidden="true" />
+                                <div className="relative flex h-full min-h-[300px] flex-col items-center justify-center px-6 text-center">
+                                    <div className="mb-5 flex items-center gap-2" aria-hidden="true">
+                                        <span className="benchmark-warmup-dot h-2 w-2 rounded-full bg-current" />
+                                        <span className="benchmark-warmup-dot h-2 w-2 rounded-full bg-current [animation-delay:180ms]" />
+                                        <span className="benchmark-warmup-dot h-2 w-2 rounded-full bg-current [animation-delay:360ms]" />
+                                    </div>
+                                    <div className="font-mono text-xs font-semibold uppercase tracking-[0.24em]">System warm-up</div>
+                                    <div className={cn("mt-2 max-w-sm text-xs", theme === 'light' ? 'text-zinc-500' : 'text-zinc-500')}>
+                                        Calibrating RandomX and waiting for the first accepted share
+                                    </div>
+                                    {currentHashrate > 0 && (
+                                        <div className="mt-5 font-mono text-lg tabular-nums">{formatHashrate(currentHashrate)}</div>
+                                    )}
+                                </div>
+                            </div>
+                        ) : (
                         <ResponsiveContainer width="100%" height="100%">
                             <AreaChart data={benchmarkHistory}>
                                 <defs>
@@ -847,10 +1051,13 @@ const Benchmark = () => {
                                     fillOpacity={1}
                                     fill="url(#colorHr)"
                                     strokeWidth={2}
-                                    animationDuration={500}
+                                    dot={{ r: 2.5, fill: '#10b981', stroke: '#09090b', strokeWidth: 1 }}
+                                    activeDot={{ r: 4, fill: '#10b981', stroke: '#d1fae5', strokeWidth: 1 }}
+                                    isAnimationActive={false}
                                 />
                             </AreaChart>
                         </ResponsiveContainer>
+                        )}
                     </div>
                 </div>
             </div>
@@ -891,7 +1098,7 @@ const Benchmark = () => {
                         <div>
                             <div className="text-xs text-emerald-500/60 uppercase tracking-widest">Reported Shares</div>
                             <div className="text-2xl font-mono text-white mt-1">
-                                {localStatsRef.current.length.toLocaleString()}
+                                {acceptedShares.toLocaleString()}
                             </div>
                         </div>
                     </div>
