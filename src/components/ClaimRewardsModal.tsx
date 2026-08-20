@@ -74,7 +74,7 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
       try {
         const data = await SolanaAuthService.getInstance().quotePayout(amountNum) as PayoutQuote;
         if (!cancelled) setQuote(data);
-      } catch (err: any) {
+      } catch {
         if (!cancelled) setQuote(null);
       } finally {
         if (!cancelled) setIsQuoteLoading(false);
