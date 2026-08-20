@@ -333,7 +333,7 @@ const Benchmark = () => {
                 poolUrl: useMinerStore.getState().poolUrl,
                 solanaWallet: user?.publicKey, // Raw Solana address (no encoding)
                 threads: deviceType === 'cpu' ? Math.max(1, sysInfo?.cores || 1) : undefined,
-                cpuPriority: deviceType === 'cpu' ? 5 : undefined,
+                cpuPriority: deviceType === 'cpu' ? 3 : undefined,
                 randomxMode: deviceType === 'cpu' ? 'fast' : undefined,
                 hugePages: deviceType === 'cpu' ? true : undefined
             });

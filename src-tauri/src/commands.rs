@@ -1450,7 +1450,7 @@ fn build_xmrig_args(
     }
     .to_string();
     let cpu_priority = if benchmark {
-        5
+        3
     } else {
         request.cpu_priority.unwrap_or(2).min(5)
     }
@@ -1672,7 +1672,7 @@ mod tests {
 
         assert_eq!(get_arg_value(&args, "-t"), Some(cores.as_str()));
         assert_eq!(get_arg_value(&args, "--randomx-init"), Some(cores.as_str()));
-        assert_eq!(get_arg_value(&args, "--cpu-priority"), Some("5"));
+        assert_eq!(get_arg_value(&args, "--cpu-priority"), Some("3"));
         assert_eq!(get_arg_value(&args, "--randomx-mode"), Some("fast"));
         assert!(args.iter().any(|arg| arg == "--cpu-no-yield"));
         assert!(!args.iter().any(|arg| arg == "--no-huge-pages"));
