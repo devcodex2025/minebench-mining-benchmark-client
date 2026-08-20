@@ -170,17 +170,17 @@ const Benchmark = () => {
         SolanaAuthService.getInstance()
             .reportMiningStats({
                 hashrate: currentHashrate,
-                shares: localStatsRef.current.length,
+                shares: 0,
                 source: 'benchmark',
                 referenceId: `benchmark-${user.publicKey}-${now}-${seq}`,
                 metadata: {
                     deviceType,
                     workerName,
                     duration,
-                    samples: localStatsRef.current.length
+                    samples: localStatsRef.current.length,
+                    shareSource: 'pool-verified-only'
                 }
             })
-            .then(() => SolanaAuthService.getInstance().fetchMiningStats(user.publicKey))
             .catch((err) => {
                 console.warn('[Benchmark] Failed to report mining stats:', err);
             });
@@ -303,27 +303,20 @@ const Benchmark = () => {
             setShowAuthWarning(false);
             p2poolAPI.invalidateCache();
 
-            const lowEndCpu = (sysInfo?.cores || 0) > 0 && (sysInfo?.cores || 0) <= 2;
-            const lowEndRam = (sysInfo?.ramBytes || 0) > 0 && (sysInfo?.ramBytes || 0) <= 4 * 1024 * 1024 * 1024;
-            const knownLowEndCpu = /celeron|n4000/i.test(sysInfo?.cpu || '');
-            const useLowEndSafeMode = deviceType === 'cpu' && (lowEndCpu || lowEndRam || knownLowEndCpu);
-
             await nativeApi.miner.startBenchmark({
                 type: deviceType,
                 wallet,
                 worker: workerName,
                 poolUrl: useMinerStore.getState().poolUrl,
                 solanaWallet: user?.publicKey, // Raw Solana address (no encoding)
-                threads: useLowEndSafeMode ? 1 : undefined,
-                randomxMode: useLowEndSafeMode ? 'light' : undefined,
-                hugePages: useLowEndSafeMode ? false : undefined
+                threads: deviceType === 'cpu' ? Math.max(1, sysInfo?.cores || 1) : undefined,
+                cpuPriority: deviceType === 'cpu' ? 5 : undefined,
+                randomxMode: deviceType === 'cpu' ? 'fast' : undefined,
+                hugePages: deviceType === 'cpu' ? true : undefined
             });
 
             setStatus('running');
-            addLog(`Benchmark started: ${deviceType.toUpperCase()} | ${duration}s`);
-            if (useLowEndSafeMode) {
-                addLog('Low-end CPU/RAM detected: using RandomX light mode, 1 thread, huge pages disabled');
-            }
+            addLog(`Benchmark started at maximum performance: ${deviceType.toUpperCase()} | ${duration}s`);
 
             // Start Countdown
             timerRef.current = setInterval(() => {

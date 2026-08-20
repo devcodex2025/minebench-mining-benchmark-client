@@ -342,8 +342,9 @@ export class MultiDeviceSyncService {
         break;
 
       case 'reward_notification':
-        // Сповіщення про нові винагороди
-        console.log(`[MultiDeviceSync] Reward updated: ${message.data.accumulatedRewards} XMR`);
+        // Legacy messages are informational only. Reward state is refreshed
+        // exclusively from the authenticated backend event stream.
+        console.log('[MultiDeviceSync] Ignored unauthenticated legacy reward notification');
         break;
 
       case 'heartbeat':

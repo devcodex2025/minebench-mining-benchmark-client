@@ -87,6 +87,7 @@ export interface MiningDevice {
 
 export interface UserMiningStats {
   totalRewards: number; // BMT available (bmt_available)
+  minClaimBmt?: number;
   totalXmrMined?: number; // total XMR earned from pool
   totalBmtEarned?: number; // total BMT ever credited
   totalBmtWithdrawn?: number; // total BMT withdrawn
@@ -211,6 +212,7 @@ export const useSolanaAuth = create<SolanaAuthState>((set) => ({
  */
 export class SolanaAuthService {
   private static instance: SolanaAuthService;
+  private startupPremiumStatusPromise: Promise<void> | null = null;
 
   private constructor() { }
 
@@ -402,6 +404,32 @@ export class SolanaAuthService {
   }
 
   /**
+   * Load premium status once for the current application process.
+   */
+  loadPremiumStatusOnStartup(): Promise<void> {
+    if (this.startupPremiumStatusPromise) return this.startupPremiumStatusPromise;
+
+    this.startupPremiumStatusPromise = (async () => {
+      const storedToken = authStorage.getToken();
+      if (!storedToken) return;
+
+      try {
+        const premiumData = await backendJson<{ isPremium?: boolean; xmrWallet?: string | null }>(
+          '/api/user/premium-status',
+          { token: storedToken }
+        );
+        const { setIsPremium, setPremiumXmrWallet } = useMinerStore.getState();
+        setIsPremium(!!premiumData.isPremium);
+        setPremiumXmrWallet(premiumData.xmrWallet || null);
+      } catch (error) {
+        console.warn('[SolanaAuth] Failed to load startup premium status:', error);
+      }
+    })();
+
+    return this.startupPremiumStatusPromise;
+  }
+
+  /**
    * Отримати статистику майнінгу користувача
    */
   async fetchMiningStats(publicKey: string): Promise<UserMiningStats> {
@@ -435,19 +463,8 @@ export class SolanaAuthService {
       const bmtBalance = Number(balanceData?.bmt_available ?? balanceData?.available_bmt ?? balanceData?.balance ?? 0) || 0;
 
       // Update miner store with confirmed balance and totals
-      const { setDbTotalBMT, setIsPremium, setPremiumXmrWallet } = useMinerStore.getState();
+      const { setDbTotalBMT } = useMinerStore.getState();
       setDbTotalBMT(bmtBalance);
-
-      // Check premium status via direct fetch
-            try {
-              const premiumData = await backendJson<any>('/api/user/premium-status', { token: storedToken });
-              setIsPremium(!!premiumData.isPremium);
-              if (premiumData.xmrWallet) {
-                setPremiumXmrWallet(premiumData.xmrWallet);
-              }
-            } catch (e) {
-              console.warn('[SolanaAuth] Failed to fetch premium status:', e);
-            }
 
       const authState = useSolanaAuth.getState();
       const stats = mapRewardsBalanceToMiningStats(balanceData, authState.devices, authState.miningStats);
@@ -521,6 +538,7 @@ export class SolanaAuthService {
   private getEmptyStats(): UserMiningStats {
     return {
       totalRewards: 0,
+      minClaimBmt: 0.000001,
       totalXmrMined: 0,
       totalBmtEarned: 0,
       totalBmtWithdrawn: 0,
