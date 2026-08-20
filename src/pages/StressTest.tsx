@@ -236,7 +236,7 @@ const StressTest: React.FC = () => {
                         samples: currentSamples.length,
                         shareSource: 'pool-verified-only'
                     }
-                }).then(() => SolanaAuthService.getInstance().fetchMiningStats(user.publicKey)).catch((err) => {
+                }).catch((err) => {
                     console.warn('[StressTest] Failed to report mining stats:', err);
                 });
             }
