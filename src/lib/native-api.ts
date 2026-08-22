@@ -66,7 +66,8 @@ export const nativeApi = {
     startBenchmark: (config: any) => nativeApi.invoke<void>('start_benchmark', { request: config }),
     stopBenchmark: () => nativeApi.invoke<void>('stop_benchmark'),
     getLatestBenchmark: (deviceType: string) => nativeApi.invoke<any>('get_latest_benchmark', { device_type: deviceType }),
-    submitBenchmark: (record: any) => nativeApi.invoke<any>('submit_benchmark_result', { record }),
+    submitBenchmark: (record: any, token: string) =>
+      nativeApi.invoke<any>('submit_benchmark_result', { record, token }),
     saveSettings: (settings: any) => nativeApi.invoke<void>('save_miner_settings', { settings }),
     loadSettings: () => nativeApi.invoke<{ success: boolean; settings: any }>('load_miner_settings'),
     saveLogs: (logs: any) => nativeApi.invoke<void>('save_miner_logs', logs),

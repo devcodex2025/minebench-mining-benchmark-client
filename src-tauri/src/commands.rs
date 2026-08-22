@@ -665,7 +665,7 @@ pub async fn get_latest_benchmark(device_type: String) -> Result<serde_json::Val
 }
 
 #[tauri::command]
-pub async fn submit_benchmark_result(record: serde_json::Value) -> Result<serde_json::Value, String> {
+pub async fn submit_benchmark_result(record: serde_json::Value, token: String) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -673,6 +673,7 @@ pub async fn submit_benchmark_result(record: serde_json::Value) -> Result<serde_
 
     let res = client
         .post("https://minebench.cloud/api/benchmarks")
+        .bearer_auth(token)
         .json(&record)
         .send()
         .await

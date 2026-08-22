@@ -8,6 +8,7 @@ import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip } from 'rec
 import { cn, formatHashrate } from '../lib/utils';
 import { getEnvironmentConfig } from '../config/environment';
 import { nativeApi } from '../lib/native-api';
+import { authStorage } from '../lib/auth-storage';
 import { p2poolAPI } from '../services/p2poolAPI';
 import {
     classifyMinerOutput,
@@ -510,6 +511,11 @@ const Benchmark = () => {
             addLog('Benchmark result was not submitted: no positive hashrate samples were captured.');
             throw new Error('No positive hashrate samples were captured');
         }
+        const token = authStorage.getToken();
+        if (!token || !user?.publicKey) {
+            addLog('Benchmark result was not submitted: connect and authenticate a Solana wallet first.');
+            throw new Error('Authenticated Solana wallet required');
+        }
 
         const state = useMinerStore.getState();
         const deviceId = localStorage.getItem('minebench_device_id') || undefined;
@@ -526,12 +532,11 @@ const Benchmark = () => {
             avg_power: avgPower,
             algorithm: deviceType === 'cpu' ? 'RandomX' : 'KawPow',
             coin_name: deviceType === 'cpu' ? 'XMR' : 'RVN',
-            solana_wallet_address: user?.publicKey || null,
+            solana_wallet_address: user.publicKey,
             device_uid: deviceId || `${deviceType}-${sysInfo?.cpu || workerName}`,
-            created_at: new Date().toISOString()
         };
 
-        const result = await nativeApi.miner.submitBenchmark(record) as any;
+        const result = await nativeApi.miner.submitBenchmark(record, token) as any;
         const submittedId = result?.benchmark?.id;
         const submittedBenchmark = { ...record, ...(result?.benchmark || {}) };
         localStorage.setItem('minebench_latest_benchmark', JSON.stringify(submittedBenchmark));
