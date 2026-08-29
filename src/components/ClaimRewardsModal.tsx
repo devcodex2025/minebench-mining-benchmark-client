@@ -18,16 +18,22 @@ interface PayoutQuote {
   netAmountBmt: number;
   feeBmt: number;
   networkFeeSol: number;
+  transactionNetworkFeeSol?: number;
   ataRentSol: number;
   totalSolCost: number;
+  batchTargetSize?: number;
   recipientAtaExists: boolean;
   canClaim: boolean;
+  isEstimate?: boolean;
+  requiresFullBatch?: boolean;
 }
 
 const toFiniteAmount = (value: unknown) => {
   const amount = Number(value);
   return Number.isFinite(amount) ? amount : 0;
 };
+
+const formatBmt = (value: number) => toFiniteAmount(value).toFixed(6);
 
 export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
   isOpen,
@@ -50,14 +56,14 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
   const amountNum = parseFloat(amount);
   const grossAmount = toFiniteAmount(quote?.requestedAmountBmt ?? amountNum);
   const netAmount = toFiniteAmount(quote?.netAmountBmt);
-  const canClaim = !!amount && !isNaN(amountNum) && amountNum >= MIN_WITHDRAWAL && amountNum <= availableBalance && (!quote || quote.canClaim);
+  const canClaim = !!amount && !isNaN(amountNum) && amountNum >= MIN_WITHDRAWAL && amountNum <= availableBalance && quote?.canClaim === true;
 
   React.useEffect(() => {
     if (!isOpen) return;
     setError(null);
     setSuccess(null);
     setQuote(null);
-    setAmount(availableBalance > 0 ? availableBalance.toString() : '');
+    setAmount(availableBalance > 0 ? formatBmt(availableBalance) : '');
   }, [isOpen, availableBalance]);
 
   React.useEffect(() => {
@@ -88,7 +94,7 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
   }, [isOpen, amount, amountNum, availableBalance]);
 
   const handleMaxClick = () => {
-    setAmount(availableBalance.toFixed(6).replace(/\.?0+$/, ''));
+    setAmount(formatBmt(availableBalance));
   };
 
   const handleClaim = async () => {
@@ -122,7 +128,8 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
       const data = await SolanaAuthService.getInstance().requestPayout(amountNum);
       const payoutId = data?.id ? `ID: ${data.id}` : 'pending processing';
       const received = Number(data?.amount_bmt ?? data?.quote?.netAmountBmt ?? 0);
-      setSuccess(`Withdrawal request submitted — ${received.toFixed(6)} BMT to receive, ${payoutId}`);
+      setSuccess(`Withdrawal request submitted — approximately ${received.toFixed(6)} BMT after fee, ${payoutId}`);
+      window.dispatchEvent(new CustomEvent('minebench:payout-created', { detail: { payoutId: data?.id || null } }));
       setAmount('');
       await onClaimed?.();
 
@@ -178,7 +185,7 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
             Available Balance
           </p>
           <p className="text-3xl font-bold text-yellow-400 mt-2">
-            {availableBalance.toFixed(2)} BMT
+            {formatBmt(availableBalance)} BMT
           </p>
           <p
             className={cn(
@@ -247,11 +254,11 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
                   <span>{grossAmount.toFixed(6)} BMT</span>
                 </div>
                 <div className="flex justify-between gap-3">
-                  <span>Solana payout cost</span>
+                  <span>Estimated payout cost</span>
                   <span>{Number(quote.totalSolCost || 0).toFixed(9)} SOL</span>
                 </div>
                 <div className="flex justify-between gap-3">
-                  <span>Payout fee</span>
+                  <span>Estimated payout fee</span>
                   <span>{Number(quote.feeBmt || 0).toFixed(6)} BMT</span>
                 </div>
                 {toFiniteAmount(quote.ataRentSol) > 0 && (
@@ -260,14 +267,19 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
                   </div>
                 )}
                 <div className="flex justify-between gap-3 font-semibold">
-                  <span>You receive after fee</span>
+                  <span>Estimated wallet amount</span>
                   <span className={netAmount > 0 ? 'text-yellow-400' : 'text-red-400'}>
-                    {netAmount.toFixed(6)} BMT
+                    {formatBmt(netAmount)} BMT
                   </span>
                 </div>
+                {(quote.batchTargetSize || 0) > 1 && (
+                  <div className={cn('text-xs', isDark ? 'text-zinc-400' : 'text-zinc-500')}>
+                    Network fee is shared across a full batch of {quote.batchTargetSize} payouts. The final amount is recorded when the batch is executed.
+                  </div>
+                )}
               </>
             ) : (
-              <p>Fee quote is unavailable. You can still submit; backend will verify before creating payout.</p>
+              <p className={isDark ? 'text-red-300' : 'text-red-600'}>Fee quote is unavailable. Retry before submitting the claim.</p>
             )}
           </div>
         )}
@@ -312,7 +324,7 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
           )}
         >
           <p>
-            <strong>Note:</strong> Payouts are processed in batches. Please allow up to 24 hours for your transaction to appear on-chain.
+            <strong>Note:</strong> The transaction is sent only after its payout batch is completely filled. There is no automatic partial-batch timeout.
           </p>
         </div>
 

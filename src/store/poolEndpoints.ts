@@ -28,8 +28,10 @@ function normalizeEndpoint(endpoint: any): PoolEndpoint | null {
 }
 
 export function normalizeBackendPoolEndpoints(pool: any): PoolEndpoint[] {
-    const endpoints = Array.isArray(pool?.endpoints)
-        ? pool.endpoints.map(normalizeEndpoint).filter((endpoint): endpoint is PoolEndpoint => !!endpoint)
+    const endpoints: PoolEndpoint[] = Array.isArray(pool?.endpoints)
+        ? pool.endpoints
+            .map((endpoint: unknown) => normalizeEndpoint(endpoint))
+            .filter((endpoint: PoolEndpoint | null): endpoint is PoolEndpoint => endpoint !== null)
         : [];
 
     const backup = normalizeEndpoint({

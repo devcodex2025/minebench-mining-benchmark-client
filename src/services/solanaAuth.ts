@@ -107,7 +107,7 @@ export interface UserMiningStats {
     rewardSharePercent: number;
     poolHashrate: number;
     updatedAt?: string | null;
-  };
+  } | null;
   thisMonth: number;
   thisWeek: number;
   today: number;
@@ -124,6 +124,30 @@ export interface RewardHistoryEntry {
   reference_id?: string | null;
   metadata?: any;
   created_at: string;
+}
+
+export interface PayoutStatus {
+  id: string;
+  status: 'pending' | 'completed' | 'failed' | string;
+  requestedAmountBmt: number;
+  amountBmt: number;
+  feeBmt: number;
+  networkFeeSol: number;
+  ataRentSol: number;
+  totalSolCost: number;
+  txSignature: string | null;
+  errorMessage: string | null;
+  batchKind: 'existing_ata' | 'missing_ata';
+  batchTargetSize: number;
+  batchFilled: number;
+  batchRemaining: number;
+  queuePosition: number;
+  positionInBatch: number;
+  isEstimate: boolean;
+  createdAt: string | null;
+  processedAt: string | null;
+  completedAt: string | null;
+  updatedAt: string;
 }
 
 interface SolanaAuthState {
@@ -501,6 +525,15 @@ export class SolanaAuthService {
       token: storedToken,
       body: { amount }
     });
+  }
+
+  async getLatestPayoutStatus(): Promise<PayoutStatus | null> {
+    const storedToken = authStorage.getToken();
+    if (!storedToken) return null;
+    const response = await backendJson<{ payout: PayoutStatus | null }>('/api/rewards/payout/status', {
+      token: storedToken
+    });
+    return response.payout;
   }
 
   async reportMiningStats(params: {
