@@ -32,8 +32,14 @@ assert.match(
 );
 assert.match(
   modalSource,
-  /netAmountBmt[\s\S]*You receive[\s\S]*netAmount\.toFixed\(6\)/,
-  'Claim modal must display the net BMT amount the user receives'
+  /netAmountBmt[\s\S]*Estimated wallet amount[\s\S]*formatBmt\(netAmount\)/,
+  'Claim modal must display the estimated net BMT amount the user receives'
+);
+
+assert.match(
+  modalSource,
+  /quote\?\.canClaim === true/,
+  'Claim modal must require a successful quote before enabling submission'
 );
 assert.match(
   modalSource,

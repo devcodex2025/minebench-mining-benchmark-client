@@ -14,6 +14,7 @@ import { Activity, Coins, TrendingUp, AlertTriangle, X } from './components/icon
 import { getEnvironmentConfig } from './config/environment';
 import { useSolanaAuth, SolanaAuthService } from './services/solanaAuth';
 import { ClaimRewardsModal } from './components/ClaimRewardsModal';
+import { PayoutStatusCard } from './components/PayoutStatusCard';
 import { nativeApi } from './lib/native-api';
 import { backendJson } from './lib/backend-api';
 
@@ -477,6 +478,12 @@ const Dashboard = () => {
                     </button>
                 </div>
             </div>
+
+            <PayoutStatusCard
+                theme={theme}
+                wallet={user?.publicKey || ''}
+                isConnected={isConnected}
+            />
 
             <ClaimRewardsModal
                 isOpen={showClaimModal}

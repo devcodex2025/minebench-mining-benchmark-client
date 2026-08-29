@@ -469,7 +469,7 @@ const Mining: React.FC = () => {
         if (!(window as any).__TAURI_INTERNALS__ || backendPoolEndpoints.length === 0) return;
 
         const pingAll = async () => {
-            const results: Record<string, number | null> = {};
+            const results: Record<string, { avg: number; min: number; max: number; jitter: number } | null> = {};
             await Promise.allSettled(
                 backendPoolEndpoints.map(async (ep) => {
                     try {
