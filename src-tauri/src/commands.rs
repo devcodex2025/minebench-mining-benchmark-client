@@ -76,6 +76,8 @@ fn validate_backend_path(path: &str) -> Result<String, String> {
         || clean_path == "/api/rewards/balance"
         || clean_path == "/api/rewards/history"
         || clean_path == "/api/rewards/claim"
+        || clean_path == "/api/rewards/claim/quote"
+        || clean_path == "/api/rewards/payout/status"
         || clean_path == "/api/user/premium-status"
         || clean_path == "/api/miner/report"
         || clean_path == "/api/sync/device-update"
