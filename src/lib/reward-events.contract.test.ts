@@ -5,14 +5,16 @@ import test from 'node:test';
 
 const read = (relativePath: string) => fs.readFileSync(path.resolve(process.cwd(), relativePath), 'utf8');
 
-test('private reward balance is event-driven and has no periodic component polling', () => {
+test('private reward balance uses the shared 60-second backend sync queue', () => {
   const dashboard = read('src/App.tsx');
   const walletButton = read('src/components/SolanaAuthButton.tsx');
   const mining = read('src/pages/Mining.tsx');
 
-  assert.doesNotMatch(dashboard, /setInterval\(syncConfirmed/);
+  assert.match(dashboard, /BACKEND_SYNC_INTERVAL_MS = 60_000/);
+  assert.match(dashboard, /fetchRewardStats[\s\S]*fetchMiningStats/);
+  assert.match(dashboard, /for \(const job of \[fetchPoolStats, fetchRates, fetchRewardStats\]\)/);
   assert.doesNotMatch(walletButton, /setInterval\([^)]*refreshWallet/);
-  assert.doesNotMatch(mining, /verifiedSharesIntervalRef/);
+  assert.doesNotMatch(mining, /poolStatsIntervalRef|ratesIntervalRef|verifiedSharesIntervalRef/);
   assert.match(walletButton, /subscribeToRewardEvents/);
 });
 

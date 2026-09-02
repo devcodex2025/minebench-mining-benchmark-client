@@ -237,6 +237,7 @@ export const useSolanaAuth = create<SolanaAuthState>((set) => ({
 export class SolanaAuthService {
   private static instance: SolanaAuthService;
   private startupPremiumStatusPromise: Promise<void> | null = null;
+  private miningStatsRequests = new Map<string, Promise<UserMiningStats>>();
 
   private constructor() { }
 
@@ -457,6 +458,17 @@ export class SolanaAuthService {
    * Отримати статистику майнінгу користувача
    */
   async fetchMiningStats(publicKey: string): Promise<UserMiningStats> {
+    const pending = this.miningStatsRequests.get(publicKey);
+    if (pending) return pending;
+
+    const request = this.fetchMiningStatsRequest().finally(() => {
+      this.miningStatsRequests.delete(publicKey);
+    });
+    this.miningStatsRequests.set(publicKey, request);
+    return request;
+  }
+
+  private async fetchMiningStatsRequest(): Promise<UserMiningStats> {
     try {
       const storedToken = authStorage.getToken();
 

@@ -1177,6 +1177,7 @@ fn validate_external_url(url: &str) -> Result<String, String> {
             | "minebench.app"
             | "backend.minebench.cloud"
             | "github.com"
+            | "bitbucket.org"
             | "phantom.app"
             | "discord.gg"
             | "x.com"

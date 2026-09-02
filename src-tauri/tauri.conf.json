@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "MineBench Client",
-  "version": "0.8.36",
+  "version": "0.8.37",
   "identifier": "cloud.minebench.client",
   "build": {
     "frontendDist": "../web-dist",
@@ -25,12 +25,13 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost http://127.0.0.1:* http://localhost:* https://minebench.cloud https://backend.minebench.cloud https://api.mainnet-beta.solana.com https://api.bitbucket.org; img-src 'self' asset: http://asset.localhost data: blob:; media-src 'self' asset: http://asset.localhost blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:"
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost http://127.0.0.1:* http://localhost:* https://minebench.cloud https://backend.minebench.cloud https://api.mainnet-beta.solana.com https://api.bitbucket.org https://bitbucket.org; img-src 'self' asset: http://asset.localhost data: blob:; media-src 'self' asset: http://asset.localhost blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:"
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -48,6 +49,17 @@
     },
     "android": {
       "debugApplicationIdSuffix": ".debug"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVGMzM4RjYxQUQ0MUFBOEIKUldTTHFrR3RZWTh6WHpFb0ZsSUJzUHdRUTgvRzh2cjBuLzNCYWJ5R1N5Rk1MblhZSXpVUkUza28K",
+      "endpoints": [
+        "https://bitbucket.org/minebenchapp/minebench-client/downloads/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

@@ -18,11 +18,20 @@ import { PayoutStatusCard } from './components/PayoutStatusCard';
 import { nativeApi } from './lib/native-api';
 import { backendJson } from './lib/backend-api';
 
-const PoolMonitor = () => {
+const BACKEND_SYNC_INTERVAL_MS = 60_000;
+const BACKEND_SYNC_GAP_MS = 750;
+
+const waitForSyncGap = () => new Promise((resolve) => window.setTimeout(resolve, BACKEND_SYNC_GAP_MS));
+
+const BackendSyncMonitor = () => {
     const updatePoolStatus = useMinerStore(state => state.updatePoolStatus);
     const setGlobalPoolStats = useMinerStore(state => state.setGlobalPoolStats);
+    const publicKey = useSolanaAuth(state => state.user?.publicKey);
 
     useEffect(() => {
+        let cancelled = false;
+        let syncTimer: ReturnType<typeof window.setTimeout> | null = null;
+
         const fetchPoolStats = async () => {
             try {
                 const stats = await backendJson('/api/pool/stats');
@@ -46,14 +55,58 @@ const PoolMonitor = () => {
                         });
                     });
                 }
+                window.dispatchEvent(new CustomEvent('minebench:pool-stats', { detail: stats }));
             } catch (err) {
-                console.warn('[PoolMonitor] Failed to fetch pool stats:', err);
+                console.warn('[BackendSync] Failed to fetch pool stats:', err);
             }
         };
-        fetchPoolStats();
-        const statsInterval = setInterval(fetchPoolStats, 60000);
-        return () => clearInterval(statsInterval);
-    }, [setGlobalPoolStats]);
+
+        const fetchRates = async () => {
+            try {
+                const data = await backendJson('/api/rates/current');
+                const toNumber = (value: unknown) => {
+                    const parsed = Number(String(value ?? 0).replace(/,/g, ''));
+                    return Number.isFinite(parsed) ? parsed : 0;
+                };
+                useMinerStore.getState().setExchangeRates(
+                    toNumber(data?.xmr_usd ?? data?.xmrUsd ?? data?.xmr_usd_price ?? data?.xmr_price_usd),
+                    toNumber(data?.bmt_usd ?? data?.bmtUsd ?? data?.bmt_usd_price ?? data?.bmt_price_usd),
+                    toNumber(data?.rate_xmr_bmt ?? data?.rateXmrBmt ?? data?.xmr_bmt_rate)
+                );
+            } catch (err) {
+                console.warn('[BackendSync] Failed to fetch rates:', err);
+            }
+        };
+
+        const fetchRewardStats = async () => {
+            if (!publicKey) return;
+            try {
+                await SolanaAuthService.getInstance().fetchMiningStats(publicKey);
+            } catch (err) {
+                console.warn('[BackendSync] Failed to fetch reward stats:', err);
+            }
+        };
+
+        const runSyncQueue = async () => {
+            const startedAt = Date.now();
+            for (const job of [fetchPoolStats, fetchRates, fetchRewardStats]) {
+                if (cancelled) return;
+                await job();
+                if (!cancelled) await waitForSyncGap();
+            }
+
+            if (!cancelled) {
+                const elapsed = Date.now() - startedAt;
+                syncTimer = window.setTimeout(runSyncQueue, Math.max(1_000, BACKEND_SYNC_INTERVAL_MS - elapsed));
+            }
+        };
+
+        void runSyncQueue();
+        return () => {
+            cancelled = true;
+            if (syncTimer) window.clearTimeout(syncTimer);
+        };
+    }, [publicKey, setGlobalPoolStats, updatePoolStatus]);
 
     return null;
 };
@@ -137,31 +190,6 @@ const Dashboard = () => {
     } = useMinerStore();
     const { user, isConnected, miningStats } = useSolanaAuth();
     const { theme } = useTheme();
-
-    // Fetch exchange rates on Dashboard mount
-    useEffect(() => {
-        const fetchRates = async () => {
-            try {
-                const data = await backendJson('/api/rates/current');
-
-                const nextXmrUsd = Number(data?.xmr_usd || 0);
-                const nextBmtUsd = Number(data?.bmt_usd || 0);
-                const nextRate = Number(data?.rate_xmr_bmt || 0);
-
-                // Update store with rates
-                const { setExchangeRates } = useMinerStore.getState();
-                setExchangeRates(
-                    Number.isFinite(nextXmrUsd) ? nextXmrUsd : 0,
-                    Number.isFinite(nextBmtUsd) ? nextBmtUsd : 0,
-                    Number.isFinite(nextRate) ? nextRate : 0
-                );
-            } catch (err) {
-                console.warn('[Dashboard] Failed to fetch rates:', err);
-            }
-        };
-
-        fetchRates();
-    }, []);
 
     const cpuPool = pools['cpu'];
     const poolLabels: Record<string, string> = {
@@ -514,7 +542,7 @@ const App: React.FC = () => {
             <Router>
                 <TitleBar />
                 <DisplayWarningBanner />
-                <PoolMonitor />
+                <BackendSyncMonitor />
                 <Layout>
                     <Suspense fallback={<div className="p-10 text-zinc-500 italic">Loading components...</div>}>
                         <Routes>

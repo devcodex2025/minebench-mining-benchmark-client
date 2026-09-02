@@ -22,6 +22,7 @@ definitions:
           - apt-get install -y curl build-essential libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf rpm weston libgtk-3-bin python3-gi gir1.2-gtk-3.0 xvfb xauth procps xdg-utils
           - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           - export PATH="$HOME/.cargo/bin:$PATH"
+          - test -n "$TAURI_SIGNING_PRIVATE_KEY"
           - npm ci
           - npm run dist:linux
           - node scripts/collect-release-artifacts.mjs linux
@@ -39,6 +40,7 @@ definitions:
           - apt-get install -y curl build-essential clang lld llvm nsis
           - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           - export PATH="$HOME/.cargo/bin:$PATH"
+          - test -n "$TAURI_SIGNING_PRIVATE_KEY"
           - rustup target add x86_64-pc-windows-msvc
           - cargo install --locked cargo-xwin
           - npm ci
@@ -53,14 +55,27 @@ definitions:
         script:
           - test -n "$BITBUCKET_RELEASE_TOKEN"
           - test -n "$(find release-artifacts -type f -print -quit)"
+          - node scripts/generate-updater-manifest.cjs release-artifacts release-artifacts/latest.json
           - |
             for file in release-artifacts/*; do
+              test "$(basename "$file")" = "latest.json" && continue
               curl --fail-with-body \
                 --request POST \
                 --header "Authorization: Bearer $BITBUCKET_RELEASE_TOKEN" \
                 --form "files=@${file}" \
                 "https://api.bitbucket.org/2.0/repositories/minebenchapp/minebench-client/downloads"
             done
+          - |
+            curl --silent --show-error \
+              --request DELETE \
+              --header "Authorization: Bearer $BITBUCKET_RELEASE_TOKEN" \
+              "https://api.bitbucket.org/2.0/repositories/minebenchapp/minebench-client/downloads/latest.json"
+          - |
+            curl --fail-with-body \
+              --request POST \
+              --header "Authorization: Bearer $BITBUCKET_RELEASE_TOKEN" \
+              --form "files=@release-artifacts/latest.json" \
+              "https://api.bitbucket.org/2.0/repositories/minebenchapp/minebench-client/downloads"
 
 pipelines:
   pull-requests:

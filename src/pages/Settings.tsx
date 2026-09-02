@@ -5,7 +5,7 @@ import { cn } from '../lib/utils';
 import { useMinerStore } from '../store/useMinerStore';
 import { useEnvironment } from '../hooks/useEnvironment';
 import { nativeApi } from '../lib/native-api';
-import { getAppUpdateStatus, getInitialAppUpdateStatus, RELEASES_URL } from '../services/appUpdate';
+import { getAppUpdateStatus, getInitialAppUpdateStatus, installAppUpdate, RELEASES_URL } from '../services/appUpdate';
 import {
   getInitialXmrigVersionInfo,
   getXmrigVersionPresentation,
@@ -14,6 +14,8 @@ import {
 export const Settings = () => {
   const { theme, toggleTheme } = useTheme();
   const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const [installingUpdate, setInstallingUpdate] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<number | null>(null);
   const [updateChecked, setUpdateChecked] = useState(false);
   const [checkingXmrig, setCheckingXmrig] = useState(false);
   const [xmrigVersion, setXmrigVersion] = useState(getInitialXmrigVersionInfo);
@@ -88,8 +90,31 @@ export const Settings = () => {
     setCheckingUpdates(false);
   };
 
-  const handleDownloadUpdate = () => {
-    openExternal(RELEASES_URL);
+  const handleDownloadUpdate = async () => {
+    if (!updateStatus.canInstall) {
+      await openExternal(RELEASES_URL);
+      return;
+    }
+
+    setInstallingUpdate(true);
+    setUpdateProgress(0);
+    let downloaded = 0;
+    let total = 0;
+    try {
+      await installAppUpdate((event) => {
+        if (event.event === 'Started') total = event.data.contentLength || 0;
+        if (event.event === 'Progress') downloaded += event.data.chunkLength;
+        if (event.event === 'Finished') setUpdateProgress(100);
+        else if (total > 0) setUpdateProgress(Math.min(99, Math.round((downloaded / total) * 100)));
+      });
+    } catch (err) {
+      setUpdateStatus((current) => ({
+        ...current,
+        error: err instanceof Error ? err.message : 'Failed to install update',
+      }));
+      setInstallingUpdate(false);
+      setUpdateProgress(null);
+    }
   };
 
   const handleXmrigUpdate = () => {
@@ -173,10 +198,10 @@ export const Settings = () => {
               <span className="font-mono text-sm font-bold text-yellow-400">v{updateStatus.currentVersion}</span>
             </div>
             <p className={cn("mt-2 min-h-4", subLabelClass)}>
-              {updateStatus.error
-                ? 'Latest-version check unavailable'
-                : updateStatus.updateAvailable
+              {updateStatus.updateAvailable
                   ? `v${updateStatus.latestVersion} available`
+                : updateStatus.error
+                  ? 'Latest-version check unavailable'
                   : updateChecked
                     ? 'Latest installed'
                     : 'Ready to check'}
@@ -201,10 +226,15 @@ export const Settings = () => {
                 <button
                   type="button"
                   onClick={handleDownloadUpdate}
+                  disabled={installingUpdate}
                   className="inline-flex items-center gap-2 rounded bg-yellow-400 px-3 py-2 text-xs font-bold text-zinc-950 transition-colors hover:bg-yellow-300"
                 >
-                  <Download size={14} />
-                  Get v{updateStatus.latestVersion}
+                  <Download size={14} className={installingUpdate ? 'animate-pulse' : ''} />
+                  {installingUpdate
+                    ? `Updating${updateProgress !== null ? ` ${updateProgress}%` : '…'}`
+                    : updateStatus.canInstall
+                      ? `Install v${updateStatus.latestVersion}`
+                      : `Get v${updateStatus.latestVersion}`}
                 </button>
               )}
             </div>

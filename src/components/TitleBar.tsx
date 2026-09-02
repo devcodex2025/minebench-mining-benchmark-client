@@ -3,11 +3,12 @@ import { Minus, RefreshCw, Square, X } from './icons';
 import { cn } from '../lib/utils';
 import { useTheme } from '../contexts/ThemeContext';
 import { nativeApi } from '../lib/native-api';
-import { getAppUpdateStatus, getInitialAppUpdateStatus, RELEASES_URL } from '../services/appUpdate';
+import { getAppUpdateStatus, getInitialAppUpdateStatus, installAppUpdate, RELEASES_URL } from '../services/appUpdate';
 
 export const TitleBar: React.FC = () => {
   const { theme } = useTheme();
   const [updateStatus, setUpdateStatus] = useState(getInitialAppUpdateStatus);
+  const [installingUpdate, setInstallingUpdate] = useState(false);
 
   const handleMinimize = () => {
     nativeApi.invoke('window_minimize').catch((err) => {
@@ -27,7 +28,19 @@ export const TitleBar: React.FC = () => {
     });
   };
 
-  const handleOpenUpdate = () => {
+  const handleOpenUpdate = async () => {
+    if (installingUpdate) return;
+    if (updateStatus.canInstall) {
+      try {
+        setInstallingUpdate(true);
+        await installAppUpdate();
+        return;
+      } catch (err) {
+        console.warn('[TitleBar] automatic update failed, opening downloads:', err);
+        setInstallingUpdate(false);
+      }
+    }
+
     nativeApi.openExternal(RELEASES_URL).catch((err) => {
       console.warn('[TitleBar] open update page failed, falling back to window.open:', err);
       window.open(RELEASES_URL, '_blank', 'noopener,noreferrer');
@@ -67,7 +80,7 @@ export const TitleBar: React.FC = () => {
             style={{ WebkitAppRegion: 'no-drag' } as any}
           >
             <RefreshCw size={12} />
-            Update
+            {installingUpdate ? 'Updating…' : 'Update'}
           </button>
         )}
       </div>

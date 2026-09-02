@@ -1,4 +1,4 @@
-import { cp, mkdir, readFile, readdir } from 'node:fs/promises';
+import { access, cp, mkdir, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 
@@ -14,7 +14,7 @@ if (!expectedExtensions[platform]) {
 
 const packageJson = JSON.parse(await readFile('package.json', 'utf8'));
 const version = String(packageJson.version).replace(/^v/i, '');
-const targetDir = path.resolve('src-tauri/target');
+const targetDir = path.resolve(process.env.CARGO_TARGET_DIR || 'src-tauri/target');
 const outputDir = path.resolve('release-artifacts');
 
 const findBundleFiles = async (directory) => {
@@ -51,4 +51,12 @@ for (const extension of expectedExtensions[platform]) {
   const destination = path.join(outputDir, outputNames[extension]);
   await cp(source, destination);
   console.log(`${path.relative(process.cwd(), source)} -> ${path.relative(process.cwd(), destination)}`);
+
+  if (extension === '.exe' || extension === '.AppImage') {
+    const signatureSource = `${source}.sig`;
+    await access(signatureSource);
+    const signatureDestination = `${destination}.sig`;
+    await cp(signatureSource, signatureDestination);
+    console.log(`${path.relative(process.cwd(), signatureSource)} -> ${path.relative(process.cwd(), signatureDestination)}`);
+  }
 }

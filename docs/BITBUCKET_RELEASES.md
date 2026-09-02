@@ -10,6 +10,9 @@ repository Downloads section used by MineBench-UI.
 1. Enable Bitbucket Pipelines for `minebench-client`.
 2. Add a secured repository variable named `BITBUCKET_RELEASE_TOKEN`. Use a
    repository or workspace access token with write access to this repository.
+3. Add the Tauri private signing key as a secured repository variable named
+   `TAURI_SIGNING_PRIVATE_KEY`. The matching public key is committed in
+   `src-tauri/tauri.conf.json`; never commit the private key.
 
 No self-hosted runner is required. Bitbucket Cloud only provides Linux Docker
 build environments, so it cannot create a macOS DMG. Tauri also requires
@@ -21,6 +24,9 @@ The pipeline publishes these stable filenames:
 - `MineBench.Client_<version>_amd64.AppImage`
 - `MineBench.Client_<version>_amd64.deb`
 - `MineBench.Client-<version>-1.x86_64.rpm`
+- `MineBench.Client_<version>_x64-setup.exe.sig`
+- `MineBench.Client_<version>_amd64.AppImage.sig`
+- `latest.json`
 
 Create and push a release tag only after the package version is committed:
 

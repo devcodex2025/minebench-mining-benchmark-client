@@ -157,13 +157,10 @@ const Mining: React.FC = () => {
 
     const statsIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const timeIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const poolStatsIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const ratesIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const rewardReportIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const pingIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const statsInFlightRef = useRef(false);
     const poolStatsInFlightRef = useRef(false);
-    const ratesInFlightRef = useRef(false);
     const rewardReportInFlightRef = useRef(false);
     const lastRewardReportAtRef = useRef(0);
     const lastTimerPersistAtRef = useRef(0);
@@ -244,7 +241,6 @@ const Mining: React.FC = () => {
     // Get global pool stats from store
     const poolHashrateTotal = useMinerStore((state) => state.poolHashrateTotal);
     const poolMinersCount = useMinerStore((state) => state.poolMinersCount);
-    const setExchangeRates = useMinerStore((state) => state.setExchangeRates);
 
     const poolStatusLabel = status === 'starting'
         ? 'Connecting...'
@@ -458,8 +454,6 @@ const Mining: React.FC = () => {
         return () => {
             if (statsIntervalRef.current) clearInterval(statsIntervalRef.current);
             if (timeIntervalRef.current) clearInterval(timeIntervalRef.current);
-            if (poolStatsIntervalRef.current) clearInterval(poolStatsIntervalRef.current);
-            if (ratesIntervalRef.current) clearInterval(ratesIntervalRef.current);
             if (rewardReportIntervalRef.current) clearInterval(rewardReportIntervalRef.current);
             if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
         };
@@ -520,31 +514,26 @@ const Mining: React.FC = () => {
     // When a single proxy is configured, use its individual stratum snapshot so stats
     // don't flicker between pools as each proxy pushes updates at different times.
     useEffect(() => {
+        const applyPoolStats = (stats: any) => {
+            const newStratum: P2PoolStratumSnapshot | null = stats.stratum || null;
+            const incomingVerifiedShares = Number(stats.verifiedShares || 0);
+            const detection = detectNewShare(incomingVerifiedShares, {
+                lastShareCount: lastShareCountRef.current
+            });
+            lastShareCountRef.current = detection.newLastShareCount;
+            if (detection.shouldAnimate) setShowShareAnimation(true);
+
+            setStratumStats(newStratum);
+            setVerifiedSharesCount(incomingVerifiedShares);
+            setGlobalPoolStats(Number(stats.poolHashrate || 0), Number(stats.miners || 0), 0);
+        };
+
         const fetchPoolStats = async () => {
             if (poolStatsInFlightRef.current) return;
             poolStatsInFlightRef.current = true;
             try {
                 const stats = await backendJson('/api/pool/stats');
-
-                // stats.stratum is now always the XMRig-proxy-only aggregate from the backend.
-                const newStratum: P2PoolStratumSnapshot | null = stats.stratum || null;
-
-                // detectNewShare handles the first-observation sentinel (-1) correctly:
-                // - First call: initialises the reference without animating so that shares
-                //   found in a previous session don't trigger a spurious animation.
-                // - Subsequent calls: animate only when the count strictly increases.
-                const incomingVerifiedShares = Number(stats.verifiedShares || 0);
-                const detection = detectNewShare(incomingVerifiedShares, {
-                    lastShareCount: lastShareCountRef.current
-                });
-                lastShareCountRef.current = detection.newLastShareCount;
-                if (detection.shouldAnimate) {
-                    setShowShareAnimation(true);
-                }
-
-                setStratumStats(newStratum);
-                setVerifiedSharesCount(Number(stats.verifiedShares || 0));
-                setGlobalPoolStats(Number(stats.poolHashrate || 0), Number(stats.miners || 0), 0);
+                applyPoolStats(stats);
             } catch (err) {
                 console.warn('[Mining] Failed to fetch pool stats:', err);
             } finally {
@@ -552,10 +541,14 @@ const Mining: React.FC = () => {
             }
         };
 
-        fetchPoolStats();
-        poolStatsIntervalRef.current = setInterval(fetchPoolStats, 30000);
+        const handlePoolStats = (event: Event) => {
+            applyPoolStats((event as CustomEvent).detail || {});
+        };
+
+        window.addEventListener('minebench:pool-stats', handlePoolStats);
+        void fetchPoolStats();
         return () => {
-            if (poolStatsIntervalRef.current) clearInterval(poolStatsIntervalRef.current);
+            window.removeEventListener('minebench:pool-stats', handlePoolStats);
         };
     }, [setGlobalPoolStats]);
 
@@ -595,59 +588,6 @@ const Mining: React.FC = () => {
                 timeIntervalRef.current = null;
             }
         };
-    }, [status]);
-
-    // Fetch rates from backend (XMR USD, BMT USD, XMR->BMT)
-    useEffect(() => {
-        const fetchRates = async () => {
-            if (ratesInFlightRef.current) return;
-            ratesInFlightRef.current = true;
-            try {
-                const data = await backendJson('/api/rates/current');
-
-                const toNumber = (value: any) => {
-                    if (value === null || value === undefined) return 0;
-                    const num = Number(String(value).replace(/,/g, ''));
-                    return Number.isFinite(num) ? num : 0;
-                };
-
-                const nextXmrUsd = toNumber(
-                    data?.xmr_usd ?? data?.xmrUsd ?? data?.xmr_usd_price ?? data?.xmr_price_usd
-                );
-                const nextBmtUsd = toNumber(
-                    data?.bmt_usd ?? data?.bmtUsd ?? data?.bmt_usd_price ?? data?.bmt_price_usd
-                );
-                const nextRate = toNumber(
-                    data?.rate_xmr_bmt ?? data?.rateXmrBmt ?? data?.xmr_bmt_rate
-                );
-
-                // Save to store for Layout component
-                setExchangeRates(
-                    Number.isFinite(nextXmrUsd) ? nextXmrUsd : 0,
-                    Number.isFinite(nextBmtUsd) ? nextBmtUsd : 0,
-                    Number.isFinite(nextRate) ? nextRate : 0
-                );
-            } catch (err) {
-                console.warn('[Mining] Failed to fetch rates from backend:', err);
-                setExchangeRates(0, 0, 0);
-            } finally {
-                ratesInFlightRef.current = false;
-            }
-        };
-
-        // Fetch immediately on mount
-        fetchRates();
-
-        // Then fetch periodically when running
-        if (status === 'running' || status === 'paused') {
-            ratesIntervalRef.current = setInterval(fetchRates, 60000); // Update every 60s
-            return () => {
-                if (ratesIntervalRef.current) {
-                    clearInterval(ratesIntervalRef.current);
-                    ratesIntervalRef.current = null;
-                }
-            };
-        }
     }, [status]);
 
     useEffect(() => {
