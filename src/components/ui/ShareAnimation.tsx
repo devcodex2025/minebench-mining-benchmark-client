@@ -15,7 +15,7 @@ const SHARE_ASCII = [
     " ____) | |  | / ____ \\| | \\ \\| |____ ",
     "|_____/|_|  |_/_/    \\_\\_|  \\_\\______|",
     "                                     ",
-    "         + SHARE FOUND +             "
+    "      + P2POOL SHARE FOUND +         "
 ];
 
 export const ShareAnimation: React.FC<ASCIIAnimationProps> = ({ onComplete, onClose, theme }) => {
