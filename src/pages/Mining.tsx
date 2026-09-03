@@ -150,7 +150,7 @@ const Mining: React.FC = () => {
 
     const [showHugePagesInfo, setShowHugePagesInfo] = useState(false);
     const [stratumStats, setStratumStats] = useState<P2PoolStratumSnapshot | null>(null);
-    const [verifiedSharesCount, setVerifiedSharesCount] = useState(0);
+    const [p2poolSharesFoundCount, setP2PoolSharesFoundCount] = useState(0);
     const [showShareAnimation, setShowShareAnimation] = useState(false);
 
     const [poolPings, setPoolPings] = useState<Record<string, { avg: number; min: number; max: number; jitter: number } | null>>({});
@@ -167,9 +167,8 @@ const Mining: React.FC = () => {
     const rewardReportInFlightRef = useRef(false);
     const lastRewardReportAtRef = useRef(0);
     const lastTimerPersistAtRef = useRef(0);
-    // Tracks the session maximum of shares_found so the animation fires only on a genuine new share,
-    // not when the stat source switches between aggregate and per-pool snapshots.
-    const lastShareCountRef = useRef<number>(-1);
+    // Tracks the latest native P2Pool share event so the pool-wide animation fires once.
+    const lastP2PoolShareEventRef = useRef<number>(-1);
     const rewardReportSeqRef = useRef(0);
     const miningStartedAtRef = useRef<number | null>(null);
     const pausedElapsedRef = useRef(0);
@@ -533,17 +532,18 @@ const Mining: React.FC = () => {
                 // - First call: initialises the reference without animating so that shares
                 //   found in a previous session don't trigger a spurious animation.
                 // - Subsequent calls: animate only when the count strictly increases.
-                const incomingVerifiedShares = Number(stats.verifiedShares || 0);
-                const detection = detectNewShare(incomingVerifiedShares, {
-                    lastShareCount: lastShareCountRef.current
+                const incomingP2PoolSharesFound = Number(stats.p2poolSharesFound ?? stats.verifiedShares ?? 0);
+                const shareEventMarker = Number(stats.p2poolLastShareFoundAt || incomingP2PoolSharesFound);
+                const detection = detectNewShare(shareEventMarker, {
+                    lastShareCount: lastP2PoolShareEventRef.current
                 });
-                lastShareCountRef.current = detection.newLastShareCount;
+                lastP2PoolShareEventRef.current = detection.newLastShareCount;
                 if (detection.shouldAnimate) {
                     setShowShareAnimation(true);
                 }
 
                 setStratumStats(newStratum);
-                setVerifiedSharesCount(Number(stats.verifiedShares || 0));
+                setP2PoolSharesFoundCount(incomingP2PoolSharesFound);
                 setGlobalPoolStats(Number(stats.poolHashrate || 0), Number(stats.miners || 0), 0);
             } catch (err) {
                 console.warn('[Mining] Failed to fetch pool stats:', err);
@@ -1183,7 +1183,7 @@ const Mining: React.FC = () => {
                                 <StatCard label="Pool Stratum Shares" value={`${stratumStats.total_stratum_shares || 0}`} icon={<Zap size={12} />} tone="teal" theme={theme} />
                                 <StatCard label="Failed Shares" value={`${stratumStats.shares_failed || 0}`} icon={<Flame size={12} />} tone="rose" theme={theme} />
                                 <StatCard label="Total Hashes" value={(stratumStats.total_hashes || 0).toLocaleString()} icon={<Gauge size={12} />} tone="amber" theme={theme} />
-                                <StatCard label="Verified Shares" value={`${verifiedSharesCount}`} icon={<Award size={12} />} tone="yellow" theme={theme} />
+                                <StatCard label="P2Pool Shares Found" value={`${p2poolSharesFoundCount}`} icon={<Award size={12} />} tone="yellow" theme={theme} />
                             </div>
                         )}
                         {stratumStats?.updated_at && (
