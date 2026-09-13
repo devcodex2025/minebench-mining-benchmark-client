@@ -13,6 +13,8 @@ import { nativeApi } from '../lib/native-api';
 import { classifyMinerOutput, shouldMarkMinerExited } from '../lib/miner-output';
 import { backendJson } from '../lib/backend-api';
 import { detectNewShare } from '../lib/share-detection';
+import { getMinerMsrStatusFromOutput } from '../lib/miner-msr';
+import { MsrStatus } from '../components/MsrStatus';
 
 const getErrorMessage = (err: any) => {
     if (!err) return 'Unknown error';
@@ -109,6 +111,9 @@ const Mining: React.FC = () => {
     const mode = useMinerStore((state) => state.mode);
     const setStatus = useMinerStore((state) => state.setStatus);
     const addLog = useMinerStore((state) => state.addLog);
+    const minerMsrStatus = useMinerStore((state) => state.minerMsrStatus);
+    const setMinerMsrStatus = useMinerStore((state) => state.setMinerMsrStatus);
+    const resetMinerMsrStatus = useMinerStore((state) => state.resetMinerMsrStatus);
     const deviceType = useMinerStore((state) => state.deviceType);
     const setDeviceType = useMinerStore((state) => state.setDeviceType);
     const wallet = useMinerStore((state) => state.wallet);
@@ -373,6 +378,8 @@ const Mining: React.FC = () => {
             const handleMinerOutput = (msg: string) => {
                 const message = String(msg || '').trim();
                 if (!message) return;
+                const msrStatus = getMinerMsrStatusFromOutput(message);
+                if (msrStatus) setMinerMsrStatus(msrStatus);
                 const kind = classifyMinerOutput(message);
                 if (kind === 'auth-error') {
                     setMiningStatus('error');
@@ -420,12 +427,14 @@ const Mining: React.FC = () => {
                     void nativeApi.miner.getStatus()
                         .then(({ running }) => {
                             if (shouldMarkMinerExited(statusRef.current, running)) {
+                                resetMinerMsrStatus();
                                 setMiningStatus('error');
                                 addLog('Miner process exited unexpectedly');
                             }
                         })
                         .catch(() => {
                             if (shouldMarkMinerExited(statusRef.current, false)) {
+                                resetMinerMsrStatus();
                                 setMiningStatus('error');
                                 addLog('Miner process exited unexpectedly');
                             }
@@ -447,7 +456,7 @@ const Mining: React.FC = () => {
             if (unlistenError) unlistenError();
             if (unlistenExit) unlistenExit();
         };
-    }, [setMiningStatus, addLog]);
+    }, [setMiningStatus, addLog, setMinerMsrStatus, resetMinerMsrStatus]);
 
     useEffect(() => {
         return () => {
@@ -759,6 +768,7 @@ const Mining: React.FC = () => {
 
         miningActionInFlightRef.current = true;
         cancelStartRequestedRef.current = false;
+        resetMinerMsrStatus();
         useMinerStore.getState().setMode('mining');
         setMiningStatus('starting');
 
@@ -835,6 +845,7 @@ const Mining: React.FC = () => {
             console.log("start-mining command invoked.");
             if (cancelStartRequestedRef.current) {
                 await nativeApi.miner.stopMining();
+                resetMinerMsrStatus();
                 setMiningStatus('completed');
                 addLog('Mining stopped');
             } else {
@@ -842,6 +853,7 @@ const Mining: React.FC = () => {
             }
         } catch (err: any) {
             console.error("Failed to start-mining:", err);
+            resetMinerMsrStatus();
             setMiningStatus('error');
             addLog(`Failed to start mining: ${getErrorMessage(err)}`);
         } finally {
@@ -868,6 +880,7 @@ const Mining: React.FC = () => {
         miningStartedAtRef.current = null;
         persistMiningTimer(null, elapsedTime);
         setMiningStatus('stopping');
+        resetMinerMsrStatus();
         try {
             const { logs: storeLogs } = useMinerStore.getState();
             await nativeApi.miner.saveLogs({
@@ -1078,6 +1091,7 @@ const Mining: React.FC = () => {
                             <MetricCard label="Peak" value={formatHashrate(peakHashrate)} icon={<TrendingUp size={14} />} color="yellow" theme={theme} />
                             <MetricCard label="Time" value={formatTime(elapsedTime)} icon={<Clock size={14} />} color="emerald" theme={theme} />
                         </div>
+                        <MsrStatus status={minerMsrStatus} theme={theme} />
                         <div className="grid grid-cols-2 gap-2">
                             {!walletValid && status === 'idle' && (
                                 <div className={cn("col-span-2 p-3 rounded-lg text-xs text-center border", theme === 'light' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-red-500/10 border-red-500/20 text-red-400')}>

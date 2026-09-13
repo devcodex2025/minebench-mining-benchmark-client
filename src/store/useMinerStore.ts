@@ -3,6 +3,7 @@ import { getEnvironmentConfig } from '../config/environment';
 import { nativeApi } from '../lib/native-api';
 import { backendJson } from '../lib/backend-api';
 import { normalizeBackendPoolEndpoints, type PoolEndpoint } from './poolEndpoints';
+import type { MinerMsrStatus } from '../lib/miner-msr';
 
 export type AppMode = 'benchmark' | 'mining';
 export type DeviceType = 'cpu' | 'gpu';
@@ -37,6 +38,7 @@ interface MiningState {
     currentTemp: number | null;
     currentPower: number | null;
     lastRewardUpdatedAt: number | null;
+    minerMsrStatus: MinerMsrStatus;
 
     // Rewards ($BMT)
     p2poolBalance: number; // XMR balance in P2Pool
@@ -109,6 +111,8 @@ interface MiningState {
     setPremiumXmrWallet: (wallet: string | null) => void;
     setP2PoolBalance: (balance: number) => void;
     setManualPoolSelection: (manual: boolean) => void;
+    setMinerMsrStatus: (status: MinerMsrStatus) => void;
+    resetMinerMsrStatus: () => void;
     addLog: (msg: string) => void;
     updateStats: (hashrate: number, temp: number | null | undefined, power?: number) => void;
     updatePoolStatus: (id: string, status: Partial<MiningState['pools'][string]>) => void;
@@ -193,6 +197,7 @@ export const useMinerStore = create<MiningState>((set, get) => ({
     currentTemp: null,
     currentPower: null,
     lastRewardUpdatedAt: null,
+    minerMsrStatus: 'unknown',
 
     dbTotalBMT: 0,
     p2poolBalance: 0,
@@ -283,6 +288,8 @@ export const useMinerStore = create<MiningState>((set, get) => ({
     setPremiumXmrWallet: (premiumXmrWallet) => set({ premiumXmrWallet }),
     setP2PoolBalance: (p2poolBalance) => set({ p2poolBalance }),
     setManualPoolSelection: (manualPoolSelection) => set({ manualPoolSelection }),
+    setMinerMsrStatus: (minerMsrStatus) => set({ minerMsrStatus }),
+    resetMinerMsrStatus: () => set({ minerMsrStatus: 'unknown' }),
     addLog: (msg) => set((state) => ({
         logs: [...state.logs.slice(-100), `${new Date().toLocaleTimeString()} - ${msg}`]
     })),
