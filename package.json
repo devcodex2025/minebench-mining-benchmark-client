@@ -26,7 +26,7 @@
     "prepare:linux-appimage": "node ./scripts/prepare-linuxdeploy-gtk-plugin.cjs",
     "dist:win": "npm run tauri:build -- --target x86_64-pc-windows-msvc",
     "dist:mac": "npm run build:prod && tauri build --target universal-apple-darwin",
-    "dist:linux": "npm run build:prod && npm run prepare:linux-appimage && tauri build --target x86_64-unknown-linux-gnu",
+    "dist:linux": "npm run prepare:linux-appimage && tauri build --target x86_64-unknown-linux-gnu",
     "release:patch": "npm version patch && git push && git push --tags",
     "release:minor": "npm version minor && git push && git push --tags",
     "release:major": "npm version major && git push && git push --tags"
