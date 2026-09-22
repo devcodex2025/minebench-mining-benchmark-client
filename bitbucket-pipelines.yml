@@ -35,6 +35,7 @@ definitions:
           - touch src-tauri/binaries/minebench-sensor-broker-x86_64-unknown-linux-gnu
           - cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin minebench-sensor-broker --target x86_64-unknown-linux-gnu
           - cp src-tauri/target/x86_64-unknown-linux-gnu/release/minebench-sensor-broker src-tauri/binaries/minebench-sensor-broker-x86_64-unknown-linux-gnu
+          - chmod +x src-tauri/binaries/minebench-sensor-broker-x86_64-unknown-linux-gnu
           - npm run dist:linux
           - node scripts/collect-release-artifacts.mjs linux
         artifacts:
