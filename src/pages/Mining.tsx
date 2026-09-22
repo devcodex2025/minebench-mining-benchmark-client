@@ -115,13 +115,9 @@ const Mining: React.FC = () => {
     const setMinerMsrStatus = useMinerStore((state) => state.setMinerMsrStatus);
     const resetMinerMsrStatus = useMinerStore((state) => state.resetMinerMsrStatus);
     const deviceType = useMinerStore((state) => state.deviceType);
-    const setDeviceType = useMinerStore((state) => state.setDeviceType);
     const wallet = useMinerStore((state) => state.wallet);
-    const setWallet = useMinerStore((state) => state.setWallet);
     const workerName = useMinerStore((state) => state.workerName);
-    const setWorkerName = useMinerStore((state) => state.setWorkerName);
     const donateLevel = useMinerStore((state) => state.donateLevel);
-    const setDonateLevel = useMinerStore((state) => state.setDonateLevel);
     const poolUrl = useMinerStore((state) => state.poolUrl);
     const setPoolUrl = useMinerStore((state) => state.setPoolUrl);
     const manualPoolSelection = useMinerStore((state) => state.manualPoolSelection);
@@ -137,7 +133,6 @@ const Mining: React.FC = () => {
     const saveSettings = useMinerStore((state) => state.saveSettings);
     const fetchPublicConfig = useMinerStore((state) => state.fetchPublicConfig);
     const isPremium = useMinerStore((state) => state.isPremium);
-    const premiumXmrWallet = useMinerStore((state) => state.premiumXmrWallet);
 
     const threads = useMinerStore((state) => state.threads);
     const setThreads = useMinerStore((state) => state.setThreads);
@@ -176,7 +171,7 @@ const Mining: React.FC = () => {
     const pausedElapsedRef = useRef(0);
     const [elapsedTime, setElapsedTime] = useState(0);
     const [peakHashrate, setPeakHashrate] = useState(0);
-    const [poolNetworkHashrate, setPoolNetworkHashrate] = useState(300000000000); // Default Monero difficulty
+    const [poolNetworkHashrate] = useState(300000000000); // Default Monero difficulty
     const [xmrigConnection, setXmrigConnection] = useState<{ pool: string; ping: number; uptime: number } | null>(null);
     const statusRef = useRef(status);
     const miningActionInFlightRef = useRef(false);
@@ -683,7 +678,6 @@ const Mining: React.FC = () => {
             }
 
             let data = null;
-            let successUrl = null;
 
             for (const actualUrl of endpoints) {
                 try {
@@ -694,7 +688,6 @@ const Mining: React.FC = () => {
 
                     if (res && res.ok) {
                         data = await res.json();
-                        successUrl = actualUrl;
                         if (!window.__apiConnected || window.__apiConnected !== actualUrl) {
                             window.__apiConnected = actualUrl;
                         }

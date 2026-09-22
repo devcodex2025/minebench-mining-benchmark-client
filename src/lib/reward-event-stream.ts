@@ -41,7 +41,6 @@ export const subscribeToRewardEvents = (
     if (stopped || !token) return;
 
     controller = new AbortController();
-    let permanentFailure = false;
     try {
       const response = await fetch(getEventStreamUrl(), {
         method: 'GET',
@@ -54,7 +53,8 @@ export const subscribeToRewardEvents = (
       });
 
       if ([401, 403, 404].includes(response.status)) {
-        permanentFailure = true;
+        // Auth can be refreshed without remounting the subscriber. Retry so
+        // the next connection reads the replacement token from authStorage.
         return;
       }
       if (!response.ok || !response.body) throw new Error(`Reward event stream failed (${response.status})`);
@@ -100,7 +100,7 @@ export const subscribeToRewardEvents = (
       }
     } finally {
       controller = null;
-      if (!permanentFailure) scheduleReconnect();
+      scheduleReconnect();
     }
   };
 

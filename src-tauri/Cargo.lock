@@ -99,6 +99,7 @@ dependencies = [
  "tower-http",
  "urlencoding",
  "uuid",
+ "winreg 0.10.1",
 ]
 
 [[package]]

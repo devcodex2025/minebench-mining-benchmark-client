@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sysinfo::{System, Components};
+use sysinfo::System;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
 #[cfg(target_os = "windows")]
@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
+use crate::cpu_telemetry;
 use crate::miner::{self, MinerState};
 
 #[cfg(target_os = "windows")]
@@ -27,18 +28,6 @@ fn default_thread_count() -> u16 {
     sys.refresh_cpu_usage();
     let total_cores = sys.cpus().len().max(1);
     ((total_cores as u16) / 2).max(1)
-}
-
-#[cfg(target_os = "windows")]
-fn hidden_powershell_output(script: &str) -> Option<std::process::Output> {
-    std::process::Command::new("powershell")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", script])
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .ok()
 }
 
 #[derive(Serialize)]
@@ -228,6 +217,8 @@ pub fn get_cpu_info() -> CpuInfo {
 
 #[derive(Serialize)]
 pub struct SystemStats {
+    os_name: &'static str,
+    os_arch: &'static str,
     #[serde(rename = "cpuUsage")]
     cpu_usage: f32,
     #[serde(rename = "ramUsage")]
@@ -243,6 +234,8 @@ pub fn get_system_stats() -> SystemStats {
     sys.refresh_memory();
 
     SystemStats {
+        os_name: std::env::consts::OS,
+        os_arch: std::env::consts::ARCH,
         cpu_usage: sys.global_cpu_usage(),
         ram_usage: sys.used_memory(),
         ram_total: sys.total_memory(),
@@ -667,7 +660,7 @@ pub async fn get_latest_benchmark(device_type: String) -> Result<serde_json::Val
 }
 
 #[tauri::command]
-pub async fn submit_benchmark_result(record: serde_json::Value) -> Result<serde_json::Value, String> {
+pub async fn submit_benchmark_result(record: serde_json::Value, token: String) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -675,6 +668,7 @@ pub async fn submit_benchmark_result(record: serde_json::Value) -> Result<serde_
 
     let res = client
         .post("https://minebench.cloud/api/benchmarks")
+        .bearer_auth(token)
         .json(&record)
         .send()
         .await
@@ -790,235 +784,140 @@ fn validate_rpc_port(port: u16) -> Result<(), String> {
     }
 }
 
+/// Normalized CPU telemetry used by Stress Test mode.
+///
+/// Every optional metric is nullable so the UI can distinguish "unsupported"
+/// from a real `0`. Collection happens off the async runtime and individual
+/// provider failures never blank out the remaining metrics.
+#[tauri::command]
+pub async fn get_cpu_telemetry() -> Result<cpu_telemetry::CpuTelemetry, String> {
+    let state = cpu_telemetry::collector();
+    tokio::task::spawn_blocking(move || {
+        let mut guard = state.lock().unwrap_or_else(|error| error.into_inner());
+        cpu_telemetry::collect(&mut guard)
+    })
+    .await
+    .map_err(|error| format!("CPU telemetry task failed: {error}"))
+}
+
+/// Diagnostic dump explaining why a sensor is missing on this machine.
+#[tauri::command]
+pub async fn get_cpu_telemetry_debug() -> Result<cpu_telemetry::CpuTelemetryDebug, String> {
+    let state = cpu_telemetry::collector();
+    tokio::task::spawn_blocking(move || {
+        let mut guard = state.lock().unwrap_or_else(|error| error.into_inner());
+        cpu_telemetry::collect_debug(&mut guard)
+    })
+    .await
+    .map_err(|error| format!("CPU telemetry diagnostics failed: {error}"))
+}
+
+/// Legacy temperature probe, retained for Benchmark mode. Backed by the same
+/// provider cache as [`get_cpu_telemetry`], so it no longer spawns a PowerShell
+/// process on every call.
 #[tauri::command]
 pub async fn get_cpu_temp() -> Result<serde_json::Value, String> {
-    tokio::task::spawn_blocking(collect_cpu_temp)
-        .await
-        .map_err(|error| format!("CPU temperature task failed: {error}"))?
-}
-
-fn collect_cpu_temp() -> Result<serde_json::Value, String> {
-    let components = Components::new_with_refreshed_list();
-
-    // Look for CPU temperature component
-    for component in components.iter() {
-        let label = component.label().to_lowercase();
-        if label.contains("cpu") || label.contains("package") || label.contains("core") || label.contains("thermal") {
-            return Ok(serde_json::json!({
-                "success": true,
-                "temp": component.temperature()
-            }));
-        }
-    }
-
-    if let Some(temp) = read_windows_acpi_temperature_celsius() {
-        return Ok(serde_json::json!({
+    let telemetry = get_cpu_telemetry().await?;
+    Ok(match telemetry.temperature_c {
+        Some(temp) => serde_json::json!({
             "success": true,
             "temp": temp,
-            "source": "windows-acpi-thermal-zone"
-        }));
-    }
-
-    Ok(serde_json::json!({
-        "success": false,
-        "temp": null,
-        "message": "CPU temperature component not found"
-    }))
+            "source": telemetry.temperature_source,
+            "reliable": telemetry.temperature_reliable
+        }),
+        None => serde_json::json!({
+            "success": false,
+            "temp": null,
+            "source": telemetry.temperature_source,
+            "message": "CPU temperature unavailable on this device",
+            "provider": telemetry.provider
+        }),
+    })
 }
 
+/// Legacy power probe. Prefers a hardware sensor and otherwise reports a
+/// clearly flagged TDP estimate.
 #[tauri::command]
 pub async fn get_cpu_power() -> Result<serde_json::Value, String> {
-    tokio::task::spawn_blocking(collect_cpu_power)
-        .await
-        .map_err(|error| format!("CPU power task failed: {error}"))?
-}
-
-fn collect_cpu_power() -> Result<serde_json::Value, String> {
-    if let Some(power) = read_linux_rapl_power_watts() {
-        return Ok(serde_json::json!({
+    let telemetry = get_cpu_telemetry().await?;
+    Ok(match telemetry.package_power_w {
+        Some(power) => serde_json::json!({
             "success": true,
             "power": power,
-            "source": "sensor:linux-rapl",
-            "estimated": false
-        }));
-    }
-
-    if let Some(power) = read_windows_hardware_monitor_power_watts() {
-        return Ok(serde_json::json!({
-            "success": true,
-            "power": power,
-            "source": "sensor:hardware-monitor-wmi",
-            "estimated": false
-        }));
-    }
-
-    if let Some(power) = estimate_cpu_power_watts() {
-        return Ok(serde_json::json!({
-            "success": true,
-            "power": power,
-            "source": "estimated:cpu-utilization-tdp",
-            "estimated": true
-        }));
-    }
-
-    Ok(serde_json::json!({
-        "success": false,
-        "power": null,
-        "message": "CPU power telemetry unavailable"
-    }))
+            "source": telemetry.power_source,
+            "estimated": telemetry.power_is_estimated
+        }),
+        None => serde_json::json!({
+            "success": false,
+            "power": null,
+            "message": "CPU power telemetry unavailable"
+        }),
+    })
 }
 
-fn read_windows_acpi_temperature_celsius() -> Option<f64> {
-    #[cfg(not(target_os = "windows"))]
-    return None;
-
-    #[cfg(target_os = "windows")]
-    {
-        let script = r#"
-try {
-  $zones = Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction Stop |
-    Where-Object { $_.CurrentTemperature -gt 0 }
-  foreach ($zone in $zones) {
-    $c = ($zone.CurrentTemperature / 10) - 273.15
-    if ($c -gt 0 -and $c -lt 125) {
-      [Console]::Out.Write([Math]::Round($c, 2))
-      exit 0
-    }
-  }
-} catch {}
-exit 1
-"#;
-
-        #[cfg(target_os = "windows")]
-        let output = hidden_powershell_output(script);
-        if output.is_none() {
-            return None;
-        }
-        let output = output.unwrap();
-        if !output.status.success() {
-            return None;
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        stdout.trim().parse::<f64>().ok().filter(|value| *value > 0.0 && *value < 125.0)
-    }
+/// Runs the CPU sensor broker diagnostic and reports every link in the chain.
+///
+/// This is what to ask for when temperature is unavailable on a user's machine:
+/// it distinguishes a missing binary, an unregistered task, a refused task, a
+/// stale snapshot and a failed register read, which otherwise all look like
+/// "N/A".
+#[tauri::command]
+pub async fn diagnose_cpu_sensor_broker() -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(|| {
+        let steps = crate::sensor_broker_client::diagnose();
+        let all_ok = steps.iter().all(|step| step.ok);
+        serde_json::json!({
+            "ok": all_ok,
+            "steps": steps,
+        })
+    })
+    .await
+    .map_err(|error| format!("CPU sensor diagnostic failed: {error}"))
 }
 
-fn estimate_cpu_power_watts() -> Option<f64> {
-    let mut sys = System::new_all();
-    sys.refresh_cpu_usage();
-    std::thread::sleep(std::time::Duration::from_millis(250));
-    sys.refresh_cpu_usage();
-
-    let cpus = sys.cpus();
-    if cpus.is_empty() {
-        return None;
-    }
-
-    let usage = sys.global_cpu_usage().clamp(0.0, 100.0) as f64 / 100.0;
-    let brand = cpus.first().map(|cpu| cpu.brand().to_lowercase()).unwrap_or_default();
-    let core_count = cpus.len();
-    let tdp = estimate_cpu_tdp_watts(&brand, core_count);
-    let idle = (tdp * 0.12).max(3.0);
-    let dynamic = (tdp - idle).max(1.0) * usage.powf(1.25);
-    Some((idle + dynamic).max(1.0))
+/// Reports whether the privileged sensor broker can supply CPU telemetry.
+///
+/// The broker reads CPU die temperature through the WHQL-signed PawnIO kernel
+/// driver, which is only reachable from an elevated process. MineBench never
+/// elevates itself: the installer registers a highest-privileges scheduled task
+/// that starts the broker on demand, so the user is not asked for approval.
+#[tauri::command]
+pub fn get_cpu_sensor_broker_status() -> serde_json::Value {
+    serde_json::json!({
+        "supported": cfg!(target_os = "windows"),
+        "taskRegistered": crate::sensor_broker_client::task_registered(),
+        "detail": crate::sensor_broker_client::diagnostic_detail(),
+        "taskName": crate::sensor_broker_client::TASK_NAME,
+    })
 }
 
-fn estimate_cpu_tdp_watts(brand: &str, core_count: usize) -> f64 {
-    let is_mobile = brand.contains("mobile")
-        || brand.contains("laptop")
-        || brand.contains("notebook")
-        || brand.contains("u-")
-        || brand.contains(" u ")
-        || brand.ends_with('u')
-        || brand.contains("p-")
-        || brand.ends_with('p');
-
-    if is_mobile {
-        return if core_count >= 16 { 45.0 } else if core_count >= 8 { 28.0 } else { 15.0 };
+/// Requests a broker reading now, for the diagnostics panel.
+///
+/// Returns the normalized snapshot, or `null` when the task is absent, blocked
+/// by policy, or produced nothing. Absence is a normal state, not an error.
+#[tauri::command]
+pub async fn read_cpu_sensor_broker() -> Result<serde_json::Value, String> {
+    if !cfg!(target_os = "windows") {
+        return Ok(serde_json::json!({ "supported": false, "snapshot": null }));
     }
-
-    if brand.contains("threadripper") || brand.contains("xeon") || brand.contains("epyc") {
-        return 180.0;
-    }
-
-    if brand.contains("ryzen 9") || brand.contains("core(tm) i9") || brand.contains("core i9") {
-        return 125.0;
-    }
-
-    if brand.contains("ryzen 7") || brand.contains("core(tm) i7") || brand.contains("core i7") {
-        return 105.0;
-    }
-
-    if core_count >= 16 {
-        125.0
-    } else if core_count >= 8 {
-        65.0
-    } else {
-        45.0
-    }
-}
-
-fn read_linux_rapl_power_watts() -> Option<f64> {
-    #[cfg(not(target_os = "linux"))]
-    return None;
-
-    #[cfg(target_os = "linux")]
-    {
-        use std::{fs, thread, time::Duration};
-
-        for entry in fs::read_dir("/sys/class/powercap").ok()?.flatten() {
-            let path = entry.path();
-            let energy_path = path.join("energy_uj");
-            let first = fs::read_to_string(&energy_path).ok()?.trim().parse::<f64>().ok()?;
-            thread::sleep(Duration::from_millis(250));
-            let second = fs::read_to_string(&energy_path).ok()?.trim().parse::<f64>().ok()?;
-            if second <= first {
-                continue;
-            }
-
-            return Some(((second - first) / 1_000_000.0) / 0.25);
-        }
-
-        None
-    }
-}
-
-fn read_windows_hardware_monitor_power_watts() -> Option<f64> {
-    #[cfg(not(target_os = "windows"))]
-    return None;
-
-    #[cfg(target_os = "windows")]
-    {
-        let script = r#"
-$namespaces = @('root\LibreHardwareMonitor','root\OpenHardwareMonitor')
-foreach ($ns in $namespaces) {
-  try {
-    $sensor = Get-CimInstance -Namespace $ns -ClassName Sensor -ErrorAction Stop |
-      Where-Object { $_.SensorType -eq 'Power' -and ($_.Name -match 'CPU|Package|Processor') } |
-      Select-Object -First 1
-    if ($sensor -and $sensor.Value -gt 0) {
-      [Console]::Out.Write($sensor.Value)
-      exit 0
-    }
-  } catch {}
-}
-exit 1
-"#;
-
-        #[cfg(target_os = "windows")]
-        let output = hidden_powershell_output(script);
-        if output.is_none() {
-            return None;
-        }
-        let output = output.unwrap();
-        if !output.status.success() {
-            return None;
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        stdout.trim().parse::<f64>().ok().filter(|value| *value > 0.0)
-    }
+    tokio::task::spawn_blocking(|| {
+        let snapshot = crate::sensor_broker_client::request_reading();
+        serde_json::json!({
+            "supported": true,
+            "snapshot": snapshot.map(|snapshot| serde_json::json!({
+                "schema": snapshot.schema,
+                "module": snapshot.module,
+                "vendor": snapshot.vendor,
+                "temperature_c": snapshot.temperature_c,
+                "temperature_source": snapshot.temperature_source,
+                "package_power_w": snapshot.package_power_w,
+                "raw_smn": snapshot.raw_smn,
+                "provider_detail": snapshot.provider_detail,
+            })),
+        })
+    })
+    .await
+    .map_err(|error| format!("CPU sensor broker task failed: {error}"))
 }
 
 #[tauri::command]
@@ -1394,7 +1293,7 @@ fn parse_xmrig_version(output: &str) -> Option<String> {
 fn normalize_version(version: &str) -> Option<String> {
     let version = version
         .trim()
-        .trim_start_matches(['v', 'V']);
+        .trim_start_matches(|character| character == 'v' || character == 'V');
     let valid = !version.is_empty()
         && version
             .split('.')

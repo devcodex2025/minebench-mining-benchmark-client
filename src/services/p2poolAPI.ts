@@ -332,10 +332,10 @@ class P2PoolService {
    * Перевірити чи wallet адреса валідна для Monero
    */
   validateMoneroAddress(address: string): boolean {
-    const moneroPrimaryPattern = /^4[0-9a-zA-Z]{94}$/;
-    const moneroIntegratedPattern = /^8[0-9a-zA-Z]{105}$/;
-
-    return moneroPrimaryPattern.test(address) || moneroIntegratedPattern.test(address);
+    // Mainnet standard/subaddress forms are 95 chars; integrated addresses are
+    // 106 chars. Reject characters outside Monero's base58 alphabet first.
+    if (typeof address !== 'string' || !/^[48][1-9A-HJ-NP-Za-km-z]+$/.test(address)) return false;
+    return address.length === 95 || (address[0] === '4' && address.length === 106);
   }
 
   /**

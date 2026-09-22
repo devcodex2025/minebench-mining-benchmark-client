@@ -8,7 +8,8 @@ definitions:
           - node
         script:
           - npm ci
-          - npm run build
+          - npm run typecheck
+          - npm run build:prod
           - npm test
 
     - step: &release-linux
@@ -24,6 +25,16 @@ definitions:
           - export PATH="$HOME/.cargo/bin:$PATH"
           - test -n "$TAURI_SIGNING_PRIVATE_KEY"
           - npm ci
+          - npm test
+          - npm run typecheck
+          - |
+            node -e 'const v = require("./package.json").version; if (require("./src-tauri/tauri.conf.json").version !== v || (process.env.BITBUCKET_TAG && process.env.BITBUCKET_TAG !== `v${v}`)) throw new Error("Release version mismatch")'
+          - npm run sync:version
+          - npm run build:prod
+          - mkdir -p src-tauri/binaries
+          - touch src-tauri/binaries/minebench-sensor-broker-x86_64-unknown-linux-gnu
+          - cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin minebench-sensor-broker --target x86_64-unknown-linux-gnu
+          - cp src-tauri/target/x86_64-unknown-linux-gnu/release/minebench-sensor-broker src-tauri/binaries/minebench-sensor-broker-x86_64-unknown-linux-gnu
           - npm run dist:linux
           - node scripts/collect-release-artifacts.mjs linux
         artifacts:
@@ -44,7 +55,15 @@ definitions:
           - rustup target add x86_64-pc-windows-msvc
           - cargo install --locked cargo-xwin
           - npm ci
-          - npm run tauri:build -- --bundles nsis --runner cargo-xwin --target x86_64-pc-windows-msvc
+          - |
+            node -e 'const v = require("./package.json").version; if (require("./src-tauri/tauri.conf.json").version !== v || (process.env.BITBUCKET_TAG && process.env.BITBUCKET_TAG !== `v${v}`)) throw new Error("Release version mismatch")'
+          - npm run sync:version
+          - npm run build:prod
+          - mkdir -p src-tauri/binaries
+          - touch src-tauri/binaries/minebench-sensor-broker-x86_64-pc-windows-msvc.exe
+          - cargo xwin build --locked --release --manifest-path src-tauri/Cargo.toml --bin minebench-sensor-broker --target x86_64-pc-windows-msvc
+          - cp src-tauri/target/x86_64-pc-windows-msvc/release/minebench-sensor-broker.exe src-tauri/binaries/minebench-sensor-broker-x86_64-pc-windows-msvc.exe
+          - npx tauri build --bundles nsis --runner cargo-xwin --target x86_64-pc-windows-msvc
           - node scripts/collect-release-artifacts.mjs windows
         artifacts:
           - release-artifacts/**
@@ -55,8 +74,14 @@ definitions:
         script:
           - test -n "$BITBUCKET_RELEASE_TOKEN"
           - test -n "$(find release-artifacts -type f -print -quit)"
+          - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          - export PATH="$HOME/.cargo/bin:$PATH"
+          - cargo run --locked --release --manifest-path scripts/verify-updater-signatures/Cargo.toml --
           - node scripts/generate-updater-manifest.cjs release-artifacts release-artifacts/latest.json
           - |
+            set -eu
+            verify_dir=$(mktemp -d)
+            trap 'rm -rf "$verify_dir"' EXIT
             for file in release-artifacts/*; do
               test "$(basename "$file")" = "latest.json" && continue
               curl --fail-with-body \
@@ -64,18 +89,22 @@ definitions:
                 --header "Authorization: Bearer $BITBUCKET_RELEASE_TOKEN" \
                 --form "files=@${file}" \
                 "https://api.bitbucket.org/2.0/repositories/minebenchapp/minebench-client/downloads"
+              curl --fail --silent --show-error --location \
+                --output "$verify_dir/$(basename "$file")" \
+                "https://bitbucket.org/minebenchapp/minebench-client/downloads/$(basename "$file")"
+              cmp "$file" "$verify_dir/$(basename "$file")"
             done
           - |
-            curl --silent --show-error \
-              --request DELETE \
-              --header "Authorization: Bearer $BITBUCKET_RELEASE_TOKEN" \
-              "https://api.bitbucket.org/2.0/repositories/minebenchapp/minebench-client/downloads/latest.json"
-          - |
+            set -eu
             curl --fail-with-body \
               --request POST \
               --header "Authorization: Bearer $BITBUCKET_RELEASE_TOKEN" \
               --form "files=@release-artifacts/latest.json" \
               "https://api.bitbucket.org/2.0/repositories/minebenchapp/minebench-client/downloads"
+            curl --fail --silent --show-error --location \
+              --output /tmp/published-latest.json \
+              "https://bitbucket.org/minebenchapp/minebench-client/downloads/latest.json?release=$BITBUCKET_COMMIT"
+            cmp release-artifacts/latest.json /tmp/published-latest.json
 
 pipelines:
   pull-requests:

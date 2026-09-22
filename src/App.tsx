@@ -1,5 +1,5 @@
 ﻿import React, { Suspense, lazy, useEffect, useState } from 'react';
-import { MemoryRouter as Router, Routes, Route, useNavigate } from 'react-router-dom';
+import { MemoryRouter as Router, Routes, Route } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import { TitleBar } from './components/TitleBar';
 import BenchmarkPage from './pages/Benchmark';
@@ -10,7 +10,7 @@ import { ThemeProvider } from './contexts/ThemeContext';
 import { useTheme } from './contexts/ThemeContext';
 import { useMinerStore } from './store/useMinerStore';
 import { cn, formatHashrate } from './lib/utils';
-import { Activity, Coins, TrendingUp, AlertTriangle, X } from './components/icons';
+import { Coins, TrendingUp, AlertTriangle, X } from './components/icons';
 import { getEnvironmentConfig } from './config/environment';
 import { useSolanaAuth, SolanaAuthService } from './services/solanaAuth';
 import { ClaimRewardsModal } from './components/ClaimRewardsModal';
@@ -30,7 +30,7 @@ const BackendSyncMonitor = () => {
 
     useEffect(() => {
         let cancelled = false;
-        let syncTimer: ReturnType<typeof window.setTimeout> | null = null;
+        let syncTimer: number | null = null;
 
         const fetchPoolStats = async () => {
             try {
@@ -64,14 +64,10 @@ const BackendSyncMonitor = () => {
         const fetchRates = async () => {
             try {
                 const data = await backendJson('/api/rates/current');
-                const toNumber = (value: unknown) => {
-                    const parsed = Number(String(value ?? 0).replace(/,/g, ''));
-                    return Number.isFinite(parsed) ? parsed : 0;
-                };
                 useMinerStore.getState().setExchangeRates(
-                    toNumber(data?.xmr_usd ?? data?.xmrUsd ?? data?.xmr_usd_price ?? data?.xmr_price_usd),
-                    toNumber(data?.bmt_usd ?? data?.bmtUsd ?? data?.bmt_usd_price ?? data?.bmt_price_usd),
-                    toNumber(data?.rate_xmr_bmt ?? data?.rateXmrBmt ?? data?.xmr_bmt_rate)
+                    Number(data?.xmr_usd || 0),
+                    Number(data?.bmt_usd || 0),
+                    Number(data?.rate_xmr_bmt || 0)
                 );
             } catch (err) {
                 console.warn('[BackendSync] Failed to fetch rates:', err);
@@ -79,12 +75,7 @@ const BackendSyncMonitor = () => {
         };
 
         const fetchRewardStats = async () => {
-            if (!publicKey) return;
-            try {
-                await SolanaAuthService.getInstance().fetchMiningStats(publicKey);
-            } catch (err) {
-                console.warn('[BackendSync] Failed to fetch reward stats:', err);
-            }
+            if (publicKey) await SolanaAuthService.getInstance().fetchMiningStats(publicKey);
         };
 
         const runSyncQueue = async () => {
@@ -176,12 +167,10 @@ const StressTestPage = lazy(() => import('./pages/StressTest'));
 
 const Dashboard = () => {
     const {
-        pools,
         dbTotalBMT,
         deviceType,
         poolHashrateTotal,
         poolMinersCount,
-        poolNetworkHashrate,
         xmrUsd,
         bmtUsd,
         rateXmrBmt,
@@ -191,12 +180,6 @@ const Dashboard = () => {
     const { user, isConnected, miningStats } = useSolanaAuth();
     const { theme } = useTheme();
 
-    const cpuPool = pools['cpu'];
-    const poolLabels: Record<string, string> = {
-        'cpu': 'XMR Pool MineBench',
-        'cpu-backup': 'XMR Pool MineBench'
-    };
-    const navigate = useNavigate();
     const [benchmarkHashrate, setBenchmarkHashrate] = useState<number>(0);
     const [lastBenchmarkDate, setLastBenchmarkDate] = useState<Date | null>(null);
     const [benchmarkDeviceName, setBenchmarkDeviceName] = useState('');
@@ -527,8 +510,6 @@ const Dashboard = () => {
         </div>
     );
 };
-
-const Placeholder = ({ name }: { name: string }) => <div className="text-2xl font-bold p-6">{name} (Under Construction)</div>;
 
 const App: React.FC = () => {
     // Fetch public configuration on mount

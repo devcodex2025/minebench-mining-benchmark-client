@@ -36,23 +36,32 @@ export interface SyncMessage {
  * - WebSocket для real-time updates
  */
 export class MultiDeviceSyncService {
-  private static instance: MultiDeviceSyncService;
+  private static instances = new Map<string, MultiDeviceSyncService>();
   private syncedDevices: Map<string, DeviceSyncData> = new Map();
   private listeners: Set<(data: DeviceSyncData[]) => void> = new Set();
   private ws: WebSocket | null = null;
   private syncInterval: NodeJS.Timeout | null = null;
+  private walletPublicKey: string;
 
-  private constructor(
-    private walletPublicKey: string
-  ) {
+  private constructor(walletPublicKey: string) {
+    this.walletPublicKey = walletPublicKey;
     this.loadFromLocalStorage();
   }
 
   static getInstance(walletPublicKey: string): MultiDeviceSyncService {
-    if (!MultiDeviceSyncService.instance) {
-      MultiDeviceSyncService.instance = new MultiDeviceSyncService(walletPublicKey);
+    let instance = MultiDeviceSyncService.instances.get(walletPublicKey);
+    if (!instance) {
+      instance = new MultiDeviceSyncService(walletPublicKey);
+      MultiDeviceSyncService.instances.set(walletPublicKey, instance);
     }
-    return MultiDeviceSyncService.instance;
+    return instance;
+  }
+
+  static release(walletPublicKey: string): void {
+    const instance = MultiDeviceSyncService.instances.get(walletPublicKey);
+    if (!instance) return;
+    instance.destroy();
+    MultiDeviceSyncService.instances.delete(walletPublicKey);
   }
 
   /**
@@ -196,6 +205,15 @@ export class MultiDeviceSyncService {
       this.syncInterval = null;
       console.log('[MultiDeviceSync] Sync loop stopped');
     }
+  }
+
+  destroy(): void {
+    this.stopSyncLoop();
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+    this.listeners.clear();
   }
 
   /**

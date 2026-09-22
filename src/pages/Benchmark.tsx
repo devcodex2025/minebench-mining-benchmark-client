@@ -1,9 +1,9 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { useMinerStore, DeviceType } from '../store/useMinerStore';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useMinerStore } from '../store/useMinerStore';
 import { SolanaAuthService, useSolanaAuth } from '../services/solanaAuth';
 import { MultiDeviceSyncService } from '../services/multiDeviceSync';
 import { useTheme } from '../contexts/ThemeContext';
-import { Play, Square, Cpu, Monitor, Timer, Zap } from '../components/icons';
+import { Play, Square, Cpu, Timer, Zap } from '../components/icons';
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip } from 'recharts';
 import { cn, formatHashrate } from '../lib/utils';
 import { getEnvironmentConfig } from '../config/environment';
@@ -61,7 +61,6 @@ const Benchmark = () => {
     const currentPower = useMinerStore(state => state.currentPower);
     const resetSession = useMinerStore(state => state.resetSession);
     const pools = useMinerStore(state => state.pools);
-    const poolUrl = useMinerStore(state => state.poolUrl);
     const backendPoolEndpoints = useMinerStore(state => state.backendPoolEndpoints);
     const minerMsrStatus = useMinerStore(state => state.minerMsrStatus);
 
@@ -105,7 +104,7 @@ const Benchmark = () => {
         os_arch?: string;
     } | null>(null);
     const [showAuthWarning, setShowAuthWarning] = useState(false);
-    const [pendingStart, setPendingStart] = useState(false);
+    const [, setPendingStart] = useState(false);
     const [isStartPending, setIsStartPending] = useState(false);
     const env = getEnvironmentConfig();
     const primaryPool = pools?.['cpu'];

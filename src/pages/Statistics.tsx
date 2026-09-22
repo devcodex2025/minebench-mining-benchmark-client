@@ -2,17 +2,11 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   BarChart,
   Bar,
-  LineChart,
-  Line,
-  PieChart,
-  Pie,
-  Cell,
   ResponsiveContainer,
   XAxis,
   YAxis,
   CartesianGrid,
-  Tooltip,
-  Legend
+  Tooltip
 } from 'recharts';
 import {
   TrendingUp,

@@ -7,12 +7,24 @@ license = ""
 repository = ""
 edition = "2021"
 rust-version = "1.77.2"
+# This package builds two binaries (the GUI and the CPU sensor broker), so the
+# bundler must be told which one is the application.
+default-run = "app"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
 name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+# A second binary that reads CPU telemetry from the kernel. It is started by the
+# Windows Task Scheduler with highest privileges (registered once by the
+# installer), so the GUI itself never runs elevated and the user is never asked
+# for approval. It exits immediately after serving one snapshot.
+[[bin]]
+name = "minebench-sensor-broker"
+path = "src/bin/sensor_broker.rs"
+
 
 [features]
 # Required by `tauri build` to embed frontendDist into the production protocol.
@@ -47,3 +59,8 @@ uuid = { version = "1.11.0", features = ["v4"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-autostart = "2"
+
+# Static CPU device information (physical core count, rated clock) and the
+# HWiNFO shared-memory registry interface, both read without spawning a process.
+[target.'cfg(target_os = "windows")'.dependencies]
+winreg = "0.10.1"

@@ -38,7 +38,6 @@ const formatBmt = (value: number) => toFiniteAmount(value).toFixed(6);
 export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
   isOpen,
   onClose,
-  wallet,
   availableBalance,
   minWithdrawal,
   theme,
@@ -135,7 +134,7 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
       const data = await SolanaAuthService.getInstance().requestPayout(amountNum);
       const payoutId = data?.id ? `ID: ${data.id}` : 'pending processing';
       const received = Number(data?.amount_bmt ?? data?.quote?.netAmountBmt ?? 0);
-      setSuccess(`Withdrawal request submitted — approximately ${received.toFixed(6)} BMT after fee, ${payoutId}`);
+      setSuccess(`Payout queued — approximately ${received.toFixed(6)} BMT after fee, ${payoutId}`);
       window.dispatchEvent(new CustomEvent('minebench:payout-created', { detail: { payoutId: data?.id || null } }));
       setAmount('');
       await onClaimed?.();

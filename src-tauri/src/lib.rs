@@ -1,5 +1,7 @@
 mod commands;
+mod cpu_telemetry;
 mod miner;
+mod sensor_broker_client;
 
 use miner::MinerState;
 use std::sync::{Arc, Mutex};
@@ -43,6 +45,11 @@ pub fn run() {
             commands::get_pool_sync,
             commands::get_cpu_temp,
             commands::get_cpu_power,
+            commands::get_cpu_telemetry,
+            commands::get_cpu_telemetry_debug,
+            commands::get_cpu_sensor_broker_status,
+            commands::read_cpu_sensor_broker,
+            commands::diagnose_cpu_sensor_broker,
             commands::get_gpu_sensors,
             commands::log_to_file,
             commands::save_miner_settings,
@@ -73,6 +80,10 @@ pub fn run() {
                         .build(),
                 )?;
             }
+            // Single background sampler for CPU telemetry. It keeps utilization
+            // deltas fresh and idles down to negligible work when Stress Test
+            // stops requesting telemetry.
+            cpu_telemetry::start_sampler(app.handle().clone());
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -83,6 +94,8 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event {
                 let state = app_handle.state::<MinerState>();
                 miner::stop_miner_on_exit(&state);
+                // Nothing to shut down for CPU telemetry: the sensor broker runs
+                // per request and exits on its own.
             }
         });
 }

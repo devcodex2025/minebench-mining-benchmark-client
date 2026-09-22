@@ -4,12 +4,12 @@
  */
 
 import { create } from 'zustand';
-import { PublicKey } from '@solana/web3.js';
 import { useMinerStore } from '../store/useMinerStore';
 import { nativeApi } from '../lib/native-api';
 import { authStorage } from '../lib/auth-storage';
 import { BackendApiError, backendJson } from '../lib/backend-api';
 import { mapRewardsBalanceToMiningStats } from './miningStatsMapper';
+import { MultiDeviceSyncService } from './multiDeviceSync';
 // ... (interfaces remain same)
 
 const AUTH_MESSAGE_PREFIX = 'MineBench Authentication Hook: ';
@@ -127,6 +127,14 @@ export interface RewardHistoryEntry {
 }
 
 export interface PayoutStatus {
+  queue?: {
+    pendingCount: number;
+    requestedAmountBmt: number;
+    amountBmt: number;
+    feeBmt: number;
+    totalPendingCount: number;
+    batchPendingCount: number;
+  };
   id: string;
   status: 'pending' | 'completed' | 'failed' | string;
   requestedAmountBmt: number;
@@ -348,9 +356,13 @@ export class SolanaAuthService {
           throw new Error('Stop mining before disconnecting wallet');
         }
 
+        const walletPublicKey = useSolanaAuth.getState().user?.publicKey;
         useSolanaAuth.getState().disconnect();
         localStorage.removeItem('minebench_user');
         authStorage.clearSecrets();
+        if (walletPublicKey) {
+          MultiDeviceSyncService.release(walletPublicKey);
+        }
 
         // Для web - відключаємо напряму
         // @ts-ignore
@@ -659,9 +671,9 @@ export class SolanaAuthService {
    * Приватний метод для синхронізації пристрою з серверомз
    */
   private async syncDeviceWithServer(
-    publicKey: string,
-    device: MiningDevice,
-    signature: any
+    _publicKey: string,
+    _device: MiningDevice,
+    _signature: any
   ): Promise<void> {
     try {
       // TODO: Надіслати на backend для верифікації та зберігання
