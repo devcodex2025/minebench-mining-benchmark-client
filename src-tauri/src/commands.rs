@@ -63,6 +63,34 @@ pub struct BackendRequest {
     token: Option<String>,
 }
 
+const DEFAULT_BACKEND_BASE_URL: &str = "https://backend.minebench.cloud";
+const DEFAULT_UI_BASE_URL: &str = "https://minebench.cloud";
+const DEFAULT_SOLANA_RPC_URL: &str = "https://api.mainnet-beta.solana.com";
+
+/// Resolve a base URL from a runtime env var, then a compile-time default, then a
+/// hardcoded fallback. Allows staging/local runs without a production rebuild.
+fn resolve_base_url(env_key: &str, compile_default: Option<&'static str>, fallback: &str) -> String {
+    if let Ok(value) = std::env::var(env_key) {
+        let trimmed = value.trim().trim_end_matches('/');
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    compile_default.unwrap_or(fallback).trim_end_matches('/').to_string()
+}
+
+fn backend_base_url() -> String {
+    resolve_base_url("MINEBENCH_BACKEND_URL", option_env!("MINEBENCH_BACKEND_URL"), DEFAULT_BACKEND_BASE_URL)
+}
+
+fn ui_base_url() -> String {
+    resolve_base_url("MINEBENCH_UI_URL", option_env!("MINEBENCH_UI_URL"), DEFAULT_UI_BASE_URL)
+}
+
+fn solana_rpc_url() -> String {
+    resolve_base_url("MINEBENCH_SOLANA_RPC_URL", option_env!("MINEBENCH_SOLANA_RPC_URL"), DEFAULT_SOLANA_RPC_URL)
+}
+
 fn validate_backend_path(path: &str) -> Result<String, String> {
     if !path.starts_with('/') || path.contains("://") || path.contains("..") {
         return Err("Invalid backend path".to_string());
@@ -79,6 +107,8 @@ fn validate_backend_path(path: &str) -> Result<String, String> {
         || clean_path == "/api/rewards/balance"
         || clean_path == "/api/rewards/history"
         || clean_path == "/api/rewards/claim"
+        || clean_path == "/api/rewards/claim/quote"
+        || clean_path == "/api/rewards/payout/status"
         || clean_path == "/api/user/premium-status"
         || clean_path == "/api/miner/report"
         || clean_path == "/api/sync/device-update"
@@ -95,7 +125,7 @@ fn validate_backend_path(path: &str) -> Result<String, String> {
 pub async fn backend_request(request: BackendRequest) -> Result<serde_json::Value, String> {
     let path = validate_backend_path(&request.path)?;
     let method = request.method.unwrap_or_else(|| "GET".to_string()).to_uppercase();
-    let url = format!("https://backend.minebench.cloud{}", path);
+    let url = format!("{}{}", backend_base_url(), path);
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -485,7 +515,7 @@ pub async fn solana_connect_wallet(app: AppHandle) -> Result<OAuthResult, String
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| e.to_string())?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
 
-    let base_url = "https://minebench.cloud";
+    let base_url = ui_base_url();
     let callback_url = format!("http://localhost:{}/callback?state={}", port, callback_state);
     let auth_url = format!("{}/wallet-connect?callbackUrl={}", base_url, urlencoding::encode(&callback_url));
 
@@ -532,7 +562,7 @@ pub async fn solana_get_token_balance(owner: String, mint: String) -> Result<ser
     });
 
     let response = client
-        .post("https://api.mainnet-beta.solana.com")
+        .post(solana_rpc_url())
         .json(&body)
         .send()
         .await
@@ -603,7 +633,7 @@ pub async fn get_runtime_pool_config() -> Result<serde_json::Value, String> {
         .map_err(|e| e.to_string())?;
 
     let response = match client
-        .get("https://backend.minebench.cloud/public/config")
+        .get(format!("{}/public/config", backend_base_url()))
         .send()
         .await
     {
@@ -663,7 +693,7 @@ pub async fn get_latest_benchmark(device_type: String) -> Result<serde_json::Val
         .map_err(|e| e.to_string())?;
 
     let response = client
-        .get("https://minebench.cloud/api/benchmarks?limit=200")
+        .get(format!("{}/api/benchmarks?limit=200", ui_base_url()))
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -712,7 +742,7 @@ pub async fn submit_benchmark_result(record: serde_json::Value) -> Result<serde_
         .map_err(|e| e.to_string())?;
 
     let res = client
-        .post("https://minebench.cloud/api/benchmarks")
+        .post(format!("{}/api/benchmarks", ui_base_url()))
         .json(&record)
         .send()
         .await
