@@ -13,6 +13,8 @@ import { nativeApi } from '../lib/native-api';
 import { classifyMinerOutput, shouldMarkMinerExited } from '../lib/miner-output';
 import { backendJson } from '../lib/backend-api';
 import { detectNewShare } from '../lib/share-detection';
+import { getMinerMsrStatusFromOutput } from '../lib/miner-msr';
+import { MsrStatus } from '../components/MsrStatus';
 
 const getErrorMessage = (err: any) => {
     if (!err) return 'Unknown error';
@@ -109,14 +111,13 @@ const Mining: React.FC = () => {
     const mode = useMinerStore((state) => state.mode);
     const setStatus = useMinerStore((state) => state.setStatus);
     const addLog = useMinerStore((state) => state.addLog);
+    const minerMsrStatus = useMinerStore((state) => state.minerMsrStatus);
+    const setMinerMsrStatus = useMinerStore((state) => state.setMinerMsrStatus);
+    const resetMinerMsrStatus = useMinerStore((state) => state.resetMinerMsrStatus);
     const deviceType = useMinerStore((state) => state.deviceType);
-    const setDeviceType = useMinerStore((state) => state.setDeviceType);
     const wallet = useMinerStore((state) => state.wallet);
-    const setWallet = useMinerStore((state) => state.setWallet);
     const workerName = useMinerStore((state) => state.workerName);
-    const setWorkerName = useMinerStore((state) => state.setWorkerName);
     const donateLevel = useMinerStore((state) => state.donateLevel);
-    const setDonateLevel = useMinerStore((state) => state.setDonateLevel);
     const poolUrl = useMinerStore((state) => state.poolUrl);
     const setPoolUrl = useMinerStore((state) => state.setPoolUrl);
     const manualPoolSelection = useMinerStore((state) => state.manualPoolSelection);
@@ -132,7 +133,6 @@ const Mining: React.FC = () => {
     const saveSettings = useMinerStore((state) => state.saveSettings);
     const fetchPublicConfig = useMinerStore((state) => state.fetchPublicConfig);
     const isPremium = useMinerStore((state) => state.isPremium);
-    const premiumXmrWallet = useMinerStore((state) => state.premiumXmrWallet);
 
     const threads = useMinerStore((state) => state.threads);
     const setThreads = useMinerStore((state) => state.setThreads);
@@ -157,13 +157,10 @@ const Mining: React.FC = () => {
 
     const statsIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const timeIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const poolStatsIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const ratesIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const rewardReportIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const pingIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const statsInFlightRef = useRef(false);
     const poolStatsInFlightRef = useRef(false);
-    const ratesInFlightRef = useRef(false);
     const rewardReportInFlightRef = useRef(false);
     const lastRewardReportAtRef = useRef(0);
     const lastTimerPersistAtRef = useRef(0);
@@ -174,7 +171,7 @@ const Mining: React.FC = () => {
     const pausedElapsedRef = useRef(0);
     const [elapsedTime, setElapsedTime] = useState(0);
     const [peakHashrate, setPeakHashrate] = useState(0);
-    const [poolNetworkHashrate, setPoolNetworkHashrate] = useState(300000000000); // Default Monero difficulty
+    const [poolNetworkHashrate] = useState(300000000000); // Default Monero difficulty
     const [xmrigConnection, setXmrigConnection] = useState<{ pool: string; ping: number; uptime: number } | null>(null);
     const statusRef = useRef(status);
     const miningActionInFlightRef = useRef(false);
@@ -243,7 +240,6 @@ const Mining: React.FC = () => {
     // Get global pool stats from store
     const poolHashrateTotal = useMinerStore((state) => state.poolHashrateTotal);
     const poolMinersCount = useMinerStore((state) => state.poolMinersCount);
-    const setExchangeRates = useMinerStore((state) => state.setExchangeRates);
 
     const poolStatusLabel = status === 'starting'
         ? 'Connecting...'
@@ -377,6 +373,8 @@ const Mining: React.FC = () => {
             const handleMinerOutput = (msg: string) => {
                 const message = String(msg || '').trim();
                 if (!message) return;
+                const msrStatus = getMinerMsrStatusFromOutput(message);
+                if (msrStatus) setMinerMsrStatus(msrStatus);
                 const kind = classifyMinerOutput(message);
                 if (kind === 'auth-error') {
                     setMiningStatus('error');
@@ -424,12 +422,14 @@ const Mining: React.FC = () => {
                     void nativeApi.miner.getStatus()
                         .then(({ running }) => {
                             if (shouldMarkMinerExited(statusRef.current, running)) {
+                                resetMinerMsrStatus();
                                 setMiningStatus('error');
                                 addLog('Miner process exited unexpectedly');
                             }
                         })
                         .catch(() => {
                             if (shouldMarkMinerExited(statusRef.current, false)) {
+                                resetMinerMsrStatus();
                                 setMiningStatus('error');
                                 addLog('Miner process exited unexpectedly');
                             }
@@ -451,14 +451,12 @@ const Mining: React.FC = () => {
             if (unlistenError) unlistenError();
             if (unlistenExit) unlistenExit();
         };
-    }, [setMiningStatus, addLog]);
+    }, [setMiningStatus, addLog, setMinerMsrStatus, resetMinerMsrStatus]);
 
     useEffect(() => {
         return () => {
             if (statsIntervalRef.current) clearInterval(statsIntervalRef.current);
             if (timeIntervalRef.current) clearInterval(timeIntervalRef.current);
-            if (poolStatsIntervalRef.current) clearInterval(poolStatsIntervalRef.current);
-            if (ratesIntervalRef.current) clearInterval(ratesIntervalRef.current);
             if (rewardReportIntervalRef.current) clearInterval(rewardReportIntervalRef.current);
             if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
         };
@@ -519,32 +517,27 @@ const Mining: React.FC = () => {
     // When a single proxy is configured, use its individual stratum snapshot so stats
     // don't flicker between pools as each proxy pushes updates at different times.
     useEffect(() => {
+        const applyPoolStats = (stats: any) => {
+            const newStratum: P2PoolStratumSnapshot | null = stats.stratum || null;
+            const incomingP2PoolSharesFound = Number(stats.p2poolSharesFound ?? stats.verifiedShares ?? 0);
+            const shareEventMarker = Number(stats.p2poolLastShareFoundAt || incomingP2PoolSharesFound);
+            const detection = detectNewShare(shareEventMarker, {
+                lastShareCount: lastP2PoolShareEventRef.current
+            });
+            lastP2PoolShareEventRef.current = detection.newLastShareCount;
+            if (detection.shouldAnimate) setShowShareAnimation(true);
+
+            setStratumStats(newStratum);
+            setP2PoolSharesFoundCount(incomingP2PoolSharesFound);
+            setGlobalPoolStats(Number(stats.poolHashrate || 0), Number(stats.miners || 0), 0);
+        };
+
         const fetchPoolStats = async () => {
             if (poolStatsInFlightRef.current) return;
             poolStatsInFlightRef.current = true;
             try {
                 const stats = await backendJson('/api/pool/stats');
-
-                // stats.stratum is now always the XMRig-proxy-only aggregate from the backend.
-                const newStratum: P2PoolStratumSnapshot | null = stats.stratum || null;
-
-                // detectNewShare handles the first-observation sentinel (-1) correctly:
-                // - First call: initialises the reference without animating so that shares
-                //   found in a previous session don't trigger a spurious animation.
-                // - Subsequent calls: animate only when the count strictly increases.
-                const incomingP2PoolSharesFound = Number(stats.p2poolSharesFound ?? stats.verifiedShares ?? 0);
-                const shareEventMarker = Number(stats.p2poolLastShareFoundAt || incomingP2PoolSharesFound);
-                const detection = detectNewShare(shareEventMarker, {
-                    lastShareCount: lastP2PoolShareEventRef.current
-                });
-                lastP2PoolShareEventRef.current = detection.newLastShareCount;
-                if (detection.shouldAnimate) {
-                    setShowShareAnimation(true);
-                }
-
-                setStratumStats(newStratum);
-                setP2PoolSharesFoundCount(incomingP2PoolSharesFound);
-                setGlobalPoolStats(Number(stats.poolHashrate || 0), Number(stats.miners || 0), 0);
+                applyPoolStats(stats);
             } catch (err) {
                 console.warn('[Mining] Failed to fetch pool stats:', err);
             } finally {
@@ -552,10 +545,14 @@ const Mining: React.FC = () => {
             }
         };
 
-        fetchPoolStats();
-        poolStatsIntervalRef.current = setInterval(fetchPoolStats, 30000);
+        const handlePoolStats = (event: Event) => {
+            applyPoolStats((event as CustomEvent).detail || {});
+        };
+
+        window.addEventListener('minebench:pool-stats', handlePoolStats);
+        void fetchPoolStats();
         return () => {
-            if (poolStatsIntervalRef.current) clearInterval(poolStatsIntervalRef.current);
+            window.removeEventListener('minebench:pool-stats', handlePoolStats);
         };
     }, [setGlobalPoolStats]);
 
@@ -595,59 +592,6 @@ const Mining: React.FC = () => {
                 timeIntervalRef.current = null;
             }
         };
-    }, [status]);
-
-    // Fetch rates from backend (XMR USD, BMT USD, XMR->BMT)
-    useEffect(() => {
-        const fetchRates = async () => {
-            if (ratesInFlightRef.current) return;
-            ratesInFlightRef.current = true;
-            try {
-                const data = await backendJson('/api/rates/current');
-
-                const toNumber = (value: any) => {
-                    if (value === null || value === undefined) return 0;
-                    const num = Number(String(value).replace(/,/g, ''));
-                    return Number.isFinite(num) ? num : 0;
-                };
-
-                const nextXmrUsd = toNumber(
-                    data?.xmr_usd ?? data?.xmrUsd ?? data?.xmr_usd_price ?? data?.xmr_price_usd
-                );
-                const nextBmtUsd = toNumber(
-                    data?.bmt_usd ?? data?.bmtUsd ?? data?.bmt_usd_price ?? data?.bmt_price_usd
-                );
-                const nextRate = toNumber(
-                    data?.rate_xmr_bmt ?? data?.rateXmrBmt ?? data?.xmr_bmt_rate
-                );
-
-                // Save to store for Layout component
-                setExchangeRates(
-                    Number.isFinite(nextXmrUsd) ? nextXmrUsd : 0,
-                    Number.isFinite(nextBmtUsd) ? nextBmtUsd : 0,
-                    Number.isFinite(nextRate) ? nextRate : 0
-                );
-            } catch (err) {
-                console.warn('[Mining] Failed to fetch rates from backend:', err);
-                setExchangeRates(0, 0, 0);
-            } finally {
-                ratesInFlightRef.current = false;
-            }
-        };
-
-        // Fetch immediately on mount
-        fetchRates();
-
-        // Then fetch periodically when running
-        if (status === 'running' || status === 'paused') {
-            ratesIntervalRef.current = setInterval(fetchRates, 60000); // Update every 60s
-            return () => {
-                if (ratesIntervalRef.current) {
-                    clearInterval(ratesIntervalRef.current);
-                    ratesIntervalRef.current = null;
-                }
-            };
-        }
     }, [status]);
 
     useEffect(() => {
@@ -734,7 +678,6 @@ const Mining: React.FC = () => {
             }
 
             let data = null;
-            let successUrl = null;
 
             for (const actualUrl of endpoints) {
                 try {
@@ -745,7 +688,6 @@ const Mining: React.FC = () => {
 
                     if (res && res.ok) {
                         data = await res.json();
-                        successUrl = actualUrl;
                         if (!window.__apiConnected || window.__apiConnected !== actualUrl) {
                             window.__apiConnected = actualUrl;
                         }
@@ -819,6 +761,7 @@ const Mining: React.FC = () => {
 
         miningActionInFlightRef.current = true;
         cancelStartRequestedRef.current = false;
+        resetMinerMsrStatus();
         useMinerStore.getState().setMode('mining');
         setMiningStatus('starting');
 
@@ -895,6 +838,7 @@ const Mining: React.FC = () => {
             console.log("start-mining command invoked.");
             if (cancelStartRequestedRef.current) {
                 await nativeApi.miner.stopMining();
+                resetMinerMsrStatus();
                 setMiningStatus('completed');
                 addLog('Mining stopped');
             } else {
@@ -902,6 +846,7 @@ const Mining: React.FC = () => {
             }
         } catch (err: any) {
             console.error("Failed to start-mining:", err);
+            resetMinerMsrStatus();
             setMiningStatus('error');
             addLog(`Failed to start mining: ${getErrorMessage(err)}`);
         } finally {
@@ -928,6 +873,7 @@ const Mining: React.FC = () => {
         miningStartedAtRef.current = null;
         persistMiningTimer(null, elapsedTime);
         setMiningStatus('stopping');
+        resetMinerMsrStatus();
         try {
             const { logs: storeLogs } = useMinerStore.getState();
             await nativeApi.miner.saveLogs({
@@ -1138,6 +1084,7 @@ const Mining: React.FC = () => {
                             <MetricCard label="Peak" value={formatHashrate(peakHashrate)} icon={<TrendingUp size={14} />} color="yellow" theme={theme} />
                             <MetricCard label="Time" value={formatTime(elapsedTime)} icon={<Clock size={14} />} color="emerald" theme={theme} />
                         </div>
+                        <MsrStatus status={minerMsrStatus} theme={theme} />
                         <div className="grid grid-cols-2 gap-2">
                             {!walletValid && status === 'idle' && (
                                 <div className={cn("col-span-2 p-3 rounded-lg text-xs text-center border", theme === 'light' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-red-500/10 border-red-500/20 text-red-400')}>

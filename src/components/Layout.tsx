@@ -10,7 +10,7 @@ import { DeveloperSettings } from './DeveloperSettings';
 
 export const Layout = ({ children }: { children: React.ReactNode }) => {
   const { theme } = useTheme();
-  const { dbTotalBMT, status, pools, poolHashrateTotal, poolMinersCount, xmrUsd, bmtUsd, rateXmrBmt } = useMinerStore();
+  const { dbTotalBMT, status, pools, poolHashrateTotal, poolMinersCount } = useMinerStore();
   const poolLabels: Record<string, string> = {
     'cpu': 'Primary Node',
     'cpu-backup': 'Reserve Node'

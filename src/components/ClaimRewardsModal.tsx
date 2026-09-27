@@ -38,7 +38,6 @@ const formatBmt = (value: number) => toFiniteAmount(value).toFixed(6);
 export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
   isOpen,
   onClose,
-  wallet,
   availableBalance,
   minWithdrawal,
   theme,
@@ -48,6 +47,7 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [isQuoteLoading, setIsQuoteLoading] = useState(false);
   const [quote, setQuote] = useState<PayoutQuote | null>(null);
+  const [quoteError, setQuoteError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
@@ -63,25 +63,31 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
     setError(null);
     setSuccess(null);
     setQuote(null);
+    setQuoteError(null);
     setAmount(availableBalance > 0 ? formatBmt(availableBalance) : '');
   }, [isOpen, availableBalance]);
 
   React.useEffect(() => {
     if (!isOpen || !amount || isNaN(amountNum) || amountNum <= 0 || amountNum > availableBalance) {
       setQuote(null);
+      setQuoteError(null);
       setIsQuoteLoading(false);
       return;
     }
 
     let cancelled = false;
     setQuote(null);
+    setQuoteError(null);
     setIsQuoteLoading(true);
     const timer = window.setTimeout(async () => {
       try {
         const data = await SolanaAuthService.getInstance().quotePayout(amountNum) as PayoutQuote;
         if (!cancelled) setQuote(data);
-      } catch {
-        if (!cancelled) setQuote(null);
+      } catch (err: unknown) {
+        if (!cancelled) {
+          setQuote(null);
+          setQuoteError(err instanceof Error ? err.message : String(err));
+        }
       } finally {
         if (!cancelled) setIsQuoteLoading(false);
       }
@@ -128,7 +134,7 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
       const data = await SolanaAuthService.getInstance().requestPayout(amountNum);
       const payoutId = data?.id ? `ID: ${data.id}` : 'pending processing';
       const received = Number(data?.amount_bmt ?? data?.quote?.netAmountBmt ?? 0);
-      setSuccess(`Withdrawal request submitted — approximately ${received.toFixed(6)} BMT after fee, ${payoutId}`);
+      setSuccess(`Payout queued — approximately ${received.toFixed(6)} BMT after fee, ${payoutId}`);
       window.dispatchEvent(new CustomEvent('minebench:payout-created', { detail: { payoutId: data?.id || null } }));
       setAmount('');
       await onClaimed?.();
@@ -279,7 +285,9 @@ export const ClaimRewardsModal: React.FC<ClaimRewardsModalProps> = ({
                 )}
               </>
             ) : (
-              <p className={isDark ? 'text-red-300' : 'text-red-600'}>Fee quote is unavailable. Retry before submitting the claim.</p>
+              <p className={isDark ? 'text-red-300' : 'text-red-600'}>
+                {quoteError || 'Fee quote is unavailable. Retry before submitting the claim.'}
+              </p>
             )}
           </div>
         )}

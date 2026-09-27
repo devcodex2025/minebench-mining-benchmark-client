@@ -9,6 +9,10 @@ const authServiceSource = readFileSync(
   new URL('../services/solanaAuth.ts', import.meta.url),
   'utf8'
 );
+const nativeCommandsSource = readFileSync(
+  new URL('../../src-tauri/src/commands.rs', import.meta.url),
+  'utf8'
+);
 
 assert.match(
   modalSource,
@@ -19,6 +23,16 @@ assert.match(
   authServiceSource,
   /['"]\/api\/rewards\/claim\/quote['"]/,
   'Payout quote must use the backend claim quote endpoint'
+);
+assert.match(
+  nativeCommandsSource,
+  /clean_path == "\/api\/rewards\/claim\/quote"/,
+  'Native client must allow the payout quote endpoint'
+);
+assert.match(
+  nativeCommandsSource,
+  /clean_path == "\/api\/rewards\/payout\/status"/,
+  'Native client must allow the payout status endpoint'
 );
 assert.match(
   modalSource,

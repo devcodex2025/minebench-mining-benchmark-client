@@ -4,24 +4,58 @@ import { Cpu, Flame, Gauge, Play, Square, Thermometer, Timer, Zap } from '../com
 import { useTheme } from '../contexts/ThemeContext';
 import { cn, formatHashrate } from '../lib/utils';
 import { p2poolAPI } from '../services/p2poolAPI';
+import { useCpuTelemetry } from '../services/cpuTelemetry';
+import {
+    formatClockGhz,
+    formatPercent,
+    formatRpm,
+    formatTemperature,
+    formatWatts,
+} from '../lib/cpu-telemetry';
+import type { CpuTelemetry } from '../lib/cpu-telemetry';
 import { useMinerStore } from '../store/useMinerStore';
 import { SolanaAuthService, useSolanaAuth } from '../services/solanaAuth';
 import { nativeApi } from '../lib/native-api';
 
 type StressSample = {
     time: string;
+    /** Seconds since the session started, or -1 for a sample taken before it. */
     second: number;
+    /** Whether this sample belongs to a running session, which is what the
+     *  summary is computed from - the idle preview must never pollute it. */
+    session: boolean;
     hashrate: number;
     temp: number | null;
+    clock: number | null;
     power: number | null;
 };
 
+/**
+ * The sensor series feeds the chart and the session statistics; the live tiles
+ * read the current telemetry reading directly.
+ */
 const DURATIONS = [
     { label: '15 min', seconds: 15 * 60 },
     { label: '30 min', seconds: 30 * 60 },
     { label: '1 hour', seconds: 60 * 60 },
     { label: '4 hours', seconds: 4 * 60 * 60 }
 ];
+
+/**
+ * The sensor series is recorded once a second, matching the shared telemetry
+ * monitor, so the chart moves every second a test runs.
+ */
+const SAMPLE_INTERVAL_MS = 1000;
+
+/** Four hours at 1 Hz: the longest session the page offers. */
+const SAMPLE_LIMIT = 4 * 60 * 60;
+
+/**
+ * How much of the series is drawn. A four-hour run is 14400 points, which no
+ * chart renders legibly; the newest quarter hour is what a live view is for,
+ * and the session statistics still cover the whole run.
+ */
+const CHART_WINDOW = 15 * 60;
 
 const getErrorMessage = (err: any) => {
     if (!err) return 'Unknown error';
@@ -52,8 +86,12 @@ const averagePositive = (values: Array<number | null | undefined>) => {
     return positive.reduce((sum, value) => sum + value, 0) / positive.length;
 };
 
-const isPositiveNumber = (value: unknown): value is number =>
-    typeof value === 'number' && Number.isFinite(value) && value > 0;
+const maximum = (values: Array<number | null | undefined>) => {
+    const known = values.filter((value): value is number =>
+        typeof value === 'number' && Number.isFinite(value)
+    );
+    return known.length ? Math.max(...known) : null;
+};
 
 const StressTest: React.FC = () => {
     const { theme } = useTheme();
@@ -64,10 +102,12 @@ const StressTest: React.FC = () => {
     const wallet = useMinerStore((state) => state.wallet);
     const workerName = useMinerStore((state) => state.workerName);
     const poolUrl = useMinerStore((state) => state.poolUrl);
-    const deviceType = useMinerStore((state) => state.deviceType);
-    const cpuName = useMinerStore((state) => state.cpuName);
     const cpuCores = useMinerStore((state) => state.cpuCores);
     const setCpuInfo = useMinerStore((state) => state.setCpuInfo);
+
+    // Shared 1 Hz CPU telemetry. Subscribing here also keeps the background
+    // sampler active for the lifetime of this page and stops it on unmount.
+    const cpuTelemetry = useCpuTelemetry();
 
     const [selectedDuration, setSelectedDuration] = useState(DURATIONS[0].seconds);
     const [samples, setSamples] = useState<StressSample[]>([]);
@@ -80,6 +120,7 @@ const StressTest: React.FC = () => {
         maxTemp: number | null;
         avgPower: number | null;
         maxPower: number | null;
+        avgClock: number | null;
         duration: number;
     }>(null);
 
@@ -88,10 +129,21 @@ const StressTest: React.FC = () => {
     const pollRef = useRef<NodeJS.Timeout | null>(null);
     const stopRequestedRef = useRef(false);
     const samplesRef = useRef<StressSample[]>([]);
+    /** Last hashrate the pool reported, folded into the sensor series. */
+    const hashrateRef = useRef(0);
+    /**
+     * The newest telemetry, readable from the sampling loop without making it
+     * depend on the poll cycle.
+     */
+    const telemetryRef = useRef(cpuTelemetry);
 
     const isActive = status === 'running' || status === 'starting';
     const maxStressThreads = Math.max(1, cpuCores - 1);
     const remaining = Math.max(0, selectedDuration - elapsed);
+
+    useEffect(() => {
+        telemetryRef.current = cpuTelemetry;
+    }, [cpuTelemetry]);
 
     useEffect(() => {
         const loadCpuInfo = async () => {
@@ -117,24 +169,81 @@ const StressTest: React.FC = () => {
         samplesRef.current = samples;
     }, [samples]);
 
+    /**
+     * Record one point per second for as long as the page is open.
+     *
+     * This is deliberately not part of the hashrate poll. That poll returns
+     * early when the local pool API does not answer, and while it owned the
+     * sampling the chart and the tiles stayed empty on a machine whose CPU
+     * sensors were reporting perfectly well. The sensor series is the page's
+     * subject, so it has its own clock.
+     */
+    useEffect(() => {
+        const record = () => {
+            const { telemetry, stale } = telemetryRef.current;
+            const startedAt = startedAtRef.current;
+            const point: StressSample = {
+                time: new Date().toLocaleTimeString([], {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit'
+                }),
+                second: startedAt ? Math.floor((Date.now() - startedAt) / 1000) : -1,
+                session: startedAt !== null,
+                hashrate: hashrateRef.current,
+                // A stale reading is reported as unavailable rather than frozen
+                // and presented as live.
+                temp: stale ? null : telemetry?.temperature_c ?? null,
+                clock: stale ? null : telemetry?.clock_mhz ?? null,
+                power: stale ? null : telemetry?.package_power_w ?? null
+            };
+
+            setSamples((prev) => {
+                const next = [...prev, point].slice(-SAMPLE_LIMIT);
+                samplesRef.current = next;
+                return next;
+            });
+        };
+
+        record();
+        const id = setInterval(record, SAMPLE_INTERVAL_MS);
+        return () => clearInterval(id);
+    }, []);
+
+    const sessionSamples = useMemo(() => samples.filter((sample) => sample.session), [samples]);
+
     const metrics = useMemo(() => {
-        const hashrates = samples.map((sample) => sample.hashrate).filter((value) => Number.isFinite(value) && value > 0);
-        const temps = samples.map((sample) => sample.temp).filter((value): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0);
-        const powers = samples.map((sample) => sample.power).filter((value): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0);
+        const hashrates = sessionSamples
+            .map((sample) => sample.hashrate)
+            .filter((value) => Number.isFinite(value) && value > 0);
 
         return {
             currentHashrate: hashrates.at(-1) || 0,
             maxHashrate: hashrates.length ? Math.max(...hashrates) : 0,
-            currentTemp: temps.at(-1) ?? null,
-            maxTemp: temps.length ? Math.max(...temps) : null,
-            currentPower: powers.at(-1) ?? null,
-            maxPower: powers.length ? Math.max(...powers) : null,
-            avgTemp: averagePositive(temps),
-            avgPower: averagePositive(powers)
+            maxTemp: maximum(sessionSamples.map((sample) => sample.temp)),
+            maxPower: maximum(sessionSamples.map((sample) => sample.power))
         };
-    }, [samples]);
+    }, [sessionSamples]);
 
-    const pollStats = async () => {
+    /**
+     * What is drawn. The sensor series is plotted as it arrives, whatever the
+     * pool is doing, so a machine without a hashrate still gets a live chart of
+     * its temperature, frequency and power.
+     */
+    const chartData = useMemo(
+        () =>
+            samples.slice(-CHART_WINDOW).map((sample) => ({
+                time: sample.time,
+                temp: sample.temp,
+                // Frequency is plotted in GHz so the axis it is read off is in
+                // the unit the value is quoted in.
+                clock_ghz: sample.clock === null ? null : sample.clock / 1000,
+                power: sample.power
+            })),
+        [samples]
+    );
+
+    const pollHashrate = async () => {
         if (!startedAtRef.current) return;
 
         const endpoints = [
@@ -169,32 +278,12 @@ const StressTest: React.FC = () => {
             0
         );
 
-        const tempRes = await nativeApi.invoke<any>('get_cpu_temp').catch(() => null);
-        const powerRes = await nativeApi.invoke<any>('get_cpu_power').catch(() => null);
-
-        const temp = tempRes?.success && Number.isFinite(tempRes.temp) ? Number(tempRes.temp) : null;
-        const power = powerRes?.success && Number.isFinite(powerRes.power) ? Number(powerRes.power) : null;
-        if (!isPositiveNumber(temp) || !isPositiveNumber(power)) {
-            setError('Stress test stopped because temperature or power telemetry became unavailable.');
-            await stopStressTest();
-            return;
+        // Only the hashrate is taken from the pool. The CPU metrics in the
+        // series come from the shared 1 Hz telemetry monitor, which is sampled
+        // independently of this poll.
+        if (Number.isFinite(hashrate) && hashrate > 0) {
+            hashrateRef.current = hashrate;
         }
-        const second = Math.floor((Date.now() - startedAtRef.current) / 1000);
-
-        setSamples((prev) => {
-            const nextSamples = [
-                ...prev.slice(-719),
-                {
-                    time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-                    second,
-                    hashrate: Number.isFinite(hashrate) ? hashrate : 0,
-                    temp,
-                    power
-                }
-            ];
-            samplesRef.current = nextSamples;
-            return nextSamples;
-        });
     };
 
     const stopStressTest = async () => {
@@ -207,17 +296,18 @@ const StressTest: React.FC = () => {
         pollRef.current = null;
         setStatus('stopping');
 
-        const currentSamples = samplesRef.current;
+        const currentSamples = samplesRef.current.filter((sample) => sample.session);
         const hashrates = currentSamples.map((sample) => sample.hashrate).filter((value) => Number.isFinite(value) && value > 0);
         const temps = currentSamples.map((sample) => sample.temp);
         const powers = currentSamples.map((sample) => sample.power);
+        const clocks = currentSamples.map((sample) => sample.clock);
         const duration = startedAtRef.current ? Math.max(1, Math.floor((Date.now() - startedAtRef.current) / 1000)) : elapsed;
 
         try {
             await nativeApi.miner.saveLogs({
                 systemLogs: useMinerStore.getState().logs,
                 minerLogs: currentSamples.map((sample) =>
-                    `${sample.time} | ${formatHashrate(sample.hashrate)} | ${sample.temp ?? 'N/A'} C | ${sample.power ?? 'N/A'} W`
+                    `${sample.time} | ${formatHashrate(sample.hashrate)} | ${formatTemperature(sample.temp)} | ${formatWatts(sample.power)} | ${formatClockGhz(sample.clock)}`
                 ),
                 sessionType: 'stress-test',
                 device: 'cpu'
@@ -249,12 +339,16 @@ const StressTest: React.FC = () => {
                 avgHashrate: hashrates.length ? hashrates.reduce((sum, value) => sum + value, 0) / hashrates.length : 0,
                 maxHashrate: hashrates.length ? Math.max(...hashrates) : 0,
                 avgTemp: averagePositive(temps),
-                maxTemp: averagePositive(temps) === null ? null : Math.max(...temps.filter((value): value is number => typeof value === 'number' && Number.isFinite(value))),
+                maxTemp: maximum(temps),
                 avgPower: averagePositive(powers),
-                maxPower: averagePositive(powers) === null ? null : Math.max(...powers.filter((value): value is number => typeof value === 'number' && Number.isFinite(value))),
+                maxPower: maximum(powers),
+                avgClock: averagePositive(clocks),
                 duration
             });
             startedAtRef.current = null;
+            // The series keeps running as the idle preview, but these samples
+            // must not count towards the session that just ended.
+            hashrateRef.current = 0;
             stopRequestedRef.current = false;
             setStatus('completed');
         }
@@ -274,30 +368,28 @@ const StressTest: React.FC = () => {
         setError(null);
         setFinalSummary(null);
         setSamples([]);
+        samplesRef.current = [];
+        hashrateRef.current = 0;
         setElapsed(0);
         stopRequestedRef.current = false;
 
         try {
-            const tempRes = await nativeApi.invoke<any>('get_cpu_temp').catch(() => null);
-            const powerRes = await nativeApi.invoke<any>('get_cpu_power').catch(() => null);
-            const temp = tempRes?.success && Number.isFinite(tempRes.temp) ? Number(tempRes.temp) : null;
-            const power = powerRes?.success && Number.isFinite(powerRes.power) ? Number(powerRes.power) : null;
-            if (!isPositiveNumber(temp) || !isPositiveNumber(power)) {
-                setError(
-                    'Stress test requires CPU temperature and power telemetry. Power can use a native sensor or MineBench estimated watts, but telemetry is currently unavailable on this device.'
+            // Telemetry availability is reported, never enforced: CPU temperature
+            // and fan speed are hardware/provider dependent, so a machine without
+            // them must still be able to run a stress test.
+            const reading = cpuTelemetry.telemetry;
+            if (!reading || reading.temperature_c === null) {
+                addLog(
+                    'CPU temperature is unavailable on this device; the stress test runs without it. See Settings › CPU Sensor Diagnostics.'
                 );
-                return;
             }
 
             // Ensure we have the latest config
-            console.log("Invalidating pool config cache...");
             p2poolAPI.invalidateCache();
-            console.log("Fetching latest pool config...");
             try {
-                const config = await nativeApi.pool.getRuntimeConfig();
-                console.log("Pool config fetched successfully:", config);
+                await nativeApi.pool.getRuntimeConfig();
             } catch (configErr) {
-                console.error("Failed to fetch pool config:", configErr);
+                console.error('Failed to fetch pool config:', configErr);
             }
 
             await nativeApi.miner.startBenchmark({
@@ -327,8 +419,11 @@ const StressTest: React.FC = () => {
                 }
             }, 1000);
 
-            pollRef.current = setInterval(pollStats, 3000);
-            pollStats();
+            // Hashrate is polled from the local P2Pool API; the sensor series is
+            // recorded by its own 1 Hz loop instead of being fetched here, so a
+            // slow or absent pool cannot stall the chart.
+            pollRef.current = setInterval(pollHashrate, 3000);
+            pollHashrate();
         } catch (err: any) {
             setStatus('error');
             setError(getErrorMessage(err));
@@ -336,11 +431,19 @@ const StressTest: React.FC = () => {
         }
     };
 
-    const combinedData = samples.filter((sample) =>
-        isPositiveNumber(sample.hashrate) &&
-        isPositiveNumber(sample.temp) &&
-        isPositiveNumber(sample.power)
-    );
+    /**
+     * What the live tiles show. Always the current reading: a sample from the
+     * series would be up to a second old by definition, and the point of the
+     * panel is to show the hardware as it is right now. Stale telemetry is
+     * reported as unavailable so frozen numbers are never presented as live.
+     */
+    const live: CpuTelemetry | null = cpuTelemetry.stale ? null : cpuTelemetry.telemetry;
+
+    const chartSubtitle = isActive
+        ? `Live · ${formatDuration(elapsed)} elapsed`
+        : live
+            ? 'Live · idle'
+            : 'Waiting for CPU telemetry';
 
     return (
         <div className="space-y-6">
@@ -350,7 +453,7 @@ const StressTest: React.FC = () => {
                         Stress Test
                     </h1>
                     <p className={cn("text-sm mt-1", theme === 'light' ? 'text-zinc-600' : 'text-zinc-500')}>
-                        Sustained CPU miner load with live temperature and wattage telemetry
+                        Sustained CPU miner load with live temperature, frequency, and power telemetry
                     </p>
                 </div>
                 <div className={cn(
@@ -365,11 +468,86 @@ const StressTest: React.FC = () => {
                 </div>
             </div>
 
-            <div className="grid grid-cols-1 xl:grid-cols-[340px_minmax(0,1fr)] gap-6">
-                <section className={cn("rounded-xl border p-5 space-y-5", theme === 'light' ? 'bg-white border-zinc-200' : 'bg-zinc-900/60 border-white/10')}>
-                    <div>
+            {/*
+              1. The chart. It is the first thing on the page because it is what
+              the run is judged by, and it plots the sensor series as it arrives
+              rather than waiting for the pool to report a hashrate.
+            */}
+            <ChartPanel
+                title="Real-Time Monitoring"
+                subtitle={chartSubtitle}
+                theme={theme}
+            >
+                {chartData.length > 1 ? (
+                    <ResponsiveContainer width="100%" height={320}>
+                        <LineChart data={chartData} margin={{ top: 8, right: 12, bottom: 4, left: 4 }}>
+                            <CartesianGrid strokeDasharray="3 3" stroke={theme === 'light' ? '#e4e4e7' : '#27272a'} />
+                            <XAxis
+                                dataKey="time"
+                                tick={{ fontSize: 11 }}
+                                minTickGap={28}
+                                stroke={theme === 'light' ? '#71717a' : '#a1a1aa'}
+                            />
+                            {/* One axis per unit, each visible: temperature, frequency
+                                and power live on scales that have nothing to do with
+                                each other, so sharing one axis would misreport all
+                                three. */}
+                            <YAxis
+                                yAxisId="temp"
+                                orientation="left"
+                                width={62}
+                                unit=" °C"
+                                domain={['auto', 'auto']}
+                                tick={{ fontSize: 11 }}
+                                stroke="#f59e0b"
+                            />
+                            <YAxis
+                                yAxisId="clock"
+                                orientation="right"
+                                width={72}
+                                unit=" GHz"
+                                domain={['auto', 'auto']}
+                                tickFormatter={(value) => Number(value).toFixed(2)}
+                                tick={{ fontSize: 11 }}
+                                stroke="#a78bfa"
+                            />
+                            <YAxis
+                                yAxisId="power"
+                                orientation="right"
+                                width={62}
+                                unit=" W"
+                                domain={['auto', 'auto']}
+                                tick={{ fontSize: 11 }}
+                                stroke="#22c55e"
+                            />
+                            <Tooltip
+                                formatter={(value: any, name: any) => {
+                                    if (name === 'temp') return [formatTemperature(Number(value)), 'CPU Temperature'];
+                                    if (name === 'clock_ghz') return [formatClockGhz(Number(value) * 1000), 'CPU Frequency'];
+                                    if (name === 'power') return [formatWatts(Number(value)), 'CPU Power'];
+                                    return [String(value), String(name)];
+                                }}
+                            />
+                            <Legend />
+                            <Line yAxisId="temp" type="monotone" dataKey="temp" name="temp" stroke="#f59e0b" strokeWidth={2.5} dot={false} connectNulls={false} isAnimationActive={false} />
+                            <Line yAxisId="clock" type="monotone" dataKey="clock_ghz" name="clock_ghz" stroke="#a78bfa" strokeWidth={2} dot={false} connectNulls={false} isAnimationActive={false} />
+                            <Line yAxisId="power" type="monotone" dataKey="power" name="power" stroke="#22c55e" strokeWidth={2.5} dot={false} connectNulls={false} isAnimationActive={false} />
+                        </LineChart>
+                    </ResponsiveContainer>
+                ) : (
+                    <EmptyChart theme={theme} label="CPU temperature, frequency, and power appear here as they are measured" />
+                )}
+            </ChartPanel>
+
+            {/* 2. The controls, directly under the chart they act on. */}
+            <section
+                data-testid="stress-controls"
+                className={cn("rounded-xl border p-5", theme === 'light' ? 'bg-white border-zinc-200' : 'bg-zinc-900/60 border-white/10')}
+            >
+                <div className="flex flex-col lg:flex-row lg:items-end gap-5">
+                    <div className="lg:flex-1">
                         <div className={cn("text-xs uppercase tracking-widest mb-3", theme === 'light' ? 'text-zinc-600' : 'text-zinc-500')}>Duration</div>
-                        <div className="grid grid-cols-2 gap-2">
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                             {DURATIONS.map((duration) => (
                                 <button
                                     key={duration.seconds}
@@ -388,40 +566,20 @@ const StressTest: React.FC = () => {
                                 </button>
                             ))}
                         </div>
-                    </div>
-
-                    <div className={cn("rounded-lg border p-4 space-y-3", theme === 'light' ? 'bg-zinc-50 border-zinc-200' : 'bg-zinc-950/50 border-white/10')}>
-                        <div className="flex items-center justify-between text-sm">
-                            <span className={theme === 'light' ? 'text-zinc-600' : 'text-zinc-500'}>Threads</span>
-                            <span className={cn("font-mono", theme === 'light' ? 'text-zinc-900' : 'text-white')}>{maxStressThreads} / {cpuCores || 1}</span>
-                        </div>
-                        <div className="flex items-center justify-between text-sm">
-                            <span className={theme === 'light' ? 'text-zinc-600' : 'text-zinc-500'}>RandomX</span>
-                            <span className="font-mono text-yellow-500">Fast</span>
-                        </div>
-                        <div className="flex items-center justify-between text-sm">
-                            <span className={theme === 'light' ? 'text-zinc-600' : 'text-zinc-500'}>Huge Pages</span>
-                            <span className="font-mono text-emerald-500">Enabled</span>
-                        </div>
-                        <div className="flex items-center justify-between text-sm">
-                            <span className={theme === 'light' ? 'text-zinc-600' : 'text-zinc-500'}>Priority</span>
-                            <span className="font-mono text-amber-500">Normal</span>
+                        <div className={cn("flex flex-wrap items-center gap-x-5 gap-y-1 mt-3 text-xs font-mono", theme === 'light' ? 'text-zinc-600' : 'text-zinc-500')}>
+                            <span>Elapsed {formatDuration(elapsed)}</span>
+                            <span>Remaining {formatDuration(remaining)}</span>
+                            <span>{maxStressThreads} / {cpuCores || 1} threads</span>
+                            <span>RandomX Fast · Huge Pages</span>
                         </div>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-3">
-                        <Metric label="Elapsed" value={formatDuration(elapsed)} icon={<Timer size={14} />} theme={theme} />
-                        <Metric label="Remaining" value={formatDuration(remaining)} icon={<Gauge size={14} />} theme={theme} />
-                        <Metric label="Temp" value={metrics.currentTemp !== null ? `${metrics.currentTemp.toFixed(0)} C` : 'N/A'} icon={<Thermometer size={14} />} theme={theme} />
-                        <Metric label="Power" value={metrics.currentPower !== null ? `${metrics.currentPower.toFixed(0)} W` : 'N/A'} icon={<Zap size={14} />} theme={theme} />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-2 gap-3 lg:w-[320px]">
                         <button
                             onClick={startStressTest}
                             disabled={isActive}
                             className={cn(
-                                "h-11 rounded-lg font-bold text-sm flex items-center justify-center gap-2 transition-colors disabled:opacity-50",
+                                "h-12 rounded-lg font-bold text-sm flex items-center justify-center gap-2 transition-colors disabled:opacity-50",
                                 theme === 'light'
                                     ? 'bg-emerald-600 text-white hover:bg-emerald-500'
                                     : 'bg-emerald-500 text-zinc-950 hover:bg-emerald-400'
@@ -432,70 +590,209 @@ const StressTest: React.FC = () => {
                         <button
                             onClick={stopStressTest}
                             disabled={!isActive}
-                            className="h-11 rounded-lg font-bold text-sm flex items-center justify-center gap-2 bg-red-500/10 text-red-500 border border-red-500/20 hover:bg-red-500/20 disabled:opacity-50 transition-colors"
+                            className="h-12 rounded-lg font-bold text-sm flex items-center justify-center gap-2 bg-red-500/10 text-red-500 border border-red-500/20 hover:bg-red-500/20 disabled:opacity-50 transition-colors"
                         >
                             <Square size={16} /> Stop
                         </button>
                     </div>
+                </div>
 
-                    {error && (
-                        <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-500">
-                            {error}
-                        </div>
-                    )}
-                </section>
-
-                <section className="space-y-6 min-w-0">
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                        <Metric label="Current Hashrate" value={formatHashrate(metrics.currentHashrate)} icon={<Cpu size={14} />} theme={theme} large />
-                        <Metric label="Peak Hashrate" value={formatHashrate(metrics.maxHashrate)} icon={<Flame size={14} />} theme={theme} large />
-                        <Metric label="Samples" value={`${samples.length}`} icon={<ActivityDot />} theme={theme} large />
+                {error && (
+                    <div className="mt-4 rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-500">
+                        {error}
                     </div>
+                )}
+            </section>
 
-                    <ChartPanel
-                        title="Stress Telemetry"
-                        subtitle={metrics.maxTemp !== null && metrics.maxPower !== null ? `Peak ${metrics.maxTemp.toFixed(0)} C / ${metrics.maxPower.toFixed(0)} W` : 'Waiting for telemetry'}
-                        theme={theme}
-                    >
-                        {combinedData.length > 0 ? (
-                            <ResponsiveContainer width="100%" height={260}>
-                                <LineChart data={combinedData}>
-                                    <CartesianGrid strokeDasharray="3 3" stroke={theme === 'light' ? '#e4e4e7' : '#27272a'} />
-                                    <XAxis dataKey="time" tick={{ fontSize: 11 }} stroke={theme === 'light' ? '#71717a' : '#a1a1aa'} />
-                                    <YAxis yAxisId="hashrate" tick={{ fontSize: 11 }} stroke="#38bdf8" tickFormatter={(value) => formatHashrate(Number(value)).replace('/s', '')} />
-                                    <YAxis yAxisId="temp" orientation="right" unit=" C" tick={{ fontSize: 11 }} stroke="#f59e0b" />
-                                    <YAxis yAxisId="power" orientation="right" unit=" W" tick={{ fontSize: 11 }} stroke="#22c55e" hide />
-                                    <Tooltip
-                                        formatter={(value, name) => {
-                                            if (name === 'hashrate') return [formatHashrate(Number(value)), 'Hashrate'];
-                                            if (name === 'temp') return [`${Number(value).toFixed(1)} C`, 'Temperature'];
-                                            return [`${Number(value).toFixed(1)} W`, 'Power'];
-                                        }}
-                                    />
-                                    <Legend />
-                                    <Line yAxisId="hashrate" type="monotone" dataKey="hashrate" name="hashrate" stroke="#38bdf8" strokeWidth={2.5} dot={false} />
-                                    <Line yAxisId="temp" type="monotone" dataKey="temp" name="temp" stroke="#f59e0b" strokeWidth={2.5} dot={false} />
-                                    <Line yAxisId="power" type="monotone" dataKey="power" name="power" stroke="#22c55e" strokeWidth={2.5} dot={false} />
-                                </LineChart>
-                            </ResponsiveContainer>
-                        ) : <EmptyChart theme={theme} label="Hashrate, temperature, and power telemetry will appear here" />}
-                    </ChartPanel>
+            {/* 3. The numbers the controls are judged by, directly under them. */}
+            <section data-testid="live-metrics" className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <LiveMetric
+                    label="CPU Temperature"
+                    value={formatTemperature(live?.temperature_c)}
+                    detail={live?.temperature_c === null || live?.temperature_c === undefined
+                        ? 'No CPU die sensor on this device'
+                        : live.temperature_source ? `source: ${live.temperature_source}` : 'live'}
+                    icon={<Thermometer size={16} />}
+                    accent="text-amber-500"
+                    theme={theme}
+                />
+                <LiveMetric
+                    label="CPU Frequency"
+                    value={formatClockGhz(live?.clock_mhz)}
+                    detail={live?.clock_mhz
+                        ? `${Math.round(live.clock_mhz)} MHz`
+                        : 'No clock reading on this device'}
+                    icon={<Gauge size={16} />}
+                    accent="text-violet-400"
+                    theme={theme}
+                />
+                <LiveMetric
+                    label="CPU Power"
+                    value={formatWatts(live?.package_power_w)}
+                    detail={live?.package_power_w === null || live?.package_power_w === undefined
+                        ? 'No package power sensor on this device'
+                        : live.power_is_estimated ? 'estimated from load' : 'live'}
+                    icon={<Zap size={16} />}
+                    accent="text-emerald-500"
+                    theme={theme}
+                />
+            </section>
 
-                    {finalSummary && (
-                        <div className={cn("rounded-xl border p-5 grid grid-cols-2 md:grid-cols-4 gap-4", theme === 'light' ? 'bg-white border-zinc-200' : 'bg-zinc-900/60 border-white/10')}>
-                            <Metric label="Avg Hashrate" value={formatHashrate(finalSummary.avgHashrate)} icon={<Gauge size={14} />} theme={theme} />
-                            <Metric label="Avg Temp" value={finalSummary.avgTemp !== null ? `${finalSummary.avgTemp.toFixed(1)} C` : 'N/A'} icon={<Thermometer size={14} />} theme={theme} />
-                            <Metric label="Avg Power" value={finalSummary.avgPower !== null ? `${finalSummary.avgPower.toFixed(1)} W` : 'N/A'} icon={<Zap size={14} />} theme={theme} />
-                            <Metric label="Duration" value={formatDuration(finalSummary.duration)} icon={<Timer size={14} />} theme={theme} />
-                        </div>
-                    )}
-                </section>
-            </div>
+            <section className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <Metric label="Current Hashrate" value={formatHashrate(metrics.currentHashrate)} icon={<Cpu size={14} />} theme={theme} large />
+                <Metric label="Peak Hashrate" value={formatHashrate(metrics.maxHashrate)} icon={<Flame size={14} />} theme={theme} large />
+                <Metric label="Samples" value={`${sessionSamples.length}`} icon={<Flame size={14} />} theme={theme} large />
+            </section>
+
+            <section className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                <Metric label="Load" value={formatPercent(live?.utilization_percent)} icon={<Cpu size={14} />} theme={theme} />
+                <Metric label="Fan" value={formatRpm(live?.fan_rpm)} icon={<Flame size={14} />} theme={theme} />
+                <Metric label="Peak Temp" value={formatTemperature(metrics.maxTemp)} icon={<Thermometer size={14} />} theme={theme} />
+                <Metric label="Peak Power" value={formatWatts(metrics.maxPower)} icon={<Zap size={14} />} theme={theme} />
+            </section>
+
+            <TelemetryStatusNote
+                theme={theme}
+                stale={cpuTelemetry.stale}
+                telemetry={cpuTelemetry.telemetry}
+            />
+
+            {finalSummary && (
+                <div className={cn("rounded-xl border p-5 grid grid-cols-2 md:grid-cols-6 gap-4", theme === 'light' ? 'bg-white border-zinc-200' : 'bg-zinc-900/60 border-white/10')}>
+                    <Metric label="Avg Hashrate" value={formatHashrate(finalSummary.avgHashrate)} icon={<Gauge size={14} />} theme={theme} />
+                    <Metric label="Avg Temp" value={formatTemperature(finalSummary.avgTemp)} icon={<Thermometer size={14} />} theme={theme} />
+                    <Metric label="Peak Temp" value={formatTemperature(finalSummary.maxTemp)} icon={<Thermometer size={14} />} theme={theme} />
+                    <Metric label="Avg Clock" value={formatClockGhz(finalSummary.avgClock)} icon={<Gauge size={14} />} theme={theme} />
+                    <Metric label="Avg Power" value={formatWatts(finalSummary.avgPower)} icon={<Zap size={14} />} theme={theme} />
+                    <Metric label="Duration" value={formatDuration(finalSummary.duration)} icon={<Timer size={14} />} theme={theme} />
+                </div>
+            )}
         </div>
     );
 };
 
-const ActivityDot = () => <Flame size={14} />;
+/**
+ * One of the three metrics the page is read for: a large current value, its unit
+ * carried by the formatter, and a line saying where it came from.
+ */
+const LiveMetric = ({
+    label,
+    value,
+    detail,
+    icon,
+    accent,
+    theme,
+}: {
+    label: string;
+    value: string;
+    detail: string;
+    icon: React.ReactNode;
+    accent: string;
+    theme: string;
+}) => (
+    <div className={cn("rounded-xl border p-5", theme === 'light' ? 'bg-white border-zinc-200' : 'bg-zinc-900/60 border-white/10')}>
+        <div className={cn("flex items-center gap-2 text-[10px] uppercase tracking-widest", theme === 'light' ? 'text-zinc-600' : 'text-zinc-500')}>
+            <span className={accent}>{icon}</span>
+            <span>{label}</span>
+        </div>
+        <div className={cn("font-mono mt-2 text-3xl font-bold tabular-nums", accent)}>{value}</div>
+        <div className={cn("text-[11px] mt-1 truncate", theme === 'light' ? 'text-zinc-500' : 'text-zinc-500')} title={detail}>
+            {detail}
+        </div>
+    </div>
+);
+
+/**
+ * Explains where CPU sensors come from, and why optional ones are missing.
+ * Windows exposes no generic CPU die temperature API, so a missing reading is
+ * reported as unsupported instead of being faked or blocking the test.
+ */
+const TelemetryStatusNote = ({
+    theme,
+    stale,
+    telemetry,
+}: {
+    theme: string;
+    stale: boolean;
+    telemetry: CpuTelemetry | null;
+}) => {
+    const base = cn(
+        'rounded-lg border p-3 text-xs leading-relaxed',
+        theme === 'light' ? 'bg-zinc-50 border-zinc-200 text-zinc-600' : 'bg-white/[0.03] border-white/10 text-zinc-400'
+    );
+
+    if (stale) {
+        return <div className={cn(base, 'text-amber-500')}>CPU telemetry is not updating; values shown are the last successful reading.</div>;
+    }
+
+    if (!telemetry) {
+        return <div className={base}>Waiting for the first CPU telemetry reading…</div>;
+    }
+
+    const missingTemperature = telemetry.temperature_c === null;
+    const missingFan = telemetry.fan_rpm === null;
+
+    return (
+        <div className={base}>
+            <div>
+                Provider: <span className="font-mono">{telemetry.provider_label}</span>
+                {telemetry.temperature_source ? <> · source: <span className="font-mono">{telemetry.temperature_source}</span></> : null}
+                {telemetry.power_is_estimated ? <> · power estimated from load</> : null}
+                {<> · updated every second</>}
+            </div>
+            {telemetry.throttling ? (
+                <div className="mt-1 text-amber-500">Clock is below the part's maximum under load (thermal or power limit).</div>
+            ) : null}
+            {missingTemperature ? (
+                <div className="mt-1">
+                    {telemetry.platform === 'windows' ? (
+                        <>
+                            CPU temperature is unavailable. Windows exposes no generic CPU die sensor; MineBench can
+                            read it through its built-in helper, which needs one administrator approval. Enable it in
+                            Settings › CPU Sensor Diagnostics.
+                        </>
+                    ) : telemetry.platform === 'linux' ? (
+                        <>
+                            No CPU temperature sensor was found under <span className="font-mono">/sys/class/hwmon</span>.
+                            Load the kernel driver for your CPU (<span className="font-mono">k10temp</span> for AMD,{' '}
+                            <span className="font-mono">coretemp</span> for Intel) and confirm <span className="font-mono">/sys</span> is mounted.
+                        </>
+                    ) : (
+                        <>No CPU temperature sensor was reported by the system management controller on this Mac.</>
+                    )}
+                </div>
+            ) : null}
+            {!missingTemperature && !telemetry.temperature_reliable ? (
+                <div className="mt-1 text-amber-500">
+                    Temperature comes from an ACPI thermal zone, which can be a mainboard sensor rather than the CPU die.
+                </div>
+            ) : null}
+            {missingFan ? (
+                <div className="mt-1">
+                    {telemetry.platform === 'windows' ? (
+                        <>
+                            No CPU fan reading. It comes from the motherboard's fan controller, which not every board
+                            exposes; Settings › CPU Sensor Diagnostics lists the channels that were found.
+                        </>
+                    ) : (
+                        <>No reliably identifiable CPU fan sensor on this device (fan tachometers are often not exposed).</>
+                    )}
+                </div>
+            ) : (
+                // How the fan was attributed to the CPU is shown, not implied:
+                // no vendor publishes a header map for every board, so the
+                // channel and the temperature source its curve follows are part
+                // of the reading.
+                telemetry.fan_source ? (
+                    <div className="mt-1">
+                        CPU fan: <span className="font-mono">{formatRpm(telemetry.fan_rpm)}</span> ·{' '}
+                        <span className="font-mono">{telemetry.fan_source}</span>
+                    </div>
+                ) : null
+            )}
+        </div>
+    );
+};
 
 const Metric = ({ label, value, icon, theme, large = false }: { label: string; value: string; icon: React.ReactNode; theme: string; large?: boolean }) => (
     <div className={cn("rounded-lg border p-3", theme === 'light' ? 'bg-white border-zinc-200' : 'bg-zinc-900/70 border-white/10')}>
@@ -520,7 +817,7 @@ const ChartPanel = ({ title, subtitle, theme, children }: { title: string; subti
 );
 
 const EmptyChart = ({ theme, label }: { theme: string; label: string }) => (
-    <div className={cn("h-[260px] rounded-lg border border-dashed flex items-center justify-center text-sm", theme === 'light' ? 'border-zinc-200 bg-zinc-50 text-zinc-500' : 'border-white/10 bg-white/[0.03] text-zinc-500')}>
+    <div className={cn("h-[320px] rounded-lg border border-dashed flex items-center justify-center text-sm", theme === 'light' ? 'border-zinc-200 bg-zinc-50 text-zinc-500' : 'border-white/10 bg-white/[0.03] text-zinc-500')}>
         {label}
     </div>
 );

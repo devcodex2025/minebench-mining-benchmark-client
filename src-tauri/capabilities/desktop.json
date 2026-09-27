@@ -9,6 +9,8 @@
     "main"
   ],
   "permissions": [
-    "autostart:default"
+    "autostart:default",
+    "updater:default",
+    "process:allow-restart"
   ]
 }

@@ -1,5 +1,5 @@
 ﻿import React, { Suspense, lazy, useEffect, useState } from 'react';
-import { MemoryRouter as Router, Routes, Route, useNavigate } from 'react-router-dom';
+import { MemoryRouter as Router, Routes, Route } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import { TitleBar } from './components/TitleBar';
 import BenchmarkPage from './pages/Benchmark';
@@ -10,7 +10,7 @@ import { ThemeProvider } from './contexts/ThemeContext';
 import { useTheme } from './contexts/ThemeContext';
 import { useMinerStore } from './store/useMinerStore';
 import { cn, formatHashrate } from './lib/utils';
-import { Activity, Coins, TrendingUp, AlertTriangle, X } from './components/icons';
+import { Coins, TrendingUp, AlertTriangle, X } from './components/icons';
 import { getEnvironmentConfig } from './config/environment';
 import { useSolanaAuth, SolanaAuthService } from './services/solanaAuth';
 import { ClaimRewardsModal } from './components/ClaimRewardsModal';
@@ -18,11 +18,20 @@ import { PayoutStatusCard } from './components/PayoutStatusCard';
 import { nativeApi } from './lib/native-api';
 import { backendJson } from './lib/backend-api';
 
-const PoolMonitor = () => {
+const BACKEND_SYNC_INTERVAL_MS = 60_000;
+const BACKEND_SYNC_GAP_MS = 750;
+
+const waitForSyncGap = () => new Promise((resolve) => window.setTimeout(resolve, BACKEND_SYNC_GAP_MS));
+
+const BackendSyncMonitor = () => {
     const updatePoolStatus = useMinerStore(state => state.updatePoolStatus);
     const setGlobalPoolStats = useMinerStore(state => state.setGlobalPoolStats);
+    const publicKey = useSolanaAuth(state => state.user?.publicKey);
 
     useEffect(() => {
+        let cancelled = false;
+        let syncTimer: number | null = null;
+
         const fetchPoolStats = async () => {
             try {
                 const stats = await backendJson('/api/pool/stats');
@@ -46,14 +55,49 @@ const PoolMonitor = () => {
                         });
                     });
                 }
+                window.dispatchEvent(new CustomEvent('minebench:pool-stats', { detail: stats }));
             } catch (err) {
-                console.warn('[PoolMonitor] Failed to fetch pool stats:', err);
+                console.warn('[BackendSync] Failed to fetch pool stats:', err);
             }
         };
-        fetchPoolStats();
-        const statsInterval = setInterval(fetchPoolStats, 60000);
-        return () => clearInterval(statsInterval);
-    }, [setGlobalPoolStats]);
+
+        const fetchRates = async () => {
+            try {
+                const data = await backendJson('/api/rates/current');
+                useMinerStore.getState().setExchangeRates(
+                    Number(data?.xmr_usd || 0),
+                    Number(data?.bmt_usd || 0),
+                    Number(data?.rate_xmr_bmt || 0)
+                );
+            } catch (err) {
+                console.warn('[BackendSync] Failed to fetch rates:', err);
+            }
+        };
+
+        const fetchRewardStats = async () => {
+            if (publicKey) await SolanaAuthService.getInstance().fetchMiningStats(publicKey);
+        };
+
+        const runSyncQueue = async () => {
+            const startedAt = Date.now();
+            for (const job of [fetchPoolStats, fetchRates, fetchRewardStats]) {
+                if (cancelled) return;
+                await job();
+                if (!cancelled) await waitForSyncGap();
+            }
+
+            if (!cancelled) {
+                const elapsed = Date.now() - startedAt;
+                syncTimer = window.setTimeout(runSyncQueue, Math.max(1_000, BACKEND_SYNC_INTERVAL_MS - elapsed));
+            }
+        };
+
+        void runSyncQueue();
+        return () => {
+            cancelled = true;
+            if (syncTimer) window.clearTimeout(syncTimer);
+        };
+    }, [publicKey, setGlobalPoolStats, updatePoolStatus]);
 
     return null;
 };
@@ -123,12 +167,10 @@ const StressTestPage = lazy(() => import('./pages/StressTest'));
 
 const Dashboard = () => {
     const {
-        pools,
         dbTotalBMT,
         deviceType,
         poolHashrateTotal,
         poolMinersCount,
-        poolNetworkHashrate,
         xmrUsd,
         bmtUsd,
         rateXmrBmt,
@@ -138,37 +180,6 @@ const Dashboard = () => {
     const { user, isConnected, miningStats } = useSolanaAuth();
     const { theme } = useTheme();
 
-    // Fetch exchange rates on Dashboard mount
-    useEffect(() => {
-        const fetchRates = async () => {
-            try {
-                const data = await backendJson('/api/rates/current');
-
-                const nextXmrUsd = Number(data?.xmr_usd || 0);
-                const nextBmtUsd = Number(data?.bmt_usd || 0);
-                const nextRate = Number(data?.rate_xmr_bmt || 0);
-
-                // Update store with rates
-                const { setExchangeRates } = useMinerStore.getState();
-                setExchangeRates(
-                    Number.isFinite(nextXmrUsd) ? nextXmrUsd : 0,
-                    Number.isFinite(nextBmtUsd) ? nextBmtUsd : 0,
-                    Number.isFinite(nextRate) ? nextRate : 0
-                );
-            } catch (err) {
-                console.warn('[Dashboard] Failed to fetch rates:', err);
-            }
-        };
-
-        fetchRates();
-    }, []);
-
-    const cpuPool = pools['cpu'];
-    const poolLabels: Record<string, string> = {
-        'cpu': 'XMR Pool MineBench',
-        'cpu-backup': 'XMR Pool MineBench'
-    };
-    const navigate = useNavigate();
     const [benchmarkHashrate, setBenchmarkHashrate] = useState<number>(0);
     const [lastBenchmarkDate, setLastBenchmarkDate] = useState<Date | null>(null);
     const [benchmarkDeviceName, setBenchmarkDeviceName] = useState('');
@@ -500,8 +511,6 @@ const Dashboard = () => {
     );
 };
 
-const Placeholder = ({ name }: { name: string }) => <div className="text-2xl font-bold p-6">{name} (Under Construction)</div>;
-
 const App: React.FC = () => {
     // Fetch public configuration on mount
     useEffect(() => {
@@ -514,7 +523,7 @@ const App: React.FC = () => {
             <Router>
                 <TitleBar />
                 <DisplayWarningBanner />
-                <PoolMonitor />
+                <BackendSyncMonitor />
                 <Layout>
                     <Suspense fallback={<div className="p-10 text-zinc-500 italic">Loading components...</div>}>
                         <Routes>

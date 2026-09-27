@@ -138,6 +138,14 @@ export interface RewardHistoryEntry {
 }
 
 export interface PayoutStatus {
+  queue?: {
+    pendingCount: number;
+    requestedAmountBmt: number;
+    amountBmt: number;
+    feeBmt: number;
+    totalPendingCount: number;
+    batchPendingCount: number;
+  };
   id: string;
   status: 'pending' | 'completed' | 'failed' | string;
   requestedAmountBmt: number;

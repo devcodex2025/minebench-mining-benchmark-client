@@ -3,7 +3,7 @@
  * Дозволяє легко використовувати конфігурацію в React компонентах
  */
 
-import { getEnvironmentConfig, EnvironmentConfig, getEnvironment, isDevelopment, isProduction } from '../config/environment';
+import { getEnvironmentConfig, type EnvironmentConfig, isDevelopment, isProduction } from '../config/environment';
 
 /**
  * Hook to get environment configuration

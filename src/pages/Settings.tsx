@@ -1,11 +1,19 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Download, RefreshCw, Info, Settings as SettingsIcon, CheckCircle, Lock, ExternalLink } from '../components/icons';
+import { Download, RefreshCw, Info, Settings as SettingsIcon, Lock, ExternalLink, Cpu, Shield } from '../components/icons';
 import { useTheme } from '../contexts/ThemeContext';
 import { cn } from '../lib/utils';
+import {
+  formatClockGhz,
+  formatPercent,
+  formatRpm,
+  formatTemperature,
+  formatWatts,
+} from '../lib/cpu-telemetry';
+import type { CpuTelemetryDebug, CpuSensorBrokerStatus, CpuSensorBrokerSnapshot, CpuSensorBrokerDiagnostic } from '../lib/cpu-telemetry';
 import { useMinerStore } from '../store/useMinerStore';
 import { useEnvironment } from '../hooks/useEnvironment';
 import { nativeApi } from '../lib/native-api';
-import { getAppUpdateStatus, getInitialAppUpdateStatus, RELEASES_URL } from '../services/appUpdate';
+import { getAppUpdateStatus, getInitialAppUpdateStatus, installAppUpdate, RELEASES_URL } from '../services/appUpdate';
 import {
   getInitialXmrigVersionInfo,
   getXmrigVersionPresentation,
@@ -14,6 +22,8 @@ import {
 export const Settings = () => {
   const { theme, toggleTheme } = useTheme();
   const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const [installingUpdate, setInstallingUpdate] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<number | null>(null);
   const [updateChecked, setUpdateChecked] = useState(false);
   const [checkingXmrig, setCheckingXmrig] = useState(false);
   const [xmrigVersion, setXmrigVersion] = useState(getInitialXmrigVersionInfo);
@@ -88,8 +98,31 @@ export const Settings = () => {
     setCheckingUpdates(false);
   };
 
-  const handleDownloadUpdate = () => {
-    openExternal(RELEASES_URL);
+  const handleDownloadUpdate = async () => {
+    if (!updateStatus.canInstall) {
+      await openExternal(RELEASES_URL);
+      return;
+    }
+
+    setInstallingUpdate(true);
+    setUpdateProgress(0);
+    let downloaded = 0;
+    let total = 0;
+    try {
+      await installAppUpdate((event) => {
+        if (event.event === 'Started') total = event.data.contentLength || 0;
+        if (event.event === 'Progress') downloaded += event.data.chunkLength;
+        if (event.event === 'Finished') setUpdateProgress(100);
+        else if (total > 0) setUpdateProgress(Math.min(99, Math.round((downloaded / total) * 100)));
+      });
+    } catch (err) {
+      setUpdateStatus((current) => ({
+        ...current,
+        error: err instanceof Error ? err.message : 'Failed to install update',
+      }));
+      setInstallingUpdate(false);
+      setUpdateProgress(null);
+    }
   };
 
   const handleXmrigUpdate = () => {
@@ -173,10 +206,10 @@ export const Settings = () => {
               <span className="font-mono text-sm font-bold text-yellow-400">v{updateStatus.currentVersion}</span>
             </div>
             <p className={cn("mt-2 min-h-4", subLabelClass)}>
-              {updateStatus.error
-                ? 'Latest-version check unavailable'
-                : updateStatus.updateAvailable
+              {updateStatus.updateAvailable
                   ? `v${updateStatus.latestVersion} available`
+                : updateStatus.error
+                  ? 'Latest-version check unavailable'
                   : updateChecked
                     ? 'Latest installed'
                     : 'Ready to check'}
@@ -201,10 +234,15 @@ export const Settings = () => {
                 <button
                   type="button"
                   onClick={handleDownloadUpdate}
+                  disabled={installingUpdate}
                   className="inline-flex items-center gap-2 rounded bg-yellow-400 px-3 py-2 text-xs font-bold text-zinc-950 transition-colors hover:bg-yellow-300"
                 >
-                  <Download size={14} />
-                  Get v{updateStatus.latestVersion}
+                  <Download size={14} className={installingUpdate ? 'animate-pulse' : ''} />
+                  {installingUpdate
+                    ? `Updating${updateProgress !== null ? ` ${updateProgress}%` : '…'}`
+                    : updateStatus.canInstall
+                      ? `Install v${updateStatus.latestVersion}`
+                      : `Get v${updateStatus.latestVersion}`}
                 </button>
               )}
             </div>
@@ -258,6 +296,11 @@ export const Settings = () => {
           </div>
         </div>
       </div>
+
+      {/* CPU sensor diagnostics. Windows has no generic CPU die temperature API,
+          so this exists to explain on any given PC which provider was found and
+          which sensors are missing. */}
+      <CpuSensorDiagnostics theme={theme} isNative={!!isNative} />
 
       {/* Other Settings */}
       <div className={cardClass}>
@@ -384,8 +427,353 @@ export const Settings = () => {
 };
 
 // Simple Monero wallet validation: starts with 4 or 8 and ~95 characters
-const validateXmrWallet = (addr: string) => {
-  const trimmed = addr.trim();
+/**
+ * CPU sensor diagnostics.
+ *
+ * Hardware monitoring varies wildly between PCs, so this reports the detected
+ * CPU, the active telemetry provider, every raw sensor the provider exposes,
+ * and the normalized values MineBench derived from them. The JSON export is what
+ * a user sends us when a sensor cannot be detected on their machine.
+ *
+ * Only hardware identifiers are included; no wallet or account data is read.
+ */
+const CpuSensorDiagnostics: React.FC<{ theme: 'light' | 'dark'; isNative: boolean }> = ({ theme, isNative }) => {
+  const [debug, setDebug] = useState<CpuTelemetryDebug | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [showSensors, setShowSensors] = useState(false);
+  const [broker, setBroker] = useState<CpuSensorBrokerStatus | null>(null);
+  const [brokerReading, setBrokerReading] = useState<CpuSensorBrokerSnapshot | null>(null);
+  const [brokerDiagnostic, setBrokerDiagnostic] = useState<CpuSensorBrokerDiagnostic | null>(null);
+  const [brokerBusy, setBrokerBusy] = useState(false);
+  const [brokerMessage, setBrokerMessage] = useState<string | null>(null);
+
+  const cardClass = cn(
+    'rounded-xl border p-5 space-y-4',
+    theme === 'light' ? 'bg-white border-zinc-200' : 'bg-zinc-900/60 border-white/10'
+  );
+  const textClass = cn('text-sm', theme === 'light' ? 'text-zinc-600' : 'text-zinc-400');
+
+  const refreshBrokerStatus = useCallback(async () => {
+    if (!isNative) return;
+    try {
+      setBroker(await nativeApi.system.getCpuSensorBrokerStatus());
+    } catch {
+      // Diagnostics must not fail just because the broker status is unreadable.
+    }
+  }, [isNative]);
+
+  /**
+   * Asks the privileged broker for a reading.
+   *
+   * The broker is started by a scheduled task the installer registered, so this
+   * never raises an approval prompt. When the task is absent the call simply
+   * returns no snapshot, which is a normal state rather than an error.
+   */
+  const requestBrokerReading = useCallback(async () => {
+    setBrokerBusy(true);
+    setBrokerMessage(null);
+    try {
+      const result = await nativeApi.system.readCpuSensorBroker();
+      if (result?.snapshot) {
+        setBrokerReading(result.snapshot);
+        setBrokerMessage(null);
+      } else {
+        setBrokerReading(null);
+        setBrokerMessage(
+          'The sensor broker returned no reading. Check the detail above; the installer must register its scheduled task.'
+        );
+      }
+      await refreshBrokerStatus();
+    } catch (err: any) {
+      setBrokerMessage(err?.message ?? String(err));
+    } finally {
+      setBrokerBusy(false);
+    }
+  }, [refreshBrokerStatus]);
+
+  useEffect(() => {
+    void refreshBrokerStatus();
+  }, [refreshBrokerStatus]);
+
+  /**
+   * Runs the full broker diagnostic.
+   *
+   * This is the report to ask for when temperature is missing on a machine we
+   * cannot inspect: it names the failing link instead of leaving a bare "N/A".
+   */
+  const runBrokerDiagnostic = useCallback(async () => {
+    setBrokerBusy(true);
+    setBrokerMessage(null);
+    try {
+      setBrokerDiagnostic(await nativeApi.system.diagnoseCpuSensorBroker());
+      await refreshBrokerStatus();
+    } catch (err: any) {
+      setBrokerMessage(err?.message ?? String(err));
+    } finally {
+      setBrokerBusy(false);
+    }
+  }, [refreshBrokerStatus]);
+
+  const runDiagnostics = useCallback(async () => {
+    if (!isNative) {
+      setError('CPU sensor diagnostics require the desktop app.');
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      setDebug(await nativeApi.system.getCpuTelemetryDebug());
+      await refreshBrokerStatus();
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, [isNative, refreshBrokerStatus]);
+
+  const downloadDiagnostics = useCallback(() => {
+    if (!debug) return;
+    const blob = new Blob([JSON.stringify(debug, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `minebench-cpu-sensors-${Date.now()}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }, [debug]);
+
+  return (
+    <div className={cardClass}>
+      <div className="flex items-start gap-3">
+        <Cpu size={20} className="text-emerald-400 mt-1 flex-shrink-0" />
+        <div className="flex-1">
+          <h2 className={cn('text-lg font-semibold', theme === 'light' ? 'text-zinc-900' : 'text-white')}>
+            CPU Sensor Diagnostics
+          </h2>
+          <p className={cn('mt-1', textClass)}>
+            Determine which CPU sensors MineBench can read on this PC, and why others are missing.
+          </p>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={runDiagnostics}
+          disabled={loading || !isNative}
+          className={cn(
+            'inline-flex items-center gap-2 rounded border px-3 py-2 text-xs font-semibold transition-colors',
+            theme === 'light'
+              ? 'border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-100'
+              : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10',
+            (loading || !isNative) && 'cursor-not-allowed opacity-60'
+          )}
+        >
+          <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+          {loading ? 'Scanning…' : 'Run diagnostics'}
+        </button>
+        {debug && (
+          <button
+            type="button"
+            onClick={downloadDiagnostics}
+            className="inline-flex items-center gap-2 rounded bg-emerald-400 px-3 py-2 text-xs font-bold text-zinc-950 transition-colors hover:bg-emerald-300"
+          >
+            <Download size={14} />
+            Save report
+          </button>
+        )}
+      </div>
+
+      {error && (
+        <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-500">{error}</div>
+      )}
+
+      {/* Bundled sensor helper: the only path to CPU die temperature on a stock
+          Windows install, because it needs a kernel driver and therefore one
+          administrator approval. */}
+      <div className={cn('rounded-lg border p-4 space-y-3', theme === 'light' ? 'bg-zinc-50 border-zinc-200' : 'bg-black/20 border-white/10')}>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className={cn('text-xs font-semibold uppercase tracking-widest', theme === 'light' ? 'text-zinc-700' : 'text-zinc-300')}>
+              CPU temperature broker
+            </div>
+            <p className={cn('mt-1 text-xs', textClass)}>
+              Windows exposes no generic CPU temperature sensor. MineBench reads it through the
+              WHQL-signed PawnIO driver with a small native broker that the installer starts
+              through a scheduled task — no administrator prompt, and no third-party monitoring
+              application.
+            </p>
+          </div>
+          <span
+            className={cn(
+              'whitespace-nowrap rounded-full border px-2 py-0.5 text-[10px] font-semibold',
+              broker?.taskRegistered
+                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+                : theme === 'light'
+                  ? 'border-zinc-300 bg-white text-zinc-600'
+                  : 'border-white/10 bg-white/5 text-zinc-400'
+            )}
+          >
+            {broker ? (broker.taskRegistered ? 'Ready' : 'Task not registered') : 'Checking…'}
+          </span>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={requestBrokerReading}
+            disabled={brokerBusy || !isNative || broker?.supported === false}
+            className={cn(
+              'inline-flex items-center gap-2 rounded bg-emerald-400 px-3 py-2 text-xs font-bold text-zinc-950 transition-colors hover:bg-emerald-300',
+              (brokerBusy || !isNative || broker?.supported === false) && 'cursor-not-allowed opacity-60'
+            )}
+          >
+            <Shield size={14} />
+            {brokerBusy ? 'Reading…' : 'Read CPU temperature'}
+          </button>
+          <button
+            type="button"
+            onClick={runBrokerDiagnostic}
+            disabled={brokerBusy || !isNative}
+            className={cn(
+              'inline-flex items-center gap-2 rounded border px-3 py-2 text-xs font-semibold transition-colors',
+              theme === 'light'
+                ? 'border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-100'
+                : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10',
+              (brokerBusy || !isNative) && 'cursor-not-allowed opacity-60'
+            )}
+          >
+            <RefreshCw size={14} className={brokerBusy ? 'animate-spin' : ''} />
+            Diagnose
+          </button>
+        </div>
+
+        {brokerDiagnostic && (
+          <div className={cn('rounded-lg border p-3 space-y-1 text-xs font-mono', theme === 'light' ? 'bg-zinc-50 border-zinc-200' : 'bg-black/20 border-white/10')}>
+            {brokerDiagnostic.steps.map((step) => (
+              <div key={step.step} className="flex items-start justify-between gap-3">
+                <span className={step.ok ? 'text-emerald-500' : 'text-amber-500'}>
+                  {step.ok ? '✓' : '✗'} {step.step}
+                </span>
+                <span className={cn('text-right flex-1', textClass)}>{step.detail}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {(brokerMessage || broker?.detail) && (
+          <p className={cn('text-xs', broker?.taskRegistered ? textClass : 'text-amber-500')}>
+            {brokerMessage ?? broker?.detail}
+          </p>
+        )}
+
+        {brokerReading && (
+          <div className={cn('rounded-lg border p-3 space-y-1 text-xs font-mono', theme === 'light' ? 'bg-zinc-50 border-zinc-200' : 'bg-black/20 border-white/10')}>
+            <div className="flex justify-between gap-4">
+              <span className={textClass}>Temperature</span>
+              <span>{formatTemperature(brokerReading.temperature_c)}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className={textClass}>Register</span>
+              <span>{brokerReading.temperature_source ?? 'n/a'}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className={textClass}>Package power</span>
+              <span>{formatWatts(brokerReading.package_power_w)}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className={textClass}>Module</span>
+              <span>{brokerReading.module ?? 'n/a'}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className={textClass}>Raw SMN</span>
+              <span>{brokerReading.raw_smn ?? 'n/a'}</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {debug && (
+        <div className="space-y-3">
+          <div className={cn('rounded-lg border p-4 space-y-2 text-xs font-mono', theme === 'light' ? 'bg-zinc-50 border-zinc-200' : 'bg-black/20 border-white/10')}>
+            <div className="flex justify-between gap-4">
+              <span className={textClass}>CPU</span>
+              <span className="text-right">{debug.cpu_model}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className={textClass}>Cores</span>
+              <span>
+                {debug.physical_cores ?? '?'} physical / {debug.logical_cores} logical
+              </span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className={textClass}>Provider</span>
+              <span>{debug.provider_label}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className={textClass}>Temperature reliable</span>
+              <span className={debug.temperature_reliable ? 'text-emerald-400' : 'text-amber-400'}>
+                {debug.temperature_reliable ? 'yes' : 'no'}
+              </span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className={textClass}>Raw sensors</span>
+              <span>{debug.raw_sensors.length}</span>
+            </div>
+          </div>
+
+          {debug.notes.length > 0 && (
+            <ul className={cn('list-disc pl-5 space-y-1 text-xs', textClass)}>
+              {debug.notes.map((note) => (
+                <li key={note}>{note}</li>
+              ))}
+            </ul>
+          )}
+
+          <div className={cn('rounded-lg border p-4 space-y-2 text-xs font-mono', theme === 'light' ? 'bg-zinc-50 border-zinc-200' : 'bg-black/20 border-white/10')}>
+            <div className={cn('uppercase tracking-widest text-[10px]', textClass)}>Normalized values</div>
+            <div className="flex justify-between gap-4"><span className={textClass}>Temperature</span><span>{formatTemperature(debug.normalized.temperature_c)}</span></div>
+            <div className="flex justify-between gap-4"><span className={textClass}>Package temp</span><span>{formatTemperature(debug.normalized.package_temperature_c)}</span></div>
+            <div className="flex justify-between gap-4"><span className={textClass}>Utilization</span><span>{formatPercent(debug.normalized.utilization_percent)}</span></div>
+            <div className="flex justify-between gap-4"><span className={textClass}>Clock</span><span>{formatClockGhz(debug.normalized.clock_mhz)}</span></div>
+            <div className="flex justify-between gap-4"><span className={textClass}>Power</span><span>{formatWatts(debug.normalized.package_power_w)}</span></div>
+            <div className="flex justify-between gap-4"><span className={textClass}>Fan</span><span>{formatRpm(debug.normalized.fan_rpm)}</span></div>
+            <div className="flex justify-between gap-4"><span className={textClass}>Missing</span><span>{debug.normalized.missing.join(', ') || 'none'}</span></div>
+            <div className="flex justify-between gap-4"><span className={textClass}>Collection cost</span><span>{debug.normalized.collection_ms.toFixed(1)} ms</span></div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setShowSensors((value) => !value)}
+            className={cn('text-xs font-semibold underline-offset-2 hover:underline', textClass)}
+          >
+            {showSensors ? 'Hide raw sensor dump' : `Show raw sensor dump (${debug.raw_sensors.length})`}
+          </button>
+
+          {showSensors && (
+            <div className={cn('max-h-72 overflow-auto rounded-lg border p-3 text-[11px] font-mono', theme === 'light' ? 'bg-zinc-50 border-zinc-200' : 'bg-black/20 border-white/10')}>
+              {debug.raw_sensors.length === 0 ? (
+                <div className={textClass}>The active provider reported no sensors.</div>
+              ) : (
+                debug.raw_sensors.map((sensor, index) => (
+                  <div key={`${sensor.name}-${index}`} className="flex justify-between gap-3 py-0.5">
+                    <span className="truncate" title={`${sensor.hardware ?? ''} ${sensor.name}`}>
+                      {sensor.type}: {sensor.name}
+                    </span>
+                    <span className="whitespace-nowrap">{sensor.value ?? 'null'}{sensor.unit ?? ''}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const validateXmrWallet = (addr: string) => {  const trimmed = addr.trim();
   if (!trimmed) return { ok: false, reason: 'Wallet is required' };
   if (!(trimmed.startsWith('4') || trimmed.startsWith('8'))) return { ok: false, reason: 'Must start with 4 or 8' };
   if (trimmed.length < 90 || trimmed.length > 110) return { ok: false, reason: 'Unexpected length' };
@@ -408,7 +796,7 @@ const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
 
   const [localWallet, setLocalWallet] = useState(wallet);
   const [localPool, setLocalPool] = useState(poolUrl);
-  const [localDonate, setLocalDonate] = useState(donateLevel);
+  const [localDonate] = useState(donateLevel);
   const [saving, setSaving] = useState(false);
   const validation = useMemo(() => validateXmrWallet(localWallet), [localWallet]);
 
@@ -463,7 +851,7 @@ const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
           <div>
             <p className={cn("text-xs font-black uppercase tracking-[0.2em]", theme === 'light' ? 'text-amber-900' : 'text-amber-400')}>Premium Feature</p>
             <p className={cn("text-xs mt-1 font-medium", theme === 'light' ? 'text-amber-800' : 'text-amber-200/50')}>
-              Custom Monero wallet support requires a Premium License ($29/year).
+              Custom Monero wallet support requires Premium (29 USDC once, no expiry; network fees extra).
             </p>
           </div>
           <button
