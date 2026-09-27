@@ -9,6 +9,7 @@ import { nativeApi } from '../lib/native-api';
 import { authStorage } from '../lib/auth-storage';
 import { BackendApiError, backendJson } from '../lib/backend-api';
 import { mapRewardsBalanceToMiningStats } from './miningStatsMapper';
+import { MultiDeviceSyncService } from './multiDeviceSync';
 
 const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 
@@ -368,10 +369,14 @@ export class SolanaAuthService {
           throw new Error('Stop mining before disconnecting wallet');
         }
 
+        const walletPublicKey = useSolanaAuth.getState().user?.publicKey;
         this.stopTokenRefresh();
         useSolanaAuth.getState().disconnect();
         localStorage.removeItem('minebench_user');
         authStorage.clearSecrets();
+        if (walletPublicKey) {
+          MultiDeviceSyncService.release(walletPublicKey);
+        }
 
         // Для web - відключаємо напряму
         const wallet = this.getInjectedWallet();
