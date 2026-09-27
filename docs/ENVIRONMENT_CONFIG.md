@@ -1,5 +1,7 @@
 # Environment Configuration Guide
 
+> **Note:** this document predates the Tauri v2 migration. The current desktop client is **Tauri v2** (`src-tauri/`); use `npm run tauri:dev`. `electron/main.cjs` references below no longer exist.
+
 ## Overview
 
 The MineBench Client now supports multiple environment configurations for seamless development and production switching. This allows developers to quickly change from local development URLs to production URLs (https://minebench.cloud) for wallet authorization and API endpoints.
@@ -42,9 +44,9 @@ npm run build:dev
 npm run build:prod
 ```
 
-### Full Development with Electron
+### Full Development with Tauri
 ```bash
-npm run dev:all
+npm run tauri:dev
 ```
 
 ### Building Distributables
@@ -154,9 +156,9 @@ Edit `src/config/environment.ts` to modify the configurations directly.
 | `VITE_SOLANA_RPC_URL` | Solana RPC endpoint | devnet | mainnet-beta |
 | `VITE_POOL_API_URL` | Pool API endpoint | localhost | minebench.cloud |
 
-## Electron Public Pool Config (Non-sensitive)
+## Tauri Public Pool Config (Non-sensitive)
 
-These are read by `electron/main.cjs` to fetch pool host/port config from the backend and reduce hardcoded values in the client build:
+These are read by the Tauri client (`src-tauri/`) to fetch pool host/port config from the backend and reduce hardcoded values in the client build:
 
 | Variable | Description | Dev Value | Prod Value |
 |----------|-------------|-----------|------------|
@@ -182,8 +184,8 @@ These are read by `electron/main.cjs` to fetch pool host/port config from the ba
 # Terminal 1: Start your local backend
 npm run dev:local  # Start frontend in dev mode
 
-# Terminal 2: Start Electron
-npm run electron
+# Terminal 2: Start Tauri
+npm run tauri:dev
 
 # All requests go to localhost:3000
 ```
@@ -191,7 +193,7 @@ npm run electron
 ### Workflow 2: Test Production Integration
 ```bash
 npm run dev:prod   # Start frontend with production URLs
-npm run electron   # Start Electron
+npm run tauri:dev  # Start Tauri
 
 # All requests go to minebench.cloud
 # Useful for testing live API before building

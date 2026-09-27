@@ -1,382 +1,126 @@
-# Solana Wallet Authentication через Браузер
+# Solana Wallet Authentication (Tauri Desktop + Web)
 
-## Огляд
+## Overview
 
-MineBench використовує системний браузер для підключення Solana гаманця, що забезпечує:
-- ✅ Сумісність з усіма browser extensions (Phantom, Solflare, Magic Eden, Ledger)
-- ✅ Безпечна автентифікація через підписи Solana
-- ✅ Підтримка як Electron app, так і web версії
-- ✅ OAuth-style flow з localhost callback
+MineBench authenticates a Solana wallet with a system-browser flow. The desktop
+client is **Tauri v2** (Rust core + WebView), not Electron.
 
-## Архітектура
+- Works with any **Wallet Standard** wallet: Phantom, Solflare, Backpack, Glow,
+  Magic Eden, and others (no per-wallet code).
+- Ownership is proven with a Solana `signMessage` signature.
+- Login is protected by a **server-issued single-use nonce** (anti-replay).
+- The session is a JWT that is validated and refreshed server-side.
+
+## Architecture
 
 ```
-┌─────────────────┐         ┌──────────────────┐         ┌─────────────────┐
-│  Electron App   │         │  System Browser  │         │  MineBench Web  │
-│                 │         │                  │         │                 │
-│  1. Click       │────────▶│  2. Opens URL    │────────▶│  3. Connect     │
-│  "Connect       │         │  minebench.cloud │         │  Wallet UI      │
-│   Wallet"       │         │  /wallet-connect │         │                 │
-└─────────────────┘         └──────────────────┘         └─────────────────┘
-        ▲                                                          │
-        │                                                          │
-        │   6. Receives data                                      │ 4. User connects
-        │   {publicKey, signature}                                │    Phantom/Solflare
-        │                                                          │
-        │                                                          ▼
-        │                   ┌──────────────────┐         ┌─────────────────┐
-        └───────────────────│  localhost:PORT  │◀────────│  5. Redirects   │
-                            │  /callback       │         │  with auth data │
-                            │                  │         │                 │
-                            │  HTTP Server     │         │  Browser closes │
-                            └──────────────────┘         └─────────────────┘
+┌─────────────────┐        ┌──────────────────┐        ┌─────────────────────┐
+│  Tauri Client   │        │  System Browser  │        │  MineBench UI       │
+│  (Rust + WebView)│──────▶│  minebench.cloud │──────▶│  /wallet-connect    │
+│  solana_connect_ │        │  /wallet-connect │        │  WalletMultiButton  │
+│  wallet command  │        │                  │        │  (Wallet Standard)  │
+└─────────────────┘        └──────────────────┘        └─────────────────────┘
+        ▲                                                         │
+        │  1. GET /api/auth/nonce?walletAddress=…                 │
+        │  2. sign server message (nonce)                         │
+        │  3. GET localhost:PORT/callback?state=…&publicKey=…     │
+        │     &signature=…&message=…                              │
+        └─────────────────────────────────────────────────────────┘
+              │
+              ▼
+   POST /api/auth/login { walletAddress, signature, message }
+     → verify signature + consume nonce → JWT (24h)
 ```
 
-## Як це працює
+## Desktop flow (Tauri)
 
-### 1. Запуск з Electron App
+1. `SolanaAuthService.connectWallet()` detects Tauri via `__TAURI_INTERNALS__`
+   and invokes the `solana_connect_wallet` Rust command
+   (`MineBench-Client/src-tauri/src/commands.rs`).
+2. The command starts a loopback Axum server on a random port and opens
+   `https://minebench.cloud/wallet-connect?callbackUrl=http://localhost:PORT/callback?state=<csrf>`
+   in the system browser. A 300 s timeout applies.
+3. On the page the user selects a wallet via `WalletMultiButton`. The page calls
+   `GET /api/auth/nonce?walletAddress=<pubkey>`, receives the exact message to sign
+   (containing a single-use nonce), signs it, then GET-redirects to the loopback
+   callback with `publicKey`, base64 `signature` and `message`.
+4. Rust validates the `state` value, resolves the pending promise, and the client
+   normalizes the signature (base64 → base58).
+5. The client posts `{ walletAddress, signature, message }` to
+   `POST /api/auth/login`. The backend verifies the Ed25519 signature, consumes the
+   nonce atomically, and returns a JWT.
 
-Користувач натискає кнопку "Connect Solana Wallet":
+## Web flow
 
-```typescript
-// SolanaAuthButton.tsx
-const handleConnect = async () => {
-  const service = SolanaAuthService.getInstance();
-  const user = await service.connectWallet();
-  // user: { publicKey, signature }
-};
+`SolanaAuthService.connectWallet()` probes injected providers
+(`window.phantom?.solana`, `window.solflare`, `window.backpack`, `window.glow`,
+`window.magicEden?.solana`, `window.solana`), requests the nonce, signs the server
+message, and logs in.
+
+## Login message (signed by the wallet)
+
+```
+MineBench Wallet Authentication
+Domain: minebench.cloud
+Wallet: <base58 public key>
+Nonce: <32 hex chars, server issued>
+Issued At: <ISO-8601>
+Expires At: <ISO-8601>
 ```
 
-### 2. IPC Handler створює localhost server
+The server stores the nonce, its expiry (default 300 s) and the exact message.
+Login succeeds only when the signature is valid **and** the referenced nonce
+exists, is unused, is unexpired, and belongs to the same wallet. Consumption is a
+conditional `UPDATE ... WHERE used_at IS NULL AND expires_at > now()`.
 
-```javascript
-// electron/main.cjs
-ipcMain.handle('solana-connect-wallet', async () => {
-  // Start HTTP server on random port
-  const port = await startOAuthServer(); // returns e.g. 53241
-  
-  // Construct auth URL
-  const authUrl = `https://minebench.cloud/wallet-connect?callbackUrl=http://localhost:${port}/callback`;
-  
-  // Open in system browser
-  await shell.openExternal(authUrl);
-  
-  // Wait for callback...
-  return { publicKey, signature };
-});
-```
+## Session lifecycle
 
-### 3. Браузер відкриває wallet-connect сторінку
+| Concern | Behaviour |
+|---|---|
+| Session token | JWT, 24 h (`JWT_SECRET`, `config.jwt.expiresIn`) |
+| Validation | `GET /api/auth/session` (authGuard) on startup |
+| Refresh | `POST /api/auth/refresh` (authGuard), sliding 24 h |
+| Keep-alive | Client refreshes 5 min before expiry (`scheduleTokenRefresh`) |
+| 401 handling | `fetchMiningStats`/`reportMiningStats` refresh once, then retry |
+| Storage | JWT in web storage; the **login signature is never persisted** |
+| Wallet switch | `accountChanged`/`disconnect` invalidate the local session |
 
-URL: `https://minebench.cloud/wallet-connect?callbackUrl=http://localhost:53241/callback`
+## Backend
 
-Сторінка показує WalletMultiButton від @solana/wallet-adapter-react-ui:
+- `MineBench-Backend/src/modules/iam/iam.service.ts` — signature + nonce verification.
+- `MineBench-Backend/src/modules/iam/iam.routes.ts` — `/auth/nonce`, `/auth/login`,
+  `/auth/refresh`, `/auth/session`.
+- `MineBench-Backend/src/database/migrations/027_auth_nonce.sql` — `auth_nonces` table.
+- `AUTH_REQUIRE_NONCE` (default `true`) gates nonce enforcement during rollout.
+  Keep it `true` in production.
 
-```tsx
-// pages/wallet-connect.tsx
-<WalletMultiButton />
-```
+## Deployment order for the nonce rollout
 
-### 4. Користувач підключає гаманець
+1. Apply migration `027_auth_nonce.sql` (backup + isolated restore gate first).
+2. Deploy the backend (`AUTH_REQUIRE_NONCE=true`).
+3. Deploy MineBench-UI (wallet-connect page requests a nonce).
+4. Release the desktop client.
 
-- Phantom/Solflare extension запитує дозвіл
-- Користувач підтверджує
-- Wallet повертає publicKey
-- Запитується signature для підтвердження володіння
+Rolling back step 2 while step 1 is applied is safe. Dropping `auth_nonces` and
+staying on the nonce-enforcing backend will break login, so only roll back to the
+previous backend build together with the schema change.
 
-```typescript
-const message = new TextEncoder().encode(
-  `MineBench Wallet Authentication\nTimestamp: ${Date.now()}\nPublic Key: ${publicKey}`
-);
-const signature = await signMessage(message);
-```
+## Environment overrides (desktop)
 
-### 5. Redirect на localhost callback
+The Tauri client resolves hosts from env at runtime, then compile-time
+`option_env!`, then the production default:
 
-```typescript
-const redirectUrl = new URL(callbackUrl); // http://localhost:53241/callback
-redirectUrl.searchParams.set('publicKey', publicKey.toBase58());
-redirectUrl.searchParams.set('signature', signatureB64);
-window.location.href = redirectUrl.toString();
-```
+- `MINEBENCH_BACKEND_URL` (default `https://backend.minebench.cloud`)
+- `MINEBENCH_UI_URL` (default `https://minebench.cloud`)
+- `MINEBENCH_SOLANA_RPC_URL` (default `https://api.mainnet-beta.solana.com`)
 
-### 6. Electron отримує дані
-
-HTTP server отримує GET запит:
-```
-GET /callback?publicKey=7xK...aBc&signature=aGVs...bG8=
-```
-
-Server відповідає HTML сторінкою "✓ Wallet Connected!" і повертає дані в IPC promise:
-
-```javascript
-if (oauthCallback) {
-  oauthCallback({ publicKey, signature });
-}
-```
-
-### 7. Збереження даних
-
-```typescript
-// solanaAuth.ts
-const user: SolanaUser = {
-  publicKey: result.publicKey,
-  displayName: result.publicKey.slice(0, 8) + '...',
-  walletType: 'browser',
-  isVerified: true
-};
-
-localStorage.setItem('minebench_user', JSON.stringify(user));
-localStorage.setItem('minebench_signature', result.signature);
-```
-
-## Файли
-
-### Frontend (MineBench-Client)
-
-**src/services/solanaAuth.ts**
-- `connectWallet()` - перевіряє чи це Electron і викликає IPC
-- Для web версії - використовує window.solana напряму
-
-**src/components/SolanaAuthButton.tsx**
-- UI кнопка для підключення/відключення
-- Показує публічний ключ після підключення
-
-**src/global.d.ts**
-- TypeScript типи для `window.electron.ipcRenderer`
-
-### Backend (electron/main.cjs)
-
-**OAuth Server Functions**
-- `startOAuthServer()` - створює HTTP server на випадковому порту
-- `ipcMain.handle('solana-connect-wallet')` - обробляє запит на підключення
-- `ipcMain.handle('solana-disconnect-wallet')` - обробляє відключення
-
-### Web Auth Page (MineBench-UI)
-
-**pages/wallet-connect.tsx**
-- Next.js сторінка з WalletProvider
-- Показує WalletMultiButton
-- Автоматично redirect після підключення
-
-## Deployment
-
-### 1. Build MineBench-UI
-
-```bash
-cd MineBench-UI
-npm install
-npm run build
-```
-
-### 2. Deploy на minebench.cloud
-
-```bash
-# Upload build до static hosting
-npm run deploy
-
-# Або через Docker
-docker build -t minebench-ui .
-docker run -p 3000:3000 minebench-ui
-```
-
-### 3. Configure URLs
-
-У `electron/main.cjs` вказати production URL:
-
-```javascript
-const authUrl = `https://minebench.cloud/wallet-connect?callbackUrl=${encodeURIComponent(`http://localhost:${port}/callback`)}`;
-```
-
-Для dev режиму:
-```javascript
-const authUrl = `http://localhost:3000/wallet-connect?callbackUrl=${encodeURIComponent(`http://localhost:${port}/callback`)}`;
-```
-
-## Security
-
-### CORS
-
-MineBench-UI повинен дозволити CORS для localhost:
-
-```typescript
-// next.config.js
-module.exports = {
-  async headers() {
-    return [
-      {
-        source: '/wallet-connect',
-        headers: [
-          { key: 'Access-Control-Allow-Origin', value: 'http://localhost:*' },
-          { key: 'Access-Control-Allow-Methods', value: 'GET' },
-        ],
-      },
-    ];
-  },
-};
-```
-
-### Signature Verification
-
-Backend API повинен верифікувати підпис:
-
-```typescript
-import { PublicKey } from '@solana/web3.js';
-import nacl from 'tweetnacl';
-
-function verifySignature(publicKeyStr: string, signatureB64: string, message: string): boolean {
-  const publicKey = new PublicKey(publicKeyStr);
-  const signature = Buffer.from(signatureB64, 'base64');
-  const messageBytes = new TextEncoder().encode(message);
-  
-  return nacl.sign.detached.verify(
-    messageBytes,
-    signature,
-    publicKey.toBytes()
-  );
-}
-```
-
-### Timeout
-
-OAuth flow має timeout 5 хвилин:
-
-```javascript
-setTimeout(() => {
-  if (oauthServer) {
-    oauthServer.server.close();
-  }
-  reject(new Error('Authentication timeout'));
-}, 5 * 60 * 1000);
-```
+This allows pointing a dev/test build at staging without a production rebuild.
 
 ## Troubleshooting
 
-### Browser не відкривається
-
-**Проблема:** `shell.openExternal()` не працює
-
-**Рішення:**
-```javascript
-const { shell } = require('electron');
-// Переконайтесь що shell імпортовано в main.cjs
-```
-
-### localhost connection refused
-
-**Проблема:** Браузер не може підключитись до localhost:PORT
-
-**Причина:** Firewall блокує порт
-
-**Рішення:**
-- Перевірте Windows Firewall
-- Додайте виняток для Electron app
-- Або використовуйте fixed port замість random
-
-### Signature invalid
-
-**Проблема:** Backend відхиляє підпис
-
-**Рішення:**
-- Перевірте формат message (точний текст)
-- Timestamp повинен бути актуальним (< 5 хв)
-- base64 encoding правильний
-
-## Testing
-
-### Local Dev
-
-1. Запустити MineBench-UI:
-```bash
-cd MineBench-UI
-npm run dev
-```
-
-2. У electron/main.cjs змінити URL:
-```javascript
-const authUrl = `http://localhost:3000/wallet-connect?callbackUrl=...`;
-```
-
-3. Запустити Electron app:
-```bash
-cd MineBench-Client
-npm run dev:all
-```
-
-4. Натиснути "Connect Solana Wallet"
-5. Браузер відкриється на localhost:3000/wallet-connect
-6. Підключити Phantom/Solflare
-7. Перевірити що app отримав publicKey
-
-### Production
-
-Те ж саме, але з https://minebench.cloud
-
-## Browser Compatibility
-
-Підтримувані браузери:
-- ✅ Chrome/Edge (Phantom, Solflare)
-- ✅ Firefox (Phantom)
-- ✅ Brave (Phantom, Solflare)
-- ✅ Safari (Phantom через Safari extension)
-
-## Platform Support
-
-### ✅ Windows
-- **Браузер:** Edge, Chrome, Brave, Firefox
-- **Wallet Extensions:** Всі підтримуються
-- **Особливості:**
-  - Windows Firewall може запитати дозвіл для localhost server
-  - Дефолтний браузер відкривається через Windows Shell
-  - Швидкість відкриття: ~500ms
-
-### ✅ macOS
-- **Браузер:** Safari, Chrome, Brave, Firefox
-- **Wallet Extensions:** Всі підтримуються
-- **Особливості:**
-  - Safari extension для Phantom доступний
-  - Найшвидше відкриття браузера (~300ms)
-  - Працює на Intel і Apple Silicon
-
-### ✅ Linux
-- **Браузер:** Firefox, Chrome, Chromium, Brave
-- **Wallet Extensions:** Phantom, Solflare (Chrome/Firefox)
-- **Особливості:**
-  - Використовує `xdg-open` для дефолтного браузера
-  - Працює на X11 і Wayland
-  - Ubuntu, Fedora, Arch - перевірено
-  - Швидкість відкриття: ~800ms
-
-## Підтримувані гаманці
-
-- ✅ Phantom (найпопулярніший)
-- ✅ Solflare
-- ✅ Magic Eden Wallet
-- ✅ Ledger (через Phantom/Solflare)
-- ✅ Backpack
-- ✅ Glow
-
-Всі гаманці з @solana/wallet-adapter-wallets package.
-
-## Environment Variables
-
-MineBench-UI `.env.local`:
-```env
-NEXT_PUBLIC_WALLET_CONNECT_URL=https://minebench.cloud
-NEXT_PUBLIC_CALLBACK_TIMEOUT=300000
-```
-
-## Limitations
-
-1. **Потребує інтернет** - для відкриття minebench.cloud
-2. **Користувач повинен мати гаманець** - Phantom/Solflare встановлений
-3. **Windows Firewall** - може блокувати localhost server
-4. **Mobile не підтримується** - тільки desktop browsers
-
-## Future Improvements
-
-- [ ] QR code для мобільних гаманців
-- [ ] Deep links (minebench://) замість localhost
-- [ ] Кешування останнього publicKey
-- [ ] Автоматичний reconnect при рестарті app
-- [ ] Multi-signature support для shared accounts
+- **No wallet listed** — the page needs a Wallet Standard wallet extension in the
+  browser profile that opens; `wallet-connect` runs outside the desktop WebView.
+- **"Invalid or expired login nonce"** — the nonce was already used, expired
+  (default 300 s), or the message was altered. Start the connection again.
+- **localhost connection refused** — a firewall is blocking the loopback callback
+  port; allow the client executable.

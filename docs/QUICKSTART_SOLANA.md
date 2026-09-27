@@ -1,5 +1,7 @@
 # 🚀 Швидкий старт - Солана Інтеграція
 
+> **Note:** застаріло. Актуальний вхід через гаманець: nonce + Wallet Standard + JWT-refresh — див. [BROWSER_WALLET_AUTH.md](BROWSER_WALLET_AUTH.md). Десктопний клієнт — Tauri v2.
+
 ## Встановлення (вже виконано ✅)
 
 ```bash
@@ -93,7 +95,7 @@ if (user) {
 ### Автоматично (интеграція з майнером):
 
 ```typescript
-// В Mining.tsx або electron/main.cjs
+// В Mining.tsx або src-tauri/src/commands.rs
 
 import { MultiDeviceSyncService } from '../services/multiDeviceSync';
 
@@ -269,7 +271,7 @@ src/
 ## 🎓 Наступні кроки
 
 ### Для фронтенду:
-1. Інтегрувати electron events у MultiDeviceSync
+1. Інтегрувати Tauri events у MultiDeviceSync
 2. Додати real-time updates до Statistics
 3. Показувати нотифікації при нових винаградах
 4. Додати історію винагород за місяці

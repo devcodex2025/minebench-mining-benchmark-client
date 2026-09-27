@@ -10,7 +10,7 @@ Cross-platform benchmarking and mining client with real Monero mining under the 
 
 ## 1. Project Goal
 
-Redesign and rebuild the existing Electron-based mining client to:
+Redesign and rebuild the existing desktop mining client to:
 
 * Support **Windows, Linux, macOS**
 * Provide **real hardware benchmarking using Monero mining**
@@ -37,7 +37,7 @@ Cross-platform build system is required.
 
 ### Desktop Framework
 
-* **Electron** (existing) OR **Tauri** (preferred for v2, lower CPU/RAM usage)
+* **Tauri** (Rust + WebView, lower CPU/RAM usage)
 * Auto-updater support
 
 ### Frontend
@@ -49,7 +49,7 @@ Cross-platform build system is required.
 
 ### Backend (Client-side)
 
-* Node.js runtime (Electron) OR Rust (Tauri)
+* Rust runtime (Tauri)
 * Embedded **XMRig**
 * Secure config generation
 

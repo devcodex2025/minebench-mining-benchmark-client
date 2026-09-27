@@ -1,5 +1,7 @@
 # Підготування Windows версії з Production Автентифікацією
 
+> **Note:** this document predates the Tauri v2 migration. The current desktop client is **Tauri v2** (`src-tauri/`); use `npm run dist:win` (wrapper) or `npm run tauri:build`. Electron/`electron-builder` steps below are outdated.
+
 ## Швидкий Старт
 
 Щоб створити Windows installer з production автентифікацією (https://minebench.cloud/auth), виконайте:
@@ -124,7 +126,7 @@ npm run dist:win      # Тоді це
 
 Якщо потрібна署подпись:
 
-1. Додайте до `electron-builder.yml`:
+1. Додайте до `src-tauri/tauri.conf.json` (`bundle.windows`):
 ```yaml
 certificateFile: "path/to/certificate.pfx"
 certificatePassword: "password"

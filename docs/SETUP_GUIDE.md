@@ -1,12 +1,14 @@
 # 📋 Setup Instructions for MineBench-Client Repository
 
+> **Note:** the client is now **Tauri v2** (`src-tauri/`, Rust + WebView), not Electron. Use `npm run tauri:dev`/`npm run tauri:build`.
+
 ## Quick Setup (Copy & Paste)
 
 ### 1️⃣ Create New GitHub Repository
 
 Go to: https://github.com/new
 - Name: `MineBench-Client`
-- Description: `MineBench Desktop Mining Client - Cross-platform Electron app`
+- Description: `MineBench Desktop Mining Client - Cross-platform Tauri app`
 - Public/Private: Your choice
 - **DO NOT** add README, .gitignore, or license
 - Click "Create repository"
@@ -29,7 +31,7 @@ git remote set-url origin https://github.com/YOUR_USERNAME/MineBench-Client.git
 git commit -m "Initial commit: MineBench Desktop Client v0.2.0
 
 Features:
-- Cross-platform Electron app (Windows, macOS, Linux)
+- Cross-platform Tauri app (Windows, macOS, Linux)
 - Multi-architecture support (x64, ARM64)
 - CPU mining with XMRig 6.26.0
 - Custom UI with React + Three.js + Tailwind
@@ -41,12 +43,12 @@ Features:
 - GitHub Actions for automated releases
 
 Tech Stack:
-- Electron 31
+- Tauri v2 + Rust
 - React 18 + TypeScript
 - Tailwind CSS 4
 - Three.js + React Three Fiber
 - Zustand state management
-- Vite + electron-builder"
+- Vite + Tauri bundler"
 
 # Push to GitHub
 git push -u origin main

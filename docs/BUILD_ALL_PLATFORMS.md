@@ -1,5 +1,7 @@
 # Будування для всіх Платформ - Швидкий Довідник
 
+> **Note:** this document predates the Tauri v2 migration. The current desktop client is **Tauri v2** (`src-tauri/`); use `npm run tauri:dev` and `npm run tauri:build`. Electron/`electron-builder` steps below are outdated.
+
 ## Одна команда для всього
 
 ```bash

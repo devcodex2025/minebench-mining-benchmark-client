@@ -1,5 +1,8 @@
 # Швидкий старт: Підключення Solana гаманця
 
+> **Desktop framework:** Tauri v2 (не Electron). Актуальну архітектуру, nonce-потік
+> та порядок розгортання див. у [BROWSER_WALLET_AUTH.md](BROWSER_WALLET_AUTH.md).
+
 ## Для користувача
 
 ### Підтримувані платформи
@@ -30,9 +33,12 @@ open MineBench.app
 
 Ви побачите сторінку MineBench з кнопкою підключення гаманця.
 
-**Важливо:** Переконайтесь, що у вас встановлено один з гаманців:
+**Важливо:** Переконайтесь, що у вас встановлено один з гаманців (Wallet Standard —
+підтримується будь-який, список не вичерпний):
 - [Phantom](https://phantom.app) (рекомендований)
 - [Solflare](https://solflare.com)
+- [Backpack](https://backpack.app)
+- [Glow](https://glow.app)
 - [Magic Eden](https://magiceden.io/wallet)
 
 ### 4. Виберіть гаманець
