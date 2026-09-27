@@ -6,6 +6,7 @@ import { getEnvironmentConfig } from '../config/environment';
 import { cn } from '../lib/utils';
 import { useMinerStore } from '../store/useMinerStore';
 import { nativeApi } from '../lib/native-api';
+import { authStorage } from '../lib/auth-storage';
 import { notifyPayoutCompleted, notifyRewardsDistributed } from '../lib/reward-events';
 import { subscribeToRewardEvents } from '../lib/reward-event-stream';
 
@@ -259,6 +260,7 @@ export const SolanaAuthButton: React.FC = () => {
           authService.fetchMiningStats(stored.publicKey),
           authService.loadPremiumStatusOnStartup()
         ]);
+        authService.scheduleTokenRefresh();
         if (statsResult.status === 'rejected') {
           console.warn('[SolanaAuthButton] Failed to refresh restored wallet stats:', statsResult.reason);
         }
@@ -271,6 +273,34 @@ export const SolanaAuthButton: React.FC = () => {
     loadUser();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Desktop restores the session via the backend; the browser build must react to
+  // the injected wallet switching accounts or disconnecting, otherwise mining
+  // reports and rewards would be attributed to the previous wallet.
+  useEffect(() => {
+    if ((window as any).__TAURI_INTERNALS__) return;
+    const provider =
+      (window as any).phantom?.solana ||
+      (window as any).solflare ||
+      (window as any).backpack ||
+      (window as any).glow ||
+      (window as any).solana;
+    if (!provider?.on) return;
+
+    const invalidateSession = () => {
+      authStorage.removeToken();
+      authService.stopTokenRefresh();
+      useSolanaAuth.getState().setSessionExpired(true);
+      useSolanaAuth.getState().disconnect();
+    };
+
+    provider.on('accountChanged', invalidateSession);
+    provider.on('disconnect', invalidateSession);
+    return () => {
+      provider.off?.('accountChanged', invalidateSession);
+      provider.off?.('disconnect', invalidateSession);
+    };
+  }, [authService]);
 
   const handleConnect = async () => {
     try {

@@ -4,18 +4,13 @@
  */
 
 import { create } from 'zustand';
-import { PublicKey } from '@solana/web3.js';
 import { useMinerStore } from '../store/useMinerStore';
 import { nativeApi } from '../lib/native-api';
 import { authStorage } from '../lib/auth-storage';
 import { BackendApiError, backendJson } from '../lib/backend-api';
 import { mapRewardsBalanceToMiningStats } from './miningStatsMapper';
-// ... (interfaces remain same)
 
-const AUTH_MESSAGE_PREFIX = 'MineBench Authentication Hook: ';
 const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-
-const buildAuthMessage = (publicKey: string) => `${AUTH_MESSAGE_PREFIX}${publicKey}`;
 
 const getSignatureBytes = (signature: any): Uint8Array => {
   const raw = signature?.signature ?? signature;
@@ -65,12 +60,27 @@ const normalizeSignature = (signature: string) => {
   return decoded?.length === 64 ? encodeBase58(decoded) : signature;
 };
 
+/** Decode a JWT `exp` (ms) without verifying the signature; used only to schedule refresh. */
+const decodeJwtExpiry = (token: string): number | null => {
+  try {
+    const payload = token.split('.')[1];
+    if (!payload) return null;
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const json = JSON.parse(atob(normalized));
+    return typeof json.exp === 'number' ? json.exp * 1000 : null;
+  } catch {
+    return null;
+  }
+};
+
+export type WalletType = 'phantom' | 'solflare' | 'backpack' | 'glow' | 'magic-eden' | 'ledger' | 'browser' | 'unknown';
+
 export interface SolanaUser {
   publicKey: string;
   displayName?: string;
   avatar?: string;
   createdAt: number;
-  walletType: 'phantom' | 'magic-eden' | 'ledger' | 'browser' | 'unknown';
+  walletType: WalletType;
   isVerified: boolean;
 }
 
@@ -231,12 +241,21 @@ export const useSolanaAuth = create<SolanaAuthState>((set) => ({
     })
 }));
 
+export interface LoginNonce {
+  nonce: string;
+  message: string;
+  issuedAt: string;
+  expiresAt: string;
+}
+
 /**
  * Сервіс для роботи із Solana гаманцем
  */
 export class SolanaAuthService {
   private static instance: SolanaAuthService;
   private startupPremiumStatusPromise: Promise<void> | null = null;
+  private miningStatsRequests = new Map<string, Promise<UserMiningStats>>();
+  private tokenRefreshTimer: number | null = null;
 
   private constructor() { }
 
@@ -266,7 +285,7 @@ export class SolanaAuthService {
           publicKey: result.publicKey,
           displayName: result.publicKey.slice(0, 8) + '...',
           createdAt: Date.now(),
-          walletType: 'phantom',
+          walletType: 'browser',
           isVerified: true
         };
 
@@ -274,7 +293,6 @@ export class SolanaAuthService {
           throw new Error('Wallet callback did not include signed message. Refresh minebench.cloud and try again.');
         }
         const signature = normalizeSignature(result.signature);
-        authStorage.setSignature(signature);
         await this.login(result.publicKey, signature, result.message);
 
         // Store user after backend auth succeeds so reward/report calls have a JWT.
@@ -294,26 +312,29 @@ export class SolanaAuthService {
 
       console.log('[SolanaAuth] Using web wallet flow');
 
-      // Для web - використовуємо window.solana напряму
-      // @ts-ignore - Phantom wallet injection
-      const wallet = window.solana || window.phantom?.solana;
+      // Для web - використовуємо будь-який інжектований Solana-провайдер
+      // (Wallet Standard / legacy injection): Phantom, Solflare, Backpack, Glow, Magic Eden.
+      const wallet = this.getInjectedWallet();
 
       if (!wallet) {
-        throw new Error('Phantom wallet not installed. Please install from https://phantom.app');
+        throw new Error('No Solana wallet detected. Install Phantom, Solflare, Backpack, Glow or Magic Eden and try again.');
       }
 
       // Connect
-      await wallet.connect();
-      const publicKey = wallet.publicKey.toString();
+      const connected = await wallet.connect();
+      const publicKey = (wallet.publicKey || connected?.publicKey)?.toString?.();
+      if (!publicKey) {
+        throw new Error('Wallet did not return a public key');
+      }
       if (!wallet.signMessage) {
         throw new Error('Wallet does not support message signing');
       }
 
-      const message = buildAuthMessage(publicKey);
-      const signedMessage = await wallet.signMessage(new TextEncoder().encode(message), 'utf8');
+      // Server-issued single-use nonce; the wallet signs the exact server message.
+      const nonce = await this.getLoginNonce(publicKey);
+      const signedMessage = await wallet.signMessage(new TextEncoder().encode(nonce.message), 'utf8');
       const signature = encodeBase58(getSignatureBytes(signedMessage));
-      await this.login(publicKey, signature, message);
-      authStorage.setSignature(signature);
+      await this.login(publicKey, signature, nonce.message);
 
       const user: SolanaUser = {
         publicKey,
@@ -347,13 +368,13 @@ export class SolanaAuthService {
           throw new Error('Stop mining before disconnecting wallet');
         }
 
+        this.stopTokenRefresh();
         useSolanaAuth.getState().disconnect();
         localStorage.removeItem('minebench_user');
         authStorage.clearSecrets();
 
         // Для web - відключаємо напряму
-        // @ts-ignore
-        const wallet = window.solana || window.phantom?.solana;
+        const wallet = this.getInjectedWallet();
         if (wallet?.disconnect) {
           await wallet.disconnect();
         }
@@ -362,6 +383,11 @@ export class SolanaAuthService {
         throw err;
       }
     }
+
+  /** Fetch a single-use login nonce and the exact message to sign from the backend. */
+  async getLoginNonce(walletAddress: string): Promise<LoginNonce> {
+    return backendJson<LoginNonce>(`/api/auth/nonce?walletAddress=${encodeURIComponent(walletAddress)}`);
+  }
 
   /**
    * Login with backend using wallet signature
@@ -377,7 +403,10 @@ export class SolanaAuthService {
         }
       });
       authStorage.setToken(token);
+      // The raw login signature is a replay credential; never persist it.
+      authStorage.removeSignature();
       useSolanaAuth.getState().setSessionExpired(false);
+      this.scheduleTokenRefresh();
 
       // Fetch stats immediately after login
       await this.fetchMiningStats(walletAddress);
@@ -390,6 +419,75 @@ export class SolanaAuthService {
   }
 
   /**
+   * Rotate the session token before it expires so a long mining session is not
+   * interrupted. Returns the new token, or null when the session is no longer valid.
+   */
+  async refreshSession(): Promise<string | null> {
+    const token = authStorage.getToken();
+    if (!token) return null;
+
+    try {
+      const { token: next } = await backendJson<{ token: string }>('/api/auth/refresh', {
+        method: 'POST',
+        token
+      });
+      if (!next) return null;
+      authStorage.setToken(next);
+      useSolanaAuth.getState().setSessionExpired(false);
+      return next;
+    } catch (err) {
+      if (err instanceof BackendApiError && (err.status === 401 || err.status === 403)) {
+        authStorage.removeToken();
+        this.stopTokenRefresh();
+        useSolanaAuth.getState().setSessionExpired(true);
+      }
+      // Network/5xx: keep the token and retry on the next scheduled attempt.
+      return null;
+    }
+  }
+
+  /**
+   * Server-side session check. Network failures return true so a transient
+   * outage does not tear down an otherwise valid local session.
+   */
+  async validateSession(): Promise<boolean> {
+    const token = authStorage.getToken();
+    if (!token) return false;
+    try {
+      await backendJson('/api/auth/session', { token });
+      return true;
+    } catch (err) {
+      if (err instanceof BackendApiError && (err.status === 401 || err.status === 403)) {
+        return false;
+      }
+      return true;
+    }
+  }
+
+  /** Refresh the JWT five minutes before expiry, then reschedule. */
+  scheduleTokenRefresh(): void {
+    this.stopTokenRefresh();
+    if (typeof window === 'undefined') return;
+    const token = authStorage.getToken();
+    if (!token) return;
+    const expiry = decodeJwtExpiry(token);
+    if (!expiry) return;
+
+    const delay = Math.max(30_000, expiry - Date.now() - 5 * 60_000);
+    this.tokenRefreshTimer = window.setTimeout(async () => {
+      const next = await this.refreshSession();
+      if (next) this.scheduleTokenRefresh();
+    }, delay);
+  }
+
+  stopTokenRefresh(): void {
+    if (this.tokenRefreshTimer !== null && typeof window !== 'undefined') {
+      window.clearTimeout(this.tokenRefreshTimer);
+    }
+    this.tokenRefreshTimer = null;
+  }
+
+  /**
    * Повідомити гаманець про підключення пристрою
    */
   async registerDevice(device: MiningDevice): Promise<void> {
@@ -399,8 +497,7 @@ export class SolanaAuthService {
     }
 
     try {
-      // @ts-ignore
-      const wallet = window.solana || window.phantom?.solana;
+      const wallet = this.getInjectedWallet();
 
       // Підписати повідомлення про пристрій
       const message = new TextEncoder().encode(
@@ -412,7 +509,7 @@ export class SolanaAuthService {
         })
       );
 
-      const signature = await wallet.signMessage(message);
+      const signature = await wallet?.signMessage?.(message);
 
       // Збереження пристрою в store
       useSolanaAuth.getState().addDevice(device);
@@ -457,8 +554,19 @@ export class SolanaAuthService {
    * Отримати статистику майнінгу користувача
    */
   async fetchMiningStats(publicKey: string): Promise<UserMiningStats> {
+    const pending = this.miningStatsRequests.get(publicKey);
+    if (pending) return pending;
+
+    const request = this.fetchMiningStatsRequest().finally(() => {
+      this.miningStatsRequests.delete(publicKey);
+    });
+    this.miningStatsRequests.set(publicKey, request);
+    return request;
+  }
+
+  private async fetchMiningStatsRequest(): Promise<UserMiningStats> {
     try {
-      const storedToken = authStorage.getToken();
+      let storedToken = authStorage.getToken();
 
       // If we don't have a token, we might need to login
       if (!storedToken) {
@@ -473,16 +581,33 @@ export class SolanaAuthService {
         useSolanaAuth.getState().setSessionExpired(false);
       } catch (err) {
         if (err instanceof BackendApiError && err.status === 401) {
-          console.warn('[SolanaAuth] Session expired — showing reconnect warning');
-          authStorage.removeToken();
-          // Signal the UI to show a reconnect warning instead of silently zeroing stats.
-          useSolanaAuth.getState().setSessionExpired(true);
-          const empty = this.getEmptyStats();
-          useSolanaAuth.getState().setMiningStats(empty);
-          return empty;
+          // Try a silent token refresh first so an active mining session continues.
+          const refreshed = await this.refreshSession();
+          if (refreshed) {
+            try {
+              balanceData = await backendJson('/api/rewards/balance', { token: refreshed });
+              useSolanaAuth.getState().setSessionExpired(false);
+            } catch (retryErr) {
+              if (retryErr instanceof BackendApiError && retryErr.status === 401) {
+                useSolanaAuth.getState().setSessionExpired(true);
+                const empty = this.getEmptyStats();
+                useSolanaAuth.getState().setMiningStats(empty);
+                return empty;
+              }
+              throw retryErr;
+            }
+          } else {
+            console.warn('[SolanaAuth] Session expired — showing reconnect warning');
+            this.stopTokenRefresh();
+            useSolanaAuth.getState().setSessionExpired(true);
+            const empty = this.getEmptyStats();
+            useSolanaAuth.getState().setMiningStats(empty);
+            return empty;
+          }
+        } else {
+          // Non-auth errors: preserve existing stats so UI doesn't blank out
+          throw err;
         }
-        // Non-auth errors: preserve existing stats so UI doesn't blank out
-        throw err;
       }
       const bmtBalance = Number(balanceData?.bmt_available ?? balanceData?.available_bmt ?? balanceData?.balance ?? 0) || 0;
 
@@ -546,18 +671,27 @@ export class SolanaAuthService {
     const storedToken = authStorage.getToken();
     if (!storedToken) return;
 
-    await backendJson('/api/miner/report', {
-      method: 'POST',
-      token: storedToken,
-      body: {
-        hashrate: Number(params.hashrate || 0),
-        shares: Number(params.shares || 0),
-        timestamp: Date.now(),
-        source: params.source,
-        referenceId: params.referenceId,
-        metadata: params.metadata || {}
+    const body = {
+      hashrate: Number(params.hashrate || 0),
+      shares: Number(params.shares || 0),
+      timestamp: Date.now(),
+      source: params.source,
+      referenceId: params.referenceId,
+      metadata: params.metadata || {}
+    };
+
+    try {
+      await backendJson('/api/miner/report', { method: 'POST', token: storedToken, body });
+    } catch (err) {
+      // Keep reporting through a token rotation instead of silently dropping reports.
+      if (err instanceof BackendApiError && err.status === 401) {
+        const refreshed = await this.refreshSession();
+        if (!refreshed) return;
+        await backendJson('/api/miner/report', { method: 'POST', token: refreshed, body });
+        return;
       }
-    });
+      throw err;
+    }
   }
 
   async fetchRewardHistory(limit = 30): Promise<RewardHistoryEntry[]> {
@@ -596,19 +730,29 @@ export class SolanaAuthService {
    */
   async verifyConnection(): Promise<boolean> {
     try {
-      // Перевіряємо наявність збереженого user та signature
+      // Remove any login signature persisted by older client versions.
+      authStorage.removeSignature();
+
       const storedUser = localStorage.getItem('minebench_user');
-      const storedSignature = authStorage.getSignature();
       const storedToken = authStorage.getToken();
 
+      if (!storedUser) return false;
+
       if ((window as any).__TAURI_INTERNALS__) {
-        return !!(storedUser && (storedToken || storedSignature));
+        if (!storedToken) return false;
+        const valid = await this.validateSession();
+        if (!valid) {
+          authStorage.removeToken();
+          useSolanaAuth.getState().setSessionExpired(true);
+        } else {
+          this.scheduleTokenRefresh();
+        }
+        return valid;
       }
 
-      // Для web flow - перевіряємо підключення через window.solana
-      // @ts-ignore
-      const wallet = window.solana || window.phantom?.solana;
-      return wallet && wallet.isConnected;
+      // Для web flow - перевіряємо підключення через інжектований провайдер
+      const wallet = this.getInjectedWallet();
+      return !!(wallet && wallet.isConnected);
     } catch {
       return false;
     }
@@ -619,6 +763,8 @@ export class SolanaAuthService {
    */
   loadUserFromStorage(): SolanaUser | null {
     try {
+      // Purge any legacy persisted login signature.
+      authStorage.removeSignature();
       const stored = localStorage.getItem('minebench_user');
       if (stored) {
         const user = JSON.parse(stored) as SolanaUser;
@@ -632,14 +778,35 @@ export class SolanaAuthService {
   }
 
   /**
+   * Знайти будь-який інжектований Solana-провайдер (Wallet Standard / legacy injection).
+   */
+  private getInjectedWallet(): any | null {
+    if (typeof window === 'undefined') return null;
+    const w = window as any;
+    const candidates = [
+      w.phantom?.solana,
+      w.solflare,
+      w.backpack,
+      w.glow,
+      w.magicEden?.solana,
+      w.solana
+    ];
+    for (const candidate of candidates) {
+      if (candidate && typeof candidate.connect === 'function') return candidate;
+    }
+    return null;
+  }
+
+  /**
    * Приватний метод для визначення типу гаманця
    */
-  private detectWalletType(
-    wallet: any
-  ): 'phantom' | 'magic-eden' | 'ledger' | 'unknown' {
-    if (wallet.isPhantom) return 'phantom';
-    if (wallet.isMagicEden) return 'magic-eden';
-    if (wallet.isLedger) return 'ledger';
+  private detectWalletType(wallet: any): WalletType {
+    if (wallet?.isPhantom) return 'phantom';
+    if (wallet?.isSolflare) return 'solflare';
+    if (wallet?.isBackpack) return 'backpack';
+    if (wallet?.isGlow) return 'glow';
+    if (wallet?.isMagicEden) return 'magic-eden';
+    if (wallet?.isLedger) return 'ledger';
     return 'unknown';
   }
 
@@ -647,12 +814,12 @@ export class SolanaAuthService {
    * Приватний метод для синхронізації пристрою з серверомз
    */
   private async syncDeviceWithServer(
-    publicKey: string,
-    device: MiningDevice,
-    signature: any
+    _publicKey: string,
+    _device: MiningDevice,
+    _signature: any
   ): Promise<void> {
     try {
-      // TODO: Надіслати на backend для верифікації та зберігання
+      // TODO: Надіслати на backend для верифікації та збереження
       console.log('[SolanaAuth] Syncing device with server (TODO)');
     } catch (err) {
       console.error('Failed to sync device with server:', err);

@@ -72,7 +72,10 @@ fn validate_backend_path(path: &str) -> Result<String, String> {
     let allowed = clean_path == "/public/config"
         || clean_path == "/api/pool/stats"
         || clean_path == "/api/rates/current"
+        || clean_path == "/api/auth/nonce"
         || clean_path == "/api/auth/login"
+        || clean_path == "/api/auth/refresh"
+        || clean_path == "/api/auth/session"
         || clean_path == "/api/rewards/balance"
         || clean_path == "/api/rewards/history"
         || clean_path == "/api/rewards/claim"
@@ -296,6 +299,13 @@ pub struct OAuthCallbackParams {
     state: Option<String>,
 }
 
+/// Query for the POST callback: only `state` is carried in the URL; the signed
+/// payload arrives in the request body to avoid exposing it in the query string.
+#[derive(Deserialize)]
+struct OAuthStateQuery {
+    state: Option<String>,
+}
+
 #[derive(Serialize, Clone)]
 pub struct OAuthResult {
     #[serde(rename = "publicKey")]
@@ -427,6 +437,36 @@ async fn oauth_callback(
       "#)
 }
 
+/// POST variant of the callback. The browser sends the signed payload as a
+/// `text/plain` body (a CORS "simple request", no preflight) and keeps only the
+/// CSRF `state` in the URL. Delegates to the GET handler for the shared logic.
+async fn oauth_callback_post(
+    Query(query): Query<OAuthStateQuery>,
+    State(state): State<Arc<AppState>>,
+    body: String,
+) -> Html<&'static str> {
+    match serde_json::from_str::<OAuthCallbackParams>(&body) {
+        Ok(mut params) => {
+            if params.state.is_none() {
+                params.state = query.state;
+            }
+            oauth_callback(Query(params), State(state)).await
+        }
+        Err(_) => Html(r#"
+          <!DOCTYPE html>
+          <html>
+          <head><meta charset="utf-8" /><title>MineBench - Invalid Callback</title></head>
+          <body style="background:#0a0a0a;color:#e5e7eb;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
+            <div style="max-width:500px;text-align:center;">
+              <h1 style="color:#f87171;">Invalid wallet callback</h1>
+              <p>Please return to MineBench and try connecting again.</p>
+            </div>
+          </body>
+          </html>
+        "#),
+    }
+}
+
 #[tauri::command]
 pub async fn solana_connect_wallet(app: AppHandle) -> Result<OAuthResult, String> {
     let (tx, rx) = oneshot::channel();
@@ -438,7 +478,7 @@ pub async fn solana_connect_wallet(app: AppHandle) -> Result<OAuthResult, String
 
     let app_state = state.clone();
     let router = Router::new()
-        .route("/callback", get(oauth_callback))
+        .route("/callback", get(oauth_callback).post(oauth_callback_post))
         .with_state(app_state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 0));
