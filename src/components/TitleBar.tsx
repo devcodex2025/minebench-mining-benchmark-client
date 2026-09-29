@@ -1,14 +1,19 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect } from 'react';
 import { Minus, RefreshCw, Square, X } from './icons';
 import { cn } from '../lib/utils';
 import { useTheme } from '../contexts/ThemeContext';
 import { nativeApi } from '../lib/native-api';
-import { getAppUpdateStatus, getInitialAppUpdateStatus, installAppUpdate, RELEASES_URL } from '../services/appUpdate';
+import { useAppUpdate } from '../hooks/useAppUpdate';
 
 export const TitleBar: React.FC = () => {
   const { theme } = useTheme();
-  const [updateStatus, setUpdateStatus] = useState(getInitialAppUpdateStatus);
-  const [installingUpdate, setInstallingUpdate] = useState(false);
+  const {
+    status: updateStatus,
+    installing: installingUpdate,
+    error: updateError,
+    checkForUpdate,
+    startUpdate,
+  } = useAppUpdate();
 
   const handleMinimize = () => {
     nativeApi.invoke('window_minimize').catch((err) => {
@@ -28,36 +33,13 @@ export const TitleBar: React.FC = () => {
     });
   };
 
-  const handleOpenUpdate = async () => {
-    if (installingUpdate) return;
-    if (updateStatus.canInstall) {
-      try {
-        setInstallingUpdate(true);
-        await installAppUpdate();
-        return;
-      } catch (err) {
-        console.warn('[TitleBar] automatic update failed, opening downloads:', err);
-        setInstallingUpdate(false);
-      }
-    }
-
-    nativeApi.openExternal(RELEASES_URL).catch((err) => {
-      console.warn('[TitleBar] open update page failed, falling back to window.open:', err);
-      window.open(RELEASES_URL, '_blank', 'noopener,noreferrer');
-    });
+  const handleOpenUpdate = () => {
+    void startUpdate();
   };
 
   useEffect(() => {
-    let active = true;
-
-    getAppUpdateStatus().then((status) => {
-      if (active) setUpdateStatus(status);
-    });
-
-    return () => {
-      active = false;
-    };
-  }, []);
+    void checkForUpdate();
+  }, [checkForUpdate]);
 
   return (
     <div className={cn("fixed top-0 left-0 right-0 h-8 backdrop-blur-xl border-b flex items-center justify-between pl-4 pr-2 z-50 select-none",
@@ -70,16 +52,18 @@ export const TitleBar: React.FC = () => {
         {updateStatus.updateAvailable && (
           <button
             onClick={handleOpenUpdate}
+            disabled={installingUpdate}
             className={cn(
               "h-5 px-1.5 rounded flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide transition-colors",
               theme === 'light'
                 ? 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200'
-                : 'bg-yellow-500/10 text-yellow-400 hover:bg-yellow-500/20'
+                : 'bg-yellow-500/10 text-yellow-400 hover:bg-yellow-500/20',
+              installingUpdate && 'cursor-wait opacity-70'
             )}
-            title={`Miner needs app update: v${updateStatus.currentVersion} -> v${updateStatus.latestVersion}`}
+            title={updateError ?? `Update MineBench Client: v${updateStatus.currentVersion} -> v${updateStatus.latestVersion}`}
             style={{ WebkitAppRegion: 'no-drag' } as any}
           >
-            <RefreshCw size={12} />
+            <RefreshCw size={12} className={installingUpdate ? 'animate-spin' : ''} />
             {installingUpdate ? 'Updating…' : 'Update'}
           </button>
         )}

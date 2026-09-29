@@ -9,10 +9,29 @@ export const RELEASES_URL = 'https://bitbucket.org/minebenchapp/minebench-client
 const TAGS_URL =
   'https://api.bitbucket.org/2.0/repositories/minebenchapp/minebench-client/refs/tags?sort=-target.date&pagelen=1';
 
+/** Bounded waits so a stalled network or native process can never freeze the UI. */
+export const CHECK_TIMEOUT_MS = 15_000;
+export const INSTALL_TIMEOUT_MS = 300_000;
+export const RELAUNCH_TIMEOUT_MS = 20_000;
+
 let availableUpdate: Update | null = null;
 let updateCheckPromise: Promise<AppUpdateStatus> | null = null;
+let installPromise: Promise<void> | null = null;
 
-const isNative = () => Boolean((window as any).__TAURI_INTERNALS__);
+export const isNativeApp = (): boolean =>
+  typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__);
+
+/** Rejects after `timeoutMs`, so a hung native call releases the update UI instead of blocking it forever. */
+export const withTimeout = <T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+
+  return Promise.race([operation, guard]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+};
 
 export const normalizeVersionLabel = (version: string): string =>
   version.trim().replace(/^v/i, '');
@@ -51,6 +70,7 @@ const checkBitbucketVersion = async (): Promise<AppUpdateStatus> => {
   const response = await fetch(TAGS_URL, {
     headers: { Accept: 'application/json' },
     cache: 'no-store',
+    signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
   });
 
   if (!response.ok) throw new Error(`Bitbucket release check failed: ${response.status}`);
@@ -67,9 +87,9 @@ const checkBitbucketVersion = async (): Promise<AppUpdateStatus> => {
 };
 
 const checkAppUpdate = async (): Promise<AppUpdateStatus> => {
-  if (isNative()) {
+  if (isNativeApp()) {
     try {
-      availableUpdate = await check({ timeout: 15_000 });
+      availableUpdate = await check({ timeout: CHECK_TIMEOUT_MS });
       return {
         currentVersion: APP_VERSION,
         latestVersion: normalizeVersionLabel(availableUpdate?.version || APP_VERSION),
@@ -114,17 +134,36 @@ export const getAppUpdateStatus = async (): Promise<AppUpdateStatus> => {
   }
 };
 
-export const installAppUpdate = async (
+export const installAppUpdate = (
   onProgress?: (event: DownloadEvent) => void
 ): Promise<void> => {
-  if (!isNative()) throw new Error('Automatic updates are only available in the desktop app');
+  if (!isNativeApp()) {
+    return Promise.reject(new Error('Automatic updates are only available in the desktop app'));
+  }
 
-  const update = availableUpdate ?? await check({ timeout: 15_000 });
-  if (!update) throw new Error('No update is available');
+  // Single-flight: the title bar and Settings share one install, so a second
+  // click can never start a parallel download or leave a button stuck.
+  if (installPromise) return installPromise;
 
-  availableUpdate = update;
-  await update.downloadAndInstall(onProgress, { timeout: 300_000, restartAfterInstall: false });
-  await relaunch();
+  installPromise = (async () => {
+    const update = availableUpdate ?? await check({ timeout: CHECK_TIMEOUT_MS });
+    if (!update) throw new Error('No update is available');
+
+    availableUpdate = update;
+    await update.downloadAndInstall(onProgress, {
+      timeout: INSTALL_TIMEOUT_MS,
+      restartAfterInstall: false,
+    });
+    await withTimeout(
+      relaunch(),
+      RELAUNCH_TIMEOUT_MS,
+      'Update installed, but MineBench Client did not restart automatically. Please restart it manually.'
+    );
+  })().finally(() => {
+    installPromise = null;
+  });
+
+  return installPromise;
 };
 
 export const getInitialAppUpdateStatus = (): AppUpdateStatus => ({

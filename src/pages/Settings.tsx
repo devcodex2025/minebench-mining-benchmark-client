@@ -13,7 +13,7 @@ import type { CpuTelemetryDebug, CpuSensorBrokerStatus, CpuSensorBrokerSnapshot,
 import { useMinerStore } from '../store/useMinerStore';
 import { useEnvironment } from '../hooks/useEnvironment';
 import { nativeApi } from '../lib/native-api';
-import { getAppUpdateStatus, getInitialAppUpdateStatus, installAppUpdate, RELEASES_URL } from '../services/appUpdate';
+import { useAppUpdate } from '../hooks/useAppUpdate';
 import {
   getInitialXmrigVersionInfo,
   getXmrigVersionPresentation,
@@ -21,10 +21,16 @@ import {
 
 export const Settings = () => {
   const { theme, toggleTheme } = useTheme();
-  const [checkingUpdates, setCheckingUpdates] = useState(false);
-  const [installingUpdate, setInstallingUpdate] = useState(false);
-  const [updateProgress, setUpdateProgress] = useState<number | null>(null);
-  const [updateChecked, setUpdateChecked] = useState(false);
+  const {
+    status: updateStatus,
+    checked: updateChecked,
+    checking,
+    installing: installingUpdate,
+    progress: updateProgress,
+    error: updateError,
+    checkForUpdate,
+    startUpdate,
+  } = useAppUpdate();
   const [checkingXmrig, setCheckingXmrig] = useState(false);
   const [xmrigVersion, setXmrigVersion] = useState(getInitialXmrigVersionInfo);
   const [autoStart, setAutoStart] = useState(false);
@@ -32,7 +38,7 @@ export const Settings = () => {
   const [autoStartLoading, setAutoStartLoading] = useState(false);
   const isNative = (window as any).__TAURI_INTERNALS__;
   const autoStartDisabled = autoStartLoading || !autoStartSupported || !isNative;
-  const [updateStatus, setUpdateStatus] = useState(getInitialAppUpdateStatus);
+  const checkingUpdates = checking || checkingXmrig;
   const xmrigPresentation = useMemo(
     () => getXmrigVersionPresentation(xmrigVersion),
     [xmrigVersion]
@@ -88,41 +94,10 @@ export const Settings = () => {
   }, [isNative]);
 
   const handleCheckUpdates = async () => {
-    setCheckingUpdates(true);
-    const [status] = await Promise.all([
-      getAppUpdateStatus(),
+    await Promise.all([
+      checkForUpdate(),
       refreshXmrigVersion(),
     ]);
-    setUpdateStatus(status);
-    setUpdateChecked(true);
-    setCheckingUpdates(false);
-  };
-
-  const handleDownloadUpdate = async () => {
-    if (!updateStatus.canInstall) {
-      await openExternal(RELEASES_URL);
-      return;
-    }
-
-    setInstallingUpdate(true);
-    setUpdateProgress(0);
-    let downloaded = 0;
-    let total = 0;
-    try {
-      await installAppUpdate((event) => {
-        if (event.event === 'Started') total = event.data.contentLength || 0;
-        if (event.event === 'Progress') downloaded += event.data.chunkLength;
-        if (event.event === 'Finished') setUpdateProgress(100);
-        else if (total > 0) setUpdateProgress(Math.min(99, Math.round((downloaded / total) * 100)));
-      });
-    } catch (err) {
-      setUpdateStatus((current) => ({
-        ...current,
-        error: err instanceof Error ? err.message : 'Failed to install update',
-      }));
-      setInstallingUpdate(false);
-      setUpdateProgress(null);
-    }
   };
 
   const handleXmrigUpdate = () => {
@@ -169,16 +144,8 @@ export const Settings = () => {
   }, [refreshXmrigVersion]);
 
   useEffect(() => {
-    let active = true;
-
-    getAppUpdateStatus().then((status) => {
-      if (active) setUpdateStatus(status);
-    });
-
-    return () => {
-      active = false;
-    };
-  }, []);
+    void checkForUpdate();
+  }, [checkForUpdate]);
 
   return (
     <div className="space-y-6">
@@ -208,7 +175,7 @@ export const Settings = () => {
             <p className={cn("mt-2 min-h-4", subLabelClass)}>
               {updateStatus.updateAvailable
                   ? `v${updateStatus.latestVersion} available`
-                : updateStatus.error
+                : updateError
                   ? 'Latest-version check unavailable'
                   : updateChecked
                     ? 'Latest installed'
@@ -233,7 +200,7 @@ export const Settings = () => {
               {updateStatus.updateAvailable && (
                 <button
                   type="button"
-                  onClick={handleDownloadUpdate}
+                  onClick={() => void startUpdate()}
                   disabled={installingUpdate}
                   className="inline-flex items-center gap-2 rounded bg-yellow-400 px-3 py-2 text-xs font-bold text-zinc-950 transition-colors hover:bg-yellow-300"
                 >
@@ -246,6 +213,9 @@ export const Settings = () => {
                 </button>
               )}
             </div>
+            {updateError && (
+              <p role="status" className="mt-2 text-xs text-red-500">{updateError}</p>
+            )}
           </div>
 
           <div className={cn(
