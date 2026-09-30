@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMinerStore } from '../store/useMinerStore';
+import { directStratumForEndpoint } from '../store/poolEndpoints';
 import { SolanaAuthService, useSolanaAuth } from '../services/solanaAuth';
 import { MultiDeviceSyncService } from '../services/multiDeviceSync';
 import { useTheme } from '../contexts/ThemeContext';
@@ -499,6 +500,7 @@ const Benchmark = () => {
                 wallet,
                 worker: workerName,
                 poolUrl: useMinerStore.getState().poolUrl,
+                directStratum: directStratumForEndpoint(useMinerStore.getState().backendPoolEndpoints, useMinerStore.getState().poolUrl),
                 solanaWallet: user?.publicKey, // Raw Solana address (no encoding)
                 threads: preset.threads,
                 cpuPriority: preset.cpuPriority,

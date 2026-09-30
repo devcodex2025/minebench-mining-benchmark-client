@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
 import { Play, SquareSolid, PauseSolid, Flame, Gauge, Zap, Shield, Cpu, TrendingUp, Clock, Activity, Info, Hourglass, Award } from '../components/icons';
 import { useMinerStore } from '../store/useMinerStore';
+import { directStratumForEndpoint } from '../store/poolEndpoints';
 import { SolanaAuthService, useSolanaAuth } from '../services/solanaAuth';
 import { MultiDeviceSyncService } from '../services/multiDeviceSync';
 import { useTheme } from '../contexts/ThemeContext';
@@ -832,6 +833,7 @@ const Mining: React.FC = () => {
                 hugePages,
                 donateLevel,
                 poolUrl: latestState.poolUrl,
+                directStratum: directStratumForEndpoint(latestState.backendPoolEndpoints, latestState.poolUrl),
                 manualPoolSelection,
                 solanaWallet: user!.publicKey,
             });

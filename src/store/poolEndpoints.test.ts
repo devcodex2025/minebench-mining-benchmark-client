@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { normalizeBackendPoolEndpoints } from './poolEndpoints.ts';
+import { directStratumForEndpoint, normalizeBackendPoolEndpoints } from './poolEndpoints.ts';
 
 const endpoints = normalizeBackendPoolEndpoints({
     endpoints: [
@@ -40,5 +40,36 @@ const deduped = normalizeBackendPoolEndpoints({
 });
 
 assert.equal(deduped.length, 1);
+
+const directEndpoints = normalizeBackendPoolEndpoints({
+    endpoints: [
+        {
+            id: 'proxy',
+            host: 'xmr.minebench.cloud',
+            port: 3333,
+            url: 'xmr.minebench.cloud:3333',
+            default: true
+        },
+        {
+            id: 'direct',
+            host: 'direct.minebench.cloud',
+            port: 3344,
+            url: 'direct.minebench.cloud:3344',
+            direct: true
+        }
+    ]
+});
+
+assert.equal(directEndpoints.length, 2);
+assert.equal(directEndpoints[0].direct, false);
+assert.equal(directEndpoints[1].direct, true);
+// Direct endpoint selection must resolve to the mb_ login endpoint.
+assert.equal(
+    directStratumForEndpoint(directEndpoints, 'direct.minebench.cloud:3344'),
+    'direct.minebench.cloud:3344'
+);
+// Proxy/default endpoints must not trigger direct stratum mode.
+assert.equal(directStratumForEndpoint(directEndpoints, 'xmr.minebench.cloud:3333'), undefined);
+assert.equal(directStratumForEndpoint(directEndpoints, 'unknown:9999'), undefined);
 
 console.log('pool endpoint normalization tests passed');

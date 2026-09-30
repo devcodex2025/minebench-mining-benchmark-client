@@ -14,6 +14,7 @@ import {
 } from '../lib/cpu-telemetry';
 import type { CpuTelemetry } from '../lib/cpu-telemetry';
 import { useMinerStore } from '../store/useMinerStore';
+import { directStratumForEndpoint } from '../store/poolEndpoints';
 import { SolanaAuthService, useSolanaAuth } from '../services/solanaAuth';
 import { nativeApi } from '../lib/native-api';
 
@@ -102,6 +103,7 @@ const StressTest: React.FC = () => {
     const wallet = useMinerStore((state) => state.wallet);
     const workerName = useMinerStore((state) => state.workerName);
     const poolUrl = useMinerStore((state) => state.poolUrl);
+    const backendPoolEndpoints = useMinerStore((state) => state.backendPoolEndpoints);
     const cpuCores = useMinerStore((state) => state.cpuCores);
     const setCpuInfo = useMinerStore((state) => state.setCpuInfo);
 
@@ -402,6 +404,7 @@ const StressTest: React.FC = () => {
                 hugePages: true,
                 donateLevel: 0,
                 poolUrl,
+                directStratum: directStratumForEndpoint(backendPoolEndpoints, poolUrl),
                 manualPoolSelection: true,
                 solanaWallet: user.publicKey
             });
