@@ -49,3 +49,4 @@ certs/
 *.sln
 *.sw?
 .env
+.codex/
