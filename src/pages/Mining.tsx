@@ -1159,7 +1159,7 @@ const Mining: React.FC = () => {
                         </div>
                         {backendPoolEndpoints.length > 0 ? (
                             <div className="space-y-1.5">
-                                {backendPoolEndpoints.slice(0, 2).map((ep) => {
+                                {backendPoolEndpoints.filter((ep, index) => index < 2 || ep.direct).map((ep) => {
                                     const isActive = ep.url === poolUrl;
                                     const ping = poolPings[ep.id];
                                     const pingAvg = ping?.avg ?? null;
