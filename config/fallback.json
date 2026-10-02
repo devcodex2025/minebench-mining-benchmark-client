@@ -4,14 +4,15 @@
   "supabaseUrl": "https://mmwtuyllptkelcfujaod.supabase.co",
   "supabaseAnonKey": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1td3R1eWxscHRrZWxjZnVqYW9kIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA5NDA2ODIsImV4cCI6MjA3NjUxNjY4Mn0.CGVlOAFfRWR9MyRpYW99gppLgVMcrG8sz83bO3YEhoA",
   "poolConfigAllowlist": [
+    "bmt.minebench.cloud",
     "xmr.minebench.cloud"
   ],
   "defaults": {
-    "primaryPoolHost": "xmr.minebench.cloud",
+    "primaryPoolHost": "bmt.minebench.cloud",
     "primaryRpcHost": "xmr.minebench.cloud",
-    "backupPoolHost": "xmr.minebench.cloud",
+    "backupPoolHost": "bmt.minebench.cloud",
     "backupRpcHost": "node.monerodevs.org",
-    "primaryHost": "xmr.minebench.cloud",
+    "primaryHost": "bmt.minebench.cloud",
     "backupHost": "node.monerodevs.org",
     "stratumPort": 3333,
     "moneroP2pPort": 18080,
