@@ -9,7 +9,46 @@ export interface PoolEndpoint {
     // When true this endpoint speaks direct p2pool stratum, so the miner must
     // log in with the MineBench identity (mb_<solana>[.<worker>]) instead of the
     // Monero wallet used with the proxy topology.
+    //
+    // Opt-in only: direct endpoints change the attribution model and are NEVER
+    // selected by the fastest-ping auto-selection. They are only used after an
+    // explicit user choice (Mining chip / Settings), which sets
+    // manualPoolSelection.
     direct?: boolean;
+}
+
+/**
+ * Endpoints eligible for automatic (fastest-ping) selection.
+ *
+ * Direct-to-p2pool endpoints are opt-in only, so they are excluded here to
+ * prevent silently switching a miner to the direct attribution model.
+ */
+export function autoSelectableEndpoints(endpoints: PoolEndpoint[]): PoolEndpoint[] {
+    return endpoints.filter((endpoint) => !endpoint.direct);
+}
+
+/**
+ * Picks the fastest auto-selectable endpoint from measured latencies.
+ *
+ * Direct endpoints are ignored even when their latency is the lowest. When no
+ * latency is known (or none is reachable) the non-direct `default` proxy
+ * endpoint is the fallback. Returns null when every endpoint is direct, so
+ * auto-selection can never opt into the direct attribution model by itself.
+ */
+export function selectFastestAutoEndpoint(
+    endpoints: PoolEndpoint[],
+    latencyByUrl: ReadonlyMap<string, number>
+): PoolEndpoint | null {
+    const candidates = autoSelectableEndpoints(endpoints);
+    if (candidates.length === 0) return null;
+
+    const reachable = candidates
+        .map((endpoint) => ({ endpoint, latencyMs: latencyByUrl.get(endpoint.url) }))
+        .filter((entry): entry is { endpoint: PoolEndpoint; latencyMs: number } =>
+            entry.latencyMs !== undefined && Number.isFinite(entry.latencyMs))
+        .sort((a, b) => a.latencyMs - b.latencyMs);
+
+    return reachable[0]?.endpoint || candidates.find((endpoint) => endpoint.default) || candidates[0];
 }
 
 function normalizeEndpoint(endpoint: any): PoolEndpoint | null {

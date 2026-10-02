@@ -31,6 +31,8 @@ certs/
 .env
 .sh
 *.ps1
+# Tracked release script (un-ignore the one entry point we ship)
+!scripts/release-win.ps1
 *.yml
 *.yaml
 !.github/workflows/*.yml

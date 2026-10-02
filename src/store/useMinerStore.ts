@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { getEnvironmentConfig } from '../config/environment';
 import { nativeApi } from '../lib/native-api';
 import { backendJson } from '../lib/backend-api';
-import { normalizeBackendPoolEndpoints, type PoolEndpoint } from './poolEndpoints';
+import { autoSelectableEndpoints, normalizeBackendPoolEndpoints, selectFastestAutoEndpoint, type PoolEndpoint } from './poolEndpoints';
 import type { MinerMsrStatus } from '../lib/miner-msr';
 
 export type AppMode = 'benchmark' | 'mining';
@@ -151,12 +151,17 @@ const initialPools = {
 };
 
 async function selectFastestPoolEndpoint(endpoints: PoolEndpoint[]): Promise<PoolEndpoint | null> {
+    // Direct endpoints are opt-in only (explicit user action). Auto-selection
+    // must never switch a miner to the direct attribution model.
+    const candidates = autoSelectableEndpoints(endpoints);
+    if (candidates.length === 0) return null;
+
     if (!(window as any).__TAURI_INTERNALS__) {
-        return endpoints.find((endpoint) => endpoint.default) || endpoints[0] || null;
+        return selectFastestAutoEndpoint(candidates, new Map());
     }
 
     const latencyResults = await Promise.all(
-        endpoints.map(async (endpoint) => {
+        candidates.map(async (endpoint) => {
             try {
                 const result = await nativeApi.pool.pingEndpoint(endpoint.host, endpoint.port);
                 return {
@@ -170,11 +175,14 @@ async function selectFastestPoolEndpoint(endpoints: PoolEndpoint[]): Promise<Poo
         })
     );
 
-    const reachable = latencyResults
-        .filter((result): result is { endpoint: PoolEndpoint; latencyMs: number } => !!result && Number.isFinite(result.latencyMs))
-        .sort((a, b) => a.latencyMs - b.latencyMs);
+    const latencyByUrl = new Map<string, number>();
+    for (const result of latencyResults) {
+        if (result && Number.isFinite(result.latencyMs)) {
+            latencyByUrl.set(result.endpoint.url, result.latencyMs);
+        }
+    }
 
-    return reachable[0]?.endpoint || endpoints.find((endpoint) => endpoint.default) || endpoints[0] || null;
+    return selectFastestAutoEndpoint(candidates, latencyByUrl);
 }
 
 export const useMinerStore = create<MiningState>((set, get) => ({
