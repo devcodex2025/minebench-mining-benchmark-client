@@ -404,7 +404,10 @@ const StressTest: React.FC = () => {
                 hugePages: true,
                 donateLevel: 0,
                 poolUrl,
-                directStratum: directStratumForEndpoint(backendPoolEndpoints, poolUrl),
+                directStratum: directStratumForEndpoint(backendPoolEndpoints, poolUrl, {
+                    isPremium: useMinerStore.getState().isPremium,
+                    hasMoneroWallet: !!useMinerStore.getState().premiumXmrWallet
+                }),
                 manualPoolSelection: true,
                 solanaWallet: user.publicKey
             });

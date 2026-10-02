@@ -18,6 +18,54 @@ export interface PoolEndpoint {
 }
 
 /**
+ * Who may use the direct-to-p2pool endpoint.
+ *
+ * Direct mining pays on-chain to the login account's Monero address, so it is
+ * only meaningful for users with a real Monero wallet: premium app users (who
+ * can register one) and direct Monero miners. Regular app users only have the
+ * proxy (virtual wallet) topology and must not see or select the direct option.
+ */
+export interface DirectEndpointAccess {
+    isPremium: boolean;
+    hasMoneroWallet: boolean;
+}
+
+export function canUseDirectEndpoint(access: DirectEndpointAccess): boolean {
+    return access.isPremium || access.hasMoneroWallet;
+}
+
+/**
+ * Endpoints a user may see and select. Non-eligible users (regular app users)
+ * get proxy endpoints only; eligible users keep the direct option.
+ */
+export function visiblePoolEndpoints(endpoints: PoolEndpoint[], access: DirectEndpointAccess): PoolEndpoint[] {
+    return canUseDirectEndpoint(access) ? endpoints : endpoints.filter((endpoint) => !endpoint.direct);
+}
+
+/**
+ * Coerces a persisted/initial pool URL to one the user may actually dial.
+ *
+ * Direct endpoints change the attribution model and are opt-in only, so an
+ * ineligible user must never keep dialing one even when it was persisted by an
+ * earlier (premium) session. Eligible users and URLs that are already visible
+ * to the user are returned unchanged; otherwise the selection falls back to the
+ * default visible (proxy) endpoint, the first visible endpoint, or the supplied
+ * proxy fallback.
+ */
+export function resolveAccessiblePoolUrl(
+    poolUrl: string,
+    endpoints: PoolEndpoint[],
+    access: DirectEndpointAccess,
+    proxyFallback: string
+): string {
+    if (canUseDirectEndpoint(access)) return poolUrl;
+    const visible = visiblePoolEndpoints(endpoints, access);
+    const selected = visible.find((endpoint) => endpoint.url === poolUrl);
+    if (selected) return selected.url;
+    return visible.find((endpoint) => endpoint.default)?.url || visible[0]?.url || proxyFallback;
+}
+
+/**
  * Endpoints eligible for automatic (fastest-ping) selection.
  *
  * Direct-to-p2pool endpoints are opt-in only, so they are excluded here to
@@ -75,8 +123,17 @@ function normalizeEndpoint(endpoint: any): PoolEndpoint | null {
  * Returns the direct-to-p2pool stratum endpoint URL for the active pool when
  * that endpoint is flagged as direct, otherwise undefined so the miner keeps
  * using the default proxy topology (-u <wallet> + --rig-id).
+ *
+ * When an access descriptor is supplied it also enforces the direct-endpoint
+ * gating: a non-eligible user always falls back to the proxy topology even if a
+ * direct URL was persisted by an earlier (premium) session.
  */
-export function directStratumForEndpoint(endpoints: PoolEndpoint[], url: string): string | undefined {
+export function directStratumForEndpoint(
+    endpoints: PoolEndpoint[],
+    url: string,
+    access?: DirectEndpointAccess
+): string | undefined {
+    if (access && !canUseDirectEndpoint(access)) return undefined;
     const endpoint = endpoints.find((candidate) => candidate.url === url);
     return endpoint?.direct ? endpoint.url : undefined;
 }

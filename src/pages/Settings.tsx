@@ -11,6 +11,7 @@ import {
 } from '../lib/cpu-telemetry';
 import type { CpuTelemetryDebug, CpuSensorBrokerStatus, CpuSensorBrokerSnapshot, CpuSensorBrokerDiagnostic } from '../lib/cpu-telemetry';
 import { useMinerStore } from '../store/useMinerStore';
+import { visiblePoolEndpoints } from '../store/poolEndpoints';
 import { useEnvironment } from '../hooks/useEnvironment';
 import { nativeApi } from '../lib/native-api';
 import { useAppUpdate } from '../hooks/useAppUpdate';
@@ -758,6 +759,7 @@ const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
   const backendPoolEndpoints = useMinerStore((s) => s.backendPoolEndpoints);
   const donateLevel = useMinerStore((s) => s.donateLevel);
   const isPremium = useMinerStore((s) => s.isPremium);
+  const premiumXmrWallet = useMinerStore((s) => s.premiumXmrWallet);
   
   const setWallet = useMinerStore((s) => s.setWallet);
   const setPoolUrl = useMinerStore((s) => s.setPoolUrl);
@@ -784,7 +786,10 @@ const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
     theme === 'light' ? 'text-zinc-600' : 'text-zinc-500'
   );
 
-  const backendPresetPools = backendPoolEndpoints.map((endpoint) => ({
+  const backendPresetPools = visiblePoolEndpoints(backendPoolEndpoints, {
+    isPremium,
+    hasMoneroWallet: !!premiumXmrWallet
+  }).map((endpoint) => ({
     name: endpoint.label,
     url: endpoint.url
   }));

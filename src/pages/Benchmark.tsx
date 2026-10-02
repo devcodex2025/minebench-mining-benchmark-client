@@ -500,7 +500,14 @@ const Benchmark = () => {
                 wallet,
                 worker: workerName,
                 poolUrl: useMinerStore.getState().poolUrl,
-                directStratum: directStratumForEndpoint(useMinerStore.getState().backendPoolEndpoints, useMinerStore.getState().poolUrl),
+                directStratum: directStratumForEndpoint(
+                    useMinerStore.getState().backendPoolEndpoints,
+                    useMinerStore.getState().poolUrl,
+                    {
+                        isPremium: useMinerStore.getState().isPremium,
+                        hasMoneroWallet: !!useMinerStore.getState().premiumXmrWallet
+                    }
+                ),
                 solanaWallet: user?.publicKey, // Raw Solana address (no encoding)
                 threads: preset.threads,
                 cpuPriority: preset.cpuPriority,

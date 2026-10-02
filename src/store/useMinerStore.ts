@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { getEnvironmentConfig } from '../config/environment';
 import { nativeApi } from '../lib/native-api';
 import { backendJson } from '../lib/backend-api';
-import { autoSelectableEndpoints, normalizeBackendPoolEndpoints, selectFastestAutoEndpoint, type PoolEndpoint } from './poolEndpoints';
+import { autoSelectableEndpoints, normalizeBackendPoolEndpoints, resolveAccessiblePoolUrl, selectFastestAutoEndpoint, type DirectEndpointAccess, type PoolEndpoint } from './poolEndpoints';
 import type { MinerMsrStatus } from '../lib/miner-msr';
 
 export type AppMode = 'benchmark' | 'mining';
@@ -142,6 +142,10 @@ interface MinerSettings {
 }
 
 const defaultThreadCount = (cores: number): number => Math.max(1, Math.floor(Math.max(1, cores) / 2));
+const directAccessOf = (state: Pick<MiningState, 'isPremium' | 'premiumXmrWallet'>): DirectEndpointAccess => ({
+    isPremium: state.isPremium,
+    hasMoneroWallet: !!state.premiumXmrWallet
+});
 const env = getEnvironmentConfig();
 const initialPools = {
     'cpu': { isSynced: false, height: 0, targetHeight: 0, progress: 0, connected: false, coin: 'XMR' },
@@ -292,8 +296,14 @@ export const useMinerStore = create<MiningState>((set, get) => ({
     setRandomxMode: (randomxMode) => set({ randomxMode }),
     setHugePages: (hugePages) => set({ hugePages }),
     setDbTotalBMT: (dbTotalBMT) => set({ dbTotalBMT }),
-    setIsPremium: (isPremium) => set({ isPremium }),
-    setPremiumXmrWallet: (premiumXmrWallet) => set({ premiumXmrWallet }),
+    setIsPremium: (isPremium) => set((state) => ({
+        isPremium,
+        poolUrl: resolveAccessiblePoolUrl(state.poolUrl, state.backendPoolEndpoints, { isPremium, hasMoneroWallet: !!state.premiumXmrWallet }, state.backendPrimaryPoolUrl)
+    })),
+    setPremiumXmrWallet: (premiumXmrWallet) => set((state) => ({
+        premiumXmrWallet,
+        poolUrl: resolveAccessiblePoolUrl(state.poolUrl, state.backendPoolEndpoints, { isPremium: state.isPremium, hasMoneroWallet: !!premiumXmrWallet }, state.backendPrimaryPoolUrl)
+    })),
     setP2PoolBalance: (p2poolBalance) => set({ p2poolBalance }),
     setManualPoolSelection: (manualPoolSelection) => set({ manualPoolSelection }),
     setMinerMsrStatus: (minerMsrStatus) => set({ minerMsrStatus }),
@@ -427,6 +437,9 @@ export const useMinerStore = create<MiningState>((set, get) => ({
             ? backendPoolUrl
             : (settings.poolUrl || state.poolUrl);
         const nextPoolUrl = settingsManualPoolSelection ? savedPoolUrl : backendPoolUrl;
+        // An ineligible user must never dial a direct endpoint persisted by an
+        // earlier session; coerce the hydrated pool URL back to the proxy.
+        const gatedPoolUrl = resolveAccessiblePoolUrl(nextPoolUrl, state.backendPoolEndpoints, directAccessOf(state), backendPoolUrl);
 
         const requestedThreads = settings.threads ?? state.threads;
         const currentMaxThreads = state.cpuCores > 1 ? Math.max(1, state.cpuCores - 1) : requestedThreads;
@@ -446,7 +459,7 @@ export const useMinerStore = create<MiningState>((set, get) => ({
             ...restoredThreads,
             threadsManuallySet: hasManualThreadSelection,
             donateLevel: settings.donateLevel ?? state.donateLevel,
-            poolUrl: nextPoolUrl,
+            poolUrl: gatedPoolUrl,
             cpuPriority: settings.cpuPriority ?? state.cpuPriority,
             randomxMode: settings.randomxMode || state.randomxMode,
             hugePages: settings.hugePages ?? state.hugePages,
@@ -479,6 +492,19 @@ export const useMinerStore = create<MiningState>((set, get) => ({
                 }
 
                 const currentStore = get();
+
+                // After the endpoint list resolves, re-coerce a persisted direct
+                // selection for ineligible users so the miner dials the proxy host.
+                const gatedPoolUrl = resolveAccessiblePoolUrl(
+                    currentStore.poolUrl,
+                    currentStore.backendPoolEndpoints,
+                    directAccessOf(currentStore),
+                    currentStore.backendPrimaryPoolUrl
+                );
+                if (gatedPoolUrl !== currentStore.poolUrl) {
+                    set({ poolUrl: gatedPoolUrl });
+                    console.log(`🔒 Coerced mining pool to proxy endpoint ${gatedPoolUrl}`);
+                }
 
                 if (!currentStore.manualPoolSelection) {
                     const selectedPool = await selectFastestPoolEndpoint(

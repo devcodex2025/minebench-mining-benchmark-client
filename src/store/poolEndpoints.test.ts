@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { autoSelectableEndpoints, directStratumForEndpoint, normalizeBackendPoolEndpoints, selectFastestAutoEndpoint } from './poolEndpoints.ts';
+import { autoSelectableEndpoints, canUseDirectEndpoint, directStratumForEndpoint, normalizeBackendPoolEndpoints, resolveAccessiblePoolUrl, selectFastestAutoEndpoint, visiblePoolEndpoints } from './poolEndpoints.ts';
 
 const endpoints = normalizeBackendPoolEndpoints({
     endpoints: [
@@ -127,5 +127,74 @@ const directOnly = normalizeBackendPoolEndpoints({
     ]
 });
 assert.equal(selectFastestAutoEndpoint(directOnly, new Map([['direct.minebench.cloud:3344', 3]])), null);
+
+// --- Direct-endpoint gating -------------------------------------------------
+// Only premium app users and direct Monero miners (a real XMR wallet on the
+// account) may use the direct endpoint. Regular app users are proxy-only.
+const regularUser = { isPremium: false, hasMoneroWallet: false };
+const premiumUser = { isPremium: true, hasMoneroWallet: false };
+const directMoneroMiner = { isPremium: false, hasMoneroWallet: true };
+
+assert.equal(canUseDirectEndpoint(regularUser), false);
+assert.equal(canUseDirectEndpoint(premiumUser), true);
+assert.equal(canUseDirectEndpoint(directMoneroMiner), true);
+
+// Premium keeps the direct entry; regular users see only the proxy.
+assert.equal(visiblePoolEndpoints(directEndpoints, premiumUser).length, 2);
+assert.equal(visiblePoolEndpoints(directEndpoints, premiumUser).some((ep) => ep.direct), true);
+assert.equal(visiblePoolEndpoints(directEndpoints, regularUser).length, 1);
+assert.equal(visiblePoolEndpoints(directEndpoints, regularUser)[0].url, 'xmr.minebench.cloud:3333');
+assert.equal(visiblePoolEndpoints(directEndpoints, regularUser).some((ep) => ep.direct), false);
+assert.equal(visiblePoolEndpoints(directEndpoints, directMoneroMiner).length, 2);
+
+// Default/proxy-only users are unchanged by gating.
+assert.equal(visiblePoolEndpoints(proxyOnly, regularUser).length, 1);
+assert.equal(visiblePoolEndpoints(proxyOnly, regularUser)[0].url, 'xmr.minebench.cloud:3333');
+
+// Explicit selection still resolves to direct for eligible users...
+assert.equal(
+    directStratumForEndpoint(directEndpoints, explicitDirectUrl, premiumUser),
+    explicitDirectUrl
+);
+// ...but is forced back to the proxy topology for regular users, even if a
+// direct URL was persisted by an earlier session.
+assert.equal(directStratumForEndpoint(directEndpoints, explicitDirectUrl, regularUser), undefined);
+assert.equal(directStratumForEndpoint(directEndpoints, explicitDirectUrl, directMoneroMiner), explicitDirectUrl);
+// Legacy callers without an access descriptor are unchanged.
+assert.equal(directStratumForEndpoint(directEndpoints, explicitDirectUrl), explicitDirectUrl);
+
+// --- Pool URL coercion on load ---------------------------------------------
+// A direct poolUrl persisted by an earlier premium session must not survive for
+// an ineligible user: loadSettings/fetchPublicConfig coerce it to the proxy host.
+assert.equal(
+    resolveAccessiblePoolUrl(explicitDirectUrl, directEndpoints, regularUser, 'xmr.minebench.cloud:3333'),
+    'xmr.minebench.cloud:3333'
+);
+// A premium user keeps the direct selection.
+assert.equal(
+    resolveAccessiblePoolUrl(explicitDirectUrl, directEndpoints, premiumUser, 'xmr.minebench.cloud:3333'),
+    explicitDirectUrl
+);
+// A direct Monero miner also keeps it.
+assert.equal(
+    resolveAccessiblePoolUrl(explicitDirectUrl, directEndpoints, directMoneroMiner, 'xmr.minebench.cloud:3333'),
+    explicitDirectUrl
+);
+// An already-selected proxy URL is unchanged for regular users.
+assert.equal(
+    resolveAccessiblePoolUrl('xmr.minebench.cloud:3333', directEndpoints, regularUser, 'xmr.minebench.cloud:3333'),
+    'xmr.minebench.cloud:3333'
+);
+// Proxy-only endpoint sets are unchanged for regular users.
+assert.equal(
+    resolveAccessiblePoolUrl('xmr.minebench.cloud:3333', proxyOnly, regularUser, 'xmr.minebench.cloud:3333'),
+    'xmr.minebench.cloud:3333'
+);
+// When only direct endpoints are configured, an ineligible user falls back to
+// the proxy fallback supplied by the backend rather than dialing direct.
+assert.equal(
+    resolveAccessiblePoolUrl(explicitDirectUrl, directOnly, regularUser, 'xmr.minebench.cloud:3333'),
+    'xmr.minebench.cloud:3333'
+);
 
 console.log('pool endpoint normalization tests passed');

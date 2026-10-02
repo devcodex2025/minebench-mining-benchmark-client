@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
 import { Play, SquareSolid, PauseSolid, Flame, Gauge, Zap, Shield, Cpu, TrendingUp, Clock, Activity, Info, Hourglass, Award } from '../components/icons';
 import { useMinerStore } from '../store/useMinerStore';
-import { directStratumForEndpoint } from '../store/poolEndpoints';
+import { canUseDirectEndpoint, directStratumForEndpoint } from '../store/poolEndpoints';
 import { SolanaAuthService, useSolanaAuth } from '../services/solanaAuth';
 import { MultiDeviceSyncService } from '../services/multiDeviceSync';
 import { useTheme } from '../contexts/ThemeContext';
@@ -134,6 +134,11 @@ const Mining: React.FC = () => {
     const saveSettings = useMinerStore((state) => state.saveSettings);
     const fetchPublicConfig = useMinerStore((state) => state.fetchPublicConfig);
     const isPremium = useMinerStore((state) => state.isPremium);
+    const premiumXmrWallet = useMinerStore((state) => state.premiumXmrWallet);
+    // Direct p2pool pays on-chain to a real Monero wallet, so only premium users
+    // and direct Monero miners may see/select it. Regular app users keep the proxy.
+    const directAccess = { isPremium, hasMoneroWallet: !!premiumXmrWallet };
+    const canUseDirect = canUseDirectEndpoint(directAccess);
 
     const threads = useMinerStore((state) => state.threads);
     const setThreads = useMinerStore((state) => state.setThreads);
@@ -833,7 +838,10 @@ const Mining: React.FC = () => {
                 hugePages,
                 donateLevel,
                 poolUrl: latestState.poolUrl,
-                directStratum: directStratumForEndpoint(latestState.backendPoolEndpoints, latestState.poolUrl),
+                directStratum: directStratumForEndpoint(latestState.backendPoolEndpoints, latestState.poolUrl, {
+                    isPremium: latestState.isPremium,
+                    hasMoneroWallet: !!latestState.premiumXmrWallet
+                }),
                 manualPoolSelection,
                 solanaWallet: user!.publicKey,
             });
@@ -1159,7 +1167,7 @@ const Mining: React.FC = () => {
                         </div>
                         {backendPoolEndpoints.length > 0 ? (
                             <div className="space-y-1.5">
-                                {backendPoolEndpoints.filter((ep, index) => index < 2 || ep.direct).map((ep) => {
+                                {backendPoolEndpoints.filter((ep, index) => (ep.direct ? canUseDirect : index < 2)).map((ep) => {
                                     const isActive = ep.url === poolUrl;
                                     const ping = poolPings[ep.id];
                                     const pingAvg = ping?.avg ?? null;
