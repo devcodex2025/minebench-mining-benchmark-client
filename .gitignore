@@ -37,6 +37,7 @@ certs/
 !.github/workflows/*.yaml
 *.sql
 .env.*
+!.env.example
 
 # Editor directories and files
 .vscode/*
