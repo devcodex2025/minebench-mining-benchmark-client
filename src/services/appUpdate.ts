@@ -1,13 +1,13 @@
 import { check, type DownloadEvent, type Update } from '@tauri-apps/plugin-updater';
+import { invoke } from '@tauri-apps/api/core';
 import { relaunch } from '@tauri-apps/plugin-process';
+import { APP_CHANNEL, DOWNLOADS_BASE, versionsUrl } from '../lib/channel.ts';
+import type { Channel } from '../lib/channel.ts';
 
 declare const __APP_VERSION__: string;
 
 export const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '0.0.0';
-export const RELEASES_URL = 'https://bitbucket.org/minebenchapp/minebench-client/downloads/';
-
-const TAGS_URL =
-  'https://api.bitbucket.org/2.0/repositories/minebenchapp/minebench-client/refs/tags?sort=-target.date&pagelen=1';
+export const RELEASES_URL = DOWNLOADS_BASE;
 
 /** Bounded waits so a stalled network or native process can never freeze the UI. */
 export const CHECK_TIMEOUT_MS = 15_000;
@@ -64,42 +64,203 @@ export type AppUpdateStatus = {
   canInstall: boolean;
   checked: boolean;
   error?: string;
+  /** Delivery channel this build belongs to. */
+  channel?: Channel;
+  /** The running version was withdrawn by the maintainers. */
+  revoked?: boolean;
+  /** Versions this channel still offers that are older than the running one. */
+  rollbackTargets?: string[];
+  /** The channel's kill switch, when one is armed. */
+  killSwitch?: KillSwitch | null;
+  /** The running version is below the armed kill switch. */
+  gated?: boolean;
 };
 
-const checkBitbucketVersion = async (): Promise<AppUpdateStatus> => {
-  const response = await fetch(TAGS_URL, {
+/** A version the channel still offers. */
+export type ChannelPoolVersion = {
+  version: string;
+  notes?: string | null;
+  publishedAt?: string | null;
+  manifest?: string | null;
+};
+
+/**
+ * Stops versions below `minVersion` from running. `block` decides whether the
+ * interface refuses to continue or only warns; either way nothing below the gate
+ * can be installed.
+ */
+export type KillSwitch = {
+  minVersion: string;
+  message: string | null;
+  block: boolean;
+};
+
+/** `{channel}-versions.json`: what may be installed, and what may not. */
+export type ChannelPool = {
+  latest: string | null;
+  versions: ChannelPoolVersion[];
+  revoked: { version: string; reason?: string | null }[];
+  killSwitch: KillSwitch | null;
+};
+
+const asRecord = (value: unknown): Record<string, unknown> =>
+  typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {};
+
+const text = (value: unknown): string | null => (typeof value === 'string' ? value : null);
+
+/**
+ * Where this installation updates from.
+ *
+ * The installer registers it, so a moved repository reaches installed clients by
+ * reinstalling or upgrading rather than by rebuilding every client; the source
+ * compiled into the build is only the fallback.
+ */
+const resolvePoolUrl = async (): Promise<string> => {
+  if (!isNativeApp()) return versionsUrl();
+
+  try {
+    const source = await invoke<{ channel: string; downloadsBase: string }>(
+      'channel_update_source'
+    );
+    return `${source.downloadsBase}${source.channel}-versions.json`;
+  } catch (err) {
+    console.warn('[appUpdate] using the compiled update source:', err);
+    return versionsUrl();
+  }
+};
+
+/**
+ * The version pool the release tooling publishes for this channel. It decides
+ * what may be installed, so it is read before any rollback and shown in the UI.
+ */
+export const fetchChannelPool = async (): Promise<ChannelPool> => {
+  const response = await fetch(await resolvePoolUrl(), {
     headers: { Accept: 'application/json' },
     cache: 'no-store',
     signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
   });
 
-  if (!response.ok) throw new Error(`Bitbucket release check failed: ${response.status}`);
+  if (!response.ok) throw new Error(`${APP_CHANNEL} channel list failed: ${response.status}`);
 
-  const tags = await response.json();
-  const latestVersion = normalizeVersionLabel(String(tags.values?.[0]?.name || APP_VERSION));
+  const raw = asRecord(await response.json());
+
   return {
-    currentVersion: APP_VERSION,
-    latestVersion,
-    updateAvailable: isNewerVersion(latestVersion, APP_VERSION),
-    canInstall: false,
-    checked: true,
+    latest: text(raw.latest),
+    versions: (Array.isArray(raw.versions) ? raw.versions : [])
+      .map(asRecord)
+      .filter((entry) => text(entry.version) !== null)
+      .map((entry) => ({
+        version: text(entry.version) as string,
+        notes: text(entry.notes),
+        publishedAt: text(entry.publishedAt),
+        manifest: text(entry.manifest),
+      })),
+    revoked: (Array.isArray(raw.revoked) ? raw.revoked : [])
+      .map(asRecord)
+      .filter((entry) => text(entry.version) !== null)
+      .map((entry) => ({
+        version: text(entry.version) as string,
+        reason: text(entry.reason),
+      })),
+    killSwitch: killSwitchFrom(raw.killSwitch),
   };
+};
+
+const killSwitchFrom = (value: unknown): KillSwitch | null => {
+  const entry = asRecord(value);
+  const minVersion = text(entry.minVersion);
+  if (minVersion === null) return null;
+
+  return {
+    minVersion,
+    message: text(entry.message),
+    block: entry.block === true,
+  };
+};
+
+/**
+ * Versions a client may roll back to: still offered, older than the running one,
+ * newest first. Revoked versions are never offered, and anything newer is a
+ * normal update rather than a rollback.
+ */
+export const rollbackTargetsFrom = (pool: ChannelPool, currentVersion: string): string[] => {
+  const current = normalizeVersionLabel(currentVersion);
+  const revoked = new Set(pool.revoked.map((entry) => normalizeVersionLabel(entry.version)));
+  const minimum = pool.killSwitch?.minVersion ?? null;
+
+  return pool.versions
+    .map((entry) => normalizeVersionLabel(entry.version))
+    .filter((version) => version !== current && !revoked.has(version))
+    .filter((version) => !isNewerVersion(version, current))
+    // A kill switch holds back everything below the version it names, so those
+    // are not offered as rollback targets either.
+    .filter((version) => !minimum || !isNewerVersion(minimum, version))
+    .sort((left, right) => (isNewerVersion(left, right) ? -1 : 1));
+};
+
+const applyChannelContext = (status: AppUpdateStatus, pool: ChannelPool): AppUpdateStatus => {
+  const current = normalizeVersionLabel(status.currentVersion);
+  const killSwitch = pool.killSwitch;
+
+  return {
+    ...status,
+    channel: APP_CHANNEL,
+    revoked: pool.revoked.some((entry) => normalizeVersionLabel(entry.version) === current),
+    rollbackTargets: rollbackTargetsFrom(pool, current),
+    killSwitch,
+    // Below the gate: the version named by the kill switch is still allowed.
+    gated: killSwitch !== null && isNewerVersion(killSwitch.minVersion, current),
+  };
+};
+
+/**
+ * Adds what the pool knows about the running version. The pool is advisory: a
+ * failed read must never hide an update the updater did find.
+ */
+const withChannelContext = async (status: AppUpdateStatus): Promise<AppUpdateStatus> => {
+  try {
+    return applyChannelContext(status, await fetchChannelPool());
+  } catch {
+    return { ...status, channel: APP_CHANNEL };
+  }
+};
+
+/**
+ * Latest version this channel offers, from the pool the release tooling writes.
+ *
+ * Reading the channel pool instead of the newest repository tag keeps a nightly
+ * or canary client from being offered a version it cannot install, and a stable
+ * client from being told about an unreleased candidate. Installing stays with the
+ * Tauri updater, which verifies the manifest signature.
+ */
+const checkChannelVersion = async (): Promise<AppUpdateStatus> => {
+  const pool = await fetchChannelPool();
+  return applyChannelContext(
+    {
+      currentVersion: APP_VERSION,
+      latestVersion: normalizeVersionLabel(String(pool.latest || APP_VERSION)),
+      updateAvailable: isNewerVersion(String(pool.latest || APP_VERSION), APP_VERSION),
+      canInstall: false,
+      checked: true,
+    },
+    pool
+  );
 };
 
 const checkAppUpdate = async (): Promise<AppUpdateStatus> => {
   if (isNativeApp()) {
     try {
       availableUpdate = await check({ timeout: CHECK_TIMEOUT_MS });
-      return {
+      return await withChannelContext({
         currentVersion: APP_VERSION,
         latestVersion: normalizeVersionLabel(availableUpdate?.version || APP_VERSION),
         updateAvailable: Boolean(availableUpdate),
         canInstall: Boolean(availableUpdate),
         checked: true,
-      };
+      });
     } catch (updaterError) {
       try {
-        const fallback = await checkBitbucketVersion();
+        const fallback = await checkChannelVersion();
         return {
           ...fallback,
           error: updaterError instanceof Error
@@ -112,7 +273,7 @@ const checkAppUpdate = async (): Promise<AppUpdateStatus> => {
     }
   }
 
-  return checkBitbucketVersion();
+  return checkChannelVersion();
 };
 
 export const getAppUpdateStatus = async (): Promise<AppUpdateStatus> => {
@@ -164,6 +325,21 @@ export const installAppUpdate = (
   });
 
   return installPromise;
+};
+
+/**
+ * Installs one specific version of this channel — the rollback path.
+ *
+ * The native side re-reads the channel pool and refuses a version that is
+ * revoked or no longer offered, so what a client may install is not decided by
+ * this interface. Only rollbacks come this way: a forward update keeps using the
+ * updater's ordinary check.
+ */
+export const installChannelVersion = (version: string): Promise<void> => {
+  if (!isNativeApp()) {
+    return Promise.reject(new Error('Automatic updates are only available in the desktop app'));
+  }
+  return invoke<void>('install_channel_version', { version });
 };
 
 export const getInitialAppUpdateStatus = (): AppUpdateStatus => ({

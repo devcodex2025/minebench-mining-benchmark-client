@@ -21,6 +21,12 @@ export type AppUpdateDeps = {
   getInitialStatus: () => AppUpdateStatus;
   checkStatus: () => Promise<AppUpdateStatus>;
   install: (onProgress?: (event: DownloadEvent) => void) => Promise<void>;
+  /**
+   * Installs a specific version from the channel pool. Optional because a build
+   * without updates (the web build) has no way to install anything; without it a
+   * rollback reports that it is unavailable instead of failing silently.
+   */
+  rollback?: (version: string) => Promise<void>;
   openReleasesPage: () => void;
 };
 
@@ -29,6 +35,8 @@ export type AppUpdateStore = {
   getState: () => AppUpdateViewState;
   check: () => Promise<AppUpdateStatus>;
   install: () => Promise<void>;
+  /** Installs a specific version from this channel's pool. */
+  rollback: (version: string) => Promise<void>;
 };
 
 export const createAppUpdateStore = (deps: AppUpdateDeps): AppUpdateStore => {
@@ -44,6 +52,7 @@ export const createAppUpdateStore = (deps: AppUpdateDeps): AppUpdateStore => {
   const listeners = new Set<() => void>();
   let checkPromise: Promise<AppUpdateStatus> | null = null;
   let installPromise: Promise<void> | null = null;
+  let rollbackPromise: Promise<void> | null = null;
 
   const patch = (next: Partial<AppUpdateViewState>) => {
     state = { ...state, ...next };
@@ -90,6 +99,7 @@ export const createAppUpdateStore = (deps: AppUpdateDeps): AppUpdateStore => {
    */
   const install = (): Promise<void> => {
     if (installPromise) return installPromise;
+    if (rollbackPromise) return rollbackPromise;
 
     if (!state.status.canInstall) {
       deps.openReleasesPage();
@@ -130,5 +140,38 @@ export const createAppUpdateStore = (deps: AppUpdateDeps): AppUpdateStore => {
     return installPromise;
   };
 
-  return { subscribe, getState: () => state, check, install };
+  /**
+   * One shared rollback, for the same reason as the shared install: two buttons
+   * must not replace the running build at once. A rollback and an install are
+   * mutually exclusive — whichever is already running is returned instead.
+   */
+  const rollback = (version: string): Promise<void> => {
+    if (rollbackPromise) return rollbackPromise;
+    if (installPromise) return installPromise;
+
+    patch({ installing: true, progress: null, error: null });
+
+    rollbackPromise = (
+      deps.rollback
+        ? deps.rollback(version)
+        : Promise.reject(new Error('This build cannot install a specific version'))
+    )
+      .then(() => {
+        patch({ installing: false, progress: null, error: null });
+      })
+      .catch((err: unknown) => {
+        patch({
+          installing: false,
+          progress: null,
+          error: err instanceof Error ? err.message : `Failed to install ${version}`,
+        });
+      })
+      .finally(() => {
+        rollbackPromise = null;
+      });
+
+    return rollbackPromise;
+  };
+
+  return { subscribe, getState: () => state, check, install, rollback };
 };

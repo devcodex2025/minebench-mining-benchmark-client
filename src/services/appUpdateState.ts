@@ -4,6 +4,7 @@ import {
   getAppUpdateStatus,
   getInitialAppUpdateStatus,
   installAppUpdate,
+  installChannelVersion,
   isNativeApp,
 } from './appUpdate';
 import { createAppUpdateStore } from './appUpdateStore';
@@ -31,6 +32,7 @@ export const appUpdateStore = createAppUpdateStore({
   getInitialStatus: getInitialAppUpdateStatus,
   checkStatus: getAppUpdateStatus,
   install: installAppUpdate,
+  rollback: installChannelVersion,
   openReleasesPage: () => {
     void openReleasesPage();
   },

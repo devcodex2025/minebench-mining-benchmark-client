@@ -175,6 +175,64 @@ test('withTimeout passes through fast values and real failures unchanged', async
   );
 });
 
+test('a rollback installs the requested version and clears the busy flag', async () => {
+  const attempted: string[] = [];
+  const store = createAppUpdateStore({
+    getInitialStatus: () => status(),
+    checkStatus: async () => status(),
+    install: async () => {},
+    rollback: async (version) => {
+      attempted.push(version);
+    },
+    openReleasesPage: () => {},
+  });
+
+  await store.rollback('0.8.49');
+
+  assert.deepEqual(attempted, ['0.8.49']);
+  assert.equal(store.getState().installing, false);
+  assert.equal(store.getState().error, null);
+});
+
+test('a refused rollback keeps the reason the channel gave', async () => {
+  const store = createAppUpdateStore({
+    getInitialStatus: () => status(),
+    checkStatus: async () => status(),
+    install: async () => {},
+    rollback: async () => {
+      throw new Error('version 0.8.49 was revoked (payout regression)');
+    },
+    openReleasesPage: () => {},
+  });
+
+  await store.rollback('0.8.49');
+
+  assert.equal(store.getState().installing, false);
+  assert.equal(store.getState().error, 'version 0.8.49 was revoked (payout regression)');
+});
+
+test('an install and a rollback can never replace the build at once', async () => {
+  let release: () => void = () => {};
+  const store = createAppUpdateStore({
+    getInitialStatus: () => status(),
+    checkStatus: async () => status(),
+    install: async () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    rollback: async () => {},
+    openReleasesPage: () => {},
+  });
+
+  const installing = store.install();
+  const rolledBack = store.rollback('0.8.49');
+
+  assert.equal(installing, rolledBack, 'the rollback joins the install already in flight');
+  release();
+  await installing;
+  assert.equal(store.getState().installing, false);
+});
+
 test('update state is platform-safe and every native wait is time-bounded', () => {
   assert.equal(typeof window, 'undefined', 'this guard runs without a browser global');
   assert.equal(isNativeApp(), false, 'no Tauri host means no automatic install');

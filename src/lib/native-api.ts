@@ -10,6 +10,20 @@ import type {
 } from './cpu-telemetry';
 
 /**
+ * Identity of a MineBench instance running for another delivery channel.
+ *
+ * The channels are separate applications, so Tauri's single-instance plugin
+ * cannot see them; the Rust side coordinates through a shared lock instead.
+ */
+export interface CrossChannelPresence {
+  identifier: string;
+  productName: string;
+  version: string;
+  pid: number;
+  startedAt: string;
+}
+
+/**
  * Type-safe native API bridge for Tauri v2
  */
 export const nativeApi = {
@@ -101,6 +115,16 @@ export const nativeApi = {
     saveSettings: (settings: any) => nativeApi.invoke<void>('save_miner_settings', { settings }),
     loadSettings: () => nativeApi.invoke<{ success: boolean; settings: any }>('load_miner_settings'),
     saveLogs: (logs: any) => nativeApi.invoke<void>('save_miner_logs', logs),
+  },
+
+  /**
+   * Cross-channel coordination. Only one channel may run at a time; when
+   * another one already holds the lock, `conflict` names it and `closeOther`
+   * asks it to exit and takes over.
+   */
+  crossChannel: {
+    conflict: () => nativeApi.invoke<CrossChannelPresence | null>('cross_channel_conflict'),
+    closeOther: () => nativeApi.invoke<void>('cross_channel_close_other'),
   },
 
   /**

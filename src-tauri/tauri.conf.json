@@ -1,8 +1,9 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "MineBench Client",
+  "mainBinaryName": "minebench-client",
   "version": "0.8.49",
-  "identifier": "cloud.minebench.client",
+  "identifier": "minebench.client",
   "build": {
     "frontendDist": "../web-dist",
     "devUrl": "http://localhost:5173",
@@ -30,6 +31,7 @@
   },
   "bundle": {
     "active": true,
+    "publisher": "MineBench",
     "targets": "all",
     "createUpdaterArtifacts": true,
     "externalBin": [
@@ -45,11 +47,22 @@
     "resources": [
       "../Miner/**/*",
       "resources/sensor-broker/**/*",
+      "resources/installer/**/*",
       "resources/pawnio-modules/**/*"
     ],
     "windows": {
       "nsis": {
         "installerHooks": "installer-hooks.nsh"
+      }
+    },
+    "linux": {
+      "deb": {
+        "postInstallScript": "linux/postinst-stable.sh",
+        "preRemoveScript": "linux/prerm-stable.sh"
+      },
+      "rpm": {
+        "postInstallScript": "linux/postinst-stable.sh",
+        "preRemoveScript": "linux/prerm-stable.sh"
       }
     },
     "android": {
@@ -60,6 +73,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVGMzM4RjYxQUQ0MUFBOEIKUldTTHFrR3RZWTh6WHpFb0ZsSUJzUHdRUTgvRzh2cjBuLzNCYWJ5R1N5Rk1MblhZSXpVUkUza28K",
       "endpoints": [
+        "https://updates.minebench.cloud/stable/latest.json",
         "https://bitbucket.org/minebenchapp/minebench-client/downloads/latest.json"
       ],
       "windows": {

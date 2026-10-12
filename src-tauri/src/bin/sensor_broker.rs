@@ -347,11 +347,11 @@ fn main() {
 
     let args: Vec<String> = std::env::args().collect();
     let stay = args.iter().any(|arg| arg == "--stay");
-    // Both default to the well-known locations the client uses, so the
-    // scheduled task needs no arguments - and therefore no quoting.
+    // Both default to the well-known locations the client uses; the installer
+    // registers only `--state-root`, so the task line needs no absolute paths.
     let out_path = arg_value(&args, "--out")
         .map(PathBuf::from)
-        .unwrap_or_else(default_snapshot_path);
+        .unwrap_or_else(|| default_snapshot_path(&args));
     let module_dir = arg_value(&args, "--module-dir")
         .map(PathBuf::from)
         .unwrap_or_else(default_module_dir);
@@ -397,28 +397,56 @@ fn arg_value(args: &[String], name: &str) -> Option<String> {
 /// Where a `--debug-*` run writes its report.
 ///
 /// An explicit `--out` wins; otherwise the report lands next to the snapshot, so
-/// the scheduled task - which passes no arguments at all - still leaves one
-/// behind for whoever has to diagnose the machine.
+/// a diagnostic run still leaves one behind for whoever has to inspect the
+/// machine.
 #[cfg(target_os = "windows")]
 fn debug_report_path(args: &[String], default_name: &str) -> PathBuf {
     arg_value(args, "--out")
         .map(PathBuf::from)
-        .unwrap_or_else(|| default_snapshot_path().with_file_name(default_name))
+        .unwrap_or_else(|| default_snapshot_path(args).with_file_name(default_name))
 }
 
-/// `%LOCALAPPDATA%\MineBench\sensors\broker.json` - the same path the client
+/// State root used when the task registers no `--state-root`. Must match the
+/// client's default so a pre-0.9 installation keeps working.
+const DEFAULT_STATE_ROOT: &str = "MineBench";
+
+/// `%LOCALAPPDATA%\<state root>\sensors\broker.json` - the same path the client
 /// reads.
 ///
-/// The scheduled task runs as the logged-on user, so both sides resolve
-/// `LOCALAPPDATA` to the same profile. Defaulting here keeps the task's command
-/// line free of arguments, which also keeps it free of quoting.
-fn default_snapshot_path() -> PathBuf {
+/// The state root is channel-scoped and is registered with the task
+/// (`--state-root MineBenchCanary`), so two channels installed side by side never
+/// share a snapshot; the client derives the same name from its product name. The
+/// scheduled task runs as the logged-on user, so both sides resolve
+/// `LOCALAPPDATA` to the same profile.
+fn default_snapshot_path(args: &[String]) -> PathBuf {
+    let root = match arg_value(args, "--state-root") {
+        Some(value) => value,
+        None => DEFAULT_STATE_ROOT.to_string(),
+    };
     let base = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
-        .join("MineBench")
+        .join(root)
         .join("sensors");
     let _ = std::fs::create_dir_all(&base);
+
+    // The broker runs elevated and this directory belongs to the user, so a
+    // reparse point planted here would send the elevated write somewhere else.
+    // Refusing is better than following it: the client then reports the sensor as
+    // unavailable instead of writing through an attacker's link.
+    for directory in [Some(base.as_path()), base.parent()] {
+        let Some(directory) = directory else { continue };
+        if let Ok(metadata) = std::fs::symlink_metadata(directory) {
+            if metadata.file_type().is_symlink() {
+                eprintln!(
+                    "broker: refusing to publish through a reparse point at {}",
+                    directory.display()
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
     base.join("broker.json")
 }
 

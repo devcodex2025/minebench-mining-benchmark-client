@@ -1,0 +1,228 @@
+# MineBench client delivery pipeline: nightly, canary and stable.
+#
+# Channels
+#   nightly  every merge to main. Built against test infrastructure, one version.
+#   canary   release candidates, tagged vX.Y.Z-canary.N.
+#   stable   tagged vX.Y.Z. A stable release is a promotion of a commit, never a
+#            branch of its own.
+#
+# `scripts/channel.mjs resolve-build` turns the ref into `CHANNEL` and `VERSION`,
+# so one set of steps serves all three channels, and a release candidate can
+# never be built as stable.
+#
+# Runners
+#   Self-hosted only: `linux.shell` for the Linux packages and the publishing
+#   step, `windows` for the NSIS installer. Self-hosted runners do not consume
+#   Bitbucket build minutes, which is what makes a nightly per merge affordable.
+#   They must have: Node 24, Rust (with the platform toolchain), NSIS on Windows,
+#   and the webkit2gtk/appindicator packages the Tauri Linux build needs
+#   (`libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf rpm`).
+#
+# Secured repository variables
+#   TAURI_SIGNING_PRIVATE_KEY   .sig files for the updater artifacts
+#   BITBUCKET_RELEASE_TOKEN     repository write token: upload, delete, git push
+#
+# Every published version is recorded in `.release/channels.json`, which is
+# committed back to main with `[skip ci]` so the state stays the audit trail
+# without triggering another nightly.
+
+definitions:
+  caches:
+    # One cache name per runner type: a cache must never be shared between a
+    # Linux and a Windows runner.
+    node-linux: ~/.npm
+    node-windows: ~/AppData/Local/npm-cache
+
+  steps:
+    - step: &checks
+        name: Typecheck and tests
+        runs-on:
+          - self.hosted
+          - linux.shell
+        caches:
+          - node-linux
+        script:
+          - npm ci
+          - npm run typecheck
+          - npm test
+
+    # The channel is resolved from the ref, then the frontend is built with that
+    # channel's endpoints. `check-channel-config.mjs` fails the build when the
+    # endpoints do not match the channel, so a nightly can never ship production
+    # infrastructure and a release can never ship a test one.
+    - step: &build-linux
+        name: Build Linux packages
+        runs-on:
+          - self.hosted
+          - linux.shell
+        caches:
+          - node-linux
+        script:
+          - set -eu
+          - test -n "$TAURI_SIGNING_PRIVATE_KEY"
+          - eval "$(node scripts/channel.mjs resolve-build)"
+          - echo "Building $CHANNEL $VERSION"
+          - mkdir -p release-artifacts
+          - npm version --no-git-tag-version "$VERSION" > /dev/null
+          - npm ci
+          - npm run typecheck
+          - npm test
+          - npm run sync:version
+          # A Linux runner has no PowerShell, so the privileged broker is built
+          # with cargo directly instead of through `npm run build:broker`.
+          - mkdir -p src-tauri/binaries
+          - touch src-tauri/binaries/minebench-sensor-broker-x86_64-unknown-linux-gnu
+          - cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin minebench-sensor-broker --target x86_64-unknown-linux-gnu
+          - cp src-tauri/target/x86_64-unknown-linux-gnu/release/minebench-sensor-broker src-tauri/binaries/minebench-sensor-broker-x86_64-unknown-linux-gnu
+          - chmod +x src-tauri/binaries/minebench-sensor-broker-x86_64-unknown-linux-gnu
+          - npm run "dist:linux:$CHANNEL"
+          - node scripts/collect-release-artifacts.mjs --bundle src-tauri/target/x86_64-unknown-linux-gnu/release/bundle --out release-artifacts --channel "$CHANNEL" --version "$VERSION" --target linux --arch x86_64
+        artifacts:
+          - release-artifacts/**
+
+    - step: &build-windows
+        name: Build Windows installer
+        runs-on:
+          - self.hosted
+          - windows
+        caches:
+          - node-windows
+        script:
+          - $ErrorActionPreference = "Stop"
+          # Windows PowerShell does not treat a native non-zero exit as an error,
+          # so every build command is checked explicitly.
+          - function Invoke-Checked { param([scriptblock]$Command) & $Command; if ($LASTEXITCODE -ne 0) { throw "command failed with exit code $LASTEXITCODE" } }
+          - if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { throw "TAURI_SIGNING_PRIVATE_KEY is not set" }
+          - $build = node scripts/channel.mjs resolve-build --json | ConvertFrom-Json
+          - if ($LASTEXITCODE -ne 0 -or -not $build) { throw "resolve-build failed" }
+          - Write-Host "Building $($build.channel) $($build.version)"
+          - New-Item -ItemType Directory -Force release-artifacts | Out-Null
+          - Invoke-Checked { npm version --no-git-tag-version $build.version }
+          - Invoke-Checked { npm ci }
+          - Invoke-Checked { npm run typecheck }
+          - Invoke-Checked { npm test }
+          - Invoke-Checked { npm run "dist:win:$($build.channel)" }
+          - Invoke-Checked { node scripts/collect-release-artifacts.mjs --bundle src-tauri/target/x86_64-pc-windows-msvc/release/bundle --out release-artifacts --channel $build.channel --version $build.version --target windows --arch x86_64 }
+        artifacts:
+          - release-artifacts/**
+
+    # Runs once, after both platforms: the manifest generator sees every
+    # platform at once, so one manifest covers Windows and Linux.
+    - step: &publish
+        name: Publish channel
+        runs-on:
+          - self.hosted
+          - linux.shell
+        script:
+          - set -eu
+          - test -n "$BITBUCKET_RELEASE_TOKEN"
+          - eval "$(node scripts/channel.mjs resolve-build)"
+          - echo "Publishing $CHANNEL $VERSION"
+          - mkdir -p build
+          - test -n "$(find release-artifacts -type f -print -quit)"
+          - npm version --no-git-tag-version "$VERSION" > /dev/null
+          - node scripts/generate-sbom.mjs --version "$VERSION" --out "release-artifacts/sbom-$VERSION.json"
+          - node scripts/generate-updater-manifest.cjs release-artifacts build/tauri-manifest.json
+          - node scripts/channel.mjs publish --channel "$CHANNEL" --version "$VERSION" --manifest build/tauri-manifest.json --out release-artifacts --commit "$BITBUCKET_COMMIT" --report build/publish.json
+          - |
+            set -eu
+            # Sign the files this channel publishes, so a client can tell a tampered
+            # list from a genuine one. The key is the one that already signs the
+            # artifacts. Enable with MINEBENCH_SIGN_MANIFESTS=1 once the command is
+            # confirmed on the runner; the client treats an unsigned channel as
+            # "does not sign yet" and a wrong signature as tampering.
+            if [ "${MINEBENCH_SIGN_MANIFESTS:-0}" = "1" ]; then
+              test -n "$TAURI_SIGNING_PRIVATE_KEY"
+              # A persistent self-hosted workspace must not keep the signing key
+              # behind when something below fails.
+              trap 'rm -f build/signing.key' EXIT
+              printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" | base64 -d > build/signing.key
+              chmod 600 build/signing.key
+              for name in "$CHANNEL-latest.json" "$CHANNEL-versions.json" "$CHANNEL-revoked.json"; do
+                test -f "release-artifacts/$name" || continue
+                npx tauri signer sign -f build/signing.key -p "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" "release-artifacts/$name"
+                test -f "release-artifacts/$name.sig"
+              done
+              rm -f build/signing.key
+            fi
+          - bash scripts/publish-artifacts.sh
+
+pipelines:
+  pull-requests:
+    '**':
+      - step: *checks
+
+  branches:
+    main:
+      - step: *checks
+      - parallel:
+          fail-fast: true
+          steps:
+            - step: *build-linux
+            - step: *build-windows
+      - step: *publish
+
+  tags:
+    'v*':
+      - step: *checks
+      - parallel:
+          fail-fast: true
+          steps:
+            - step: *build-linux
+            - step: *build-windows
+      - step: *publish
+
+  custom:
+    kill-switch:
+      # Administrative: hold back every version below a given one, or clear the
+      # gate again. Nothing is rebuilt, and the version stays in the pool so the
+      # gate can be lifted without republishing it.
+      - variables:
+          - name: MINEBENCH_CHANNEL
+          - name: MIN_VERSION
+          - name: MINEBENCH_KILL_MESSAGE
+          - name: MINEBENCH_KILL_BLOCK
+      - step:
+          name: Arm or clear the kill switch
+          runs-on:
+            - self.hosted
+            - linux.shell
+          caches:
+            - node-linux
+          script:
+            - set -eu
+            - test -n "$BITBUCKET_RELEASE_TOKEN"
+            - test -n "${MINEBENCH_CHANNEL:?trigger this pipeline with MINEBENCH_CHANNEL}"
+            - export CHANNEL="$MINEBENCH_CHANNEL"
+            - mkdir -p build release-artifacts
+            - |
+              if [ -z "${MIN_VERSION:-}" ]; then
+                node scripts/channel.mjs kill-switch --channel "$CHANNEL" --clear --out release-artifacts --report build/publish.json
+              else
+                node scripts/channel.mjs kill-switch --channel "$CHANNEL" --min-version "$MIN_VERSION" --out release-artifacts --report build/publish.json
+              fi
+            - export VERSION="${MIN_VERSION:-none}"
+            - bash scripts/publish-artifacts.sh
+
+    revoke:
+      # Administrative: withdraw a version that is already published, without
+      # rebuilding anything. The client blocks installing it and reports why.
+      - variables:
+          - name: MINEBENCH_CHANNEL
+          - name: MINEBENCH_VERSION
+          - name: REVOKE_REASON
+      - step:
+          name: Revoke a version
+          runs-on:
+            - self.hosted
+            - linux.shell
+          caches:
+            - node-linux
+          script:
+            - set -eu
+            - test -n "$BITBUCKET_RELEASE_TOKEN"
+            - test -n "${REVOKE_REASON:?trigger this pipeline with a REVOKE_REASON variable}"
+            - eval "$(node scripts/channel.mjs resolve-build)"
+            - mkdir -p build release-artifacts
+            - node scripts/channel.mjs revoke --version "$VERSION" --channel "$CHANNEL" --reason "$REVOKE_REASON" --by "${BITBUCKET_STEP_TRIGGERER_UUID:-admin}" --out release-artifacts --report build/publish.json
+            - bash scripts/publish-artifacts.sh

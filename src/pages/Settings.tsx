@@ -33,6 +33,7 @@ export const Settings = () => {
     error: updateError,
     checkForUpdate,
     startUpdate,
+    rollbackTo,
   } = useAppUpdate();
   const [checkingXmrig, setCheckingXmrig] = useState(false);
   const [xmrigVersion, setXmrigVersion] = useState(getInitialXmrigVersionInfo);
@@ -173,7 +174,14 @@ export const Settings = () => {
           )}>
             <div className="flex items-center justify-between gap-3">
               <span className={labelClass}>MineBench Client</span>
-              <span className="font-mono text-sm font-bold text-yellow-400">v{updateStatus.currentVersion}</span>
+              <span className="font-mono text-sm font-bold text-yellow-400">
+                v{updateStatus.currentVersion}
+                {updateStatus.channel && (
+                  <span className={cn("ml-2 font-sans text-xs font-normal", subLabelClass)}>
+                    {updateStatus.channel}
+                  </span>
+                )}
+              </span>
             </div>
             <p className={cn("mt-2 min-h-4", subLabelClass)}>
               {updateStatus.updateAvailable
@@ -215,9 +223,62 @@ export const Settings = () => {
                       : `Get v${updateStatus.latestVersion}`}
                 </button>
               )}
+              {updateStatus.revoked && !updateStatus.updateAvailable && (
+                <span className={cn("text-xs", subLabelClass)}>
+                  The downloads page always lists what this channel offers.
+                </span>
+              )}
             </div>
             {updateError && (
               <p role="status" className="mt-2 text-xs text-red-500">{updateError}</p>
+            )}
+
+            {updateStatus.revoked && (
+              <p role="alert" className="mt-3 text-xs font-semibold text-red-500">
+                v{updateStatus.currentVersion} was withdrawn by the maintainers.
+                {' '}
+                {updateStatus.updateAvailable
+                  ? `Updating to v${updateStatus.latestVersion} is recommended.`
+                  : 'A newer version is not available yet.'}
+              </p>
+            )}
+
+            {updateStatus.gated && (
+              <p role="alert" className="mt-3 text-xs font-semibold text-red-500">
+                {updateStatus.killSwitch?.block
+                  ? 'This version must be replaced: '
+                  : 'This version is held back: '}
+                versions below v{updateStatus.killSwitch?.minVersion} may not run.
+                {updateStatus.killSwitch?.message ? ` ${updateStatus.killSwitch.message}.` : ''}
+              </p>
+            )}
+
+            {(updateStatus.rollbackTargets?.length ?? 0) > 0 && (
+              <div className="mt-4 border-t pt-3" style={{ borderColor: 'currentColor' }}>
+                <span className={labelClass}>Roll back</span>
+                <p className={cn("mt-1", subLabelClass)}>
+                  Only versions this channel still offers can be installed.
+                </p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {(updateStatus.rollbackTargets ?? []).map((version) => (
+                    <button
+                      key={version}
+                      type="button"
+                      onClick={() => void rollbackTo(version)}
+                      disabled={installingUpdate}
+                      className={cn(
+                        "rounded border px-2 py-1 font-mono text-xs transition-colors",
+                        theme === 'light'
+                          ? 'border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-100'
+                          : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10',
+                        installingUpdate && 'cursor-wait opacity-60'
+                      )}
+                    >
+                      v{version}
+                    </button>
+                  ))}
+                </div>
+              </div>
             )}
           </div>
 

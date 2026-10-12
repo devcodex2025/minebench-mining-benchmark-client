@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App'
 import ErrorBoundary from './components/ErrorBoundary'
+import { CrossChannelPrompt } from './components/CrossChannelPrompt'
 
 console.log("Renderer: main.tsx initialized");
 
@@ -14,6 +15,7 @@ if (!rootElement) {
       <StrictMode>
         <ErrorBoundary>
           <App />
+          <CrossChannelPrompt />
         </ErrorBoundary>
       </StrictMode>,
     )

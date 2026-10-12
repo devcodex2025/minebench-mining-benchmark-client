@@ -1,7 +1,11 @@
 mod commands;
 mod cpu_telemetry;
+mod cross_channel;
 mod miner;
+mod profile_migration;
 mod sensor_broker_client;
+mod update_source;
+mod updater;
 
 use miner::MinerState;
 use std::sync::{Arc, Mutex};
@@ -71,8 +75,26 @@ pub fn run() {
             commands::get_miner_status,
             commands::pause_mining,
             commands::resume_mining,
+            cross_channel::cross_channel_conflict,
+            cross_channel::cross_channel_close_other,
+            updater::install_channel_version,
+            update_source::channel_update_source,
         ])
         .setup(|app| {
+            // Stable replaced the pre-0.9 bundle identifier, so a profile left
+            // in the legacy directory is adopted once, before anything reads it.
+            profile_migration::migrate_legacy_profile(&app.config().identifier);
+            // The installer registers the sensor task and the broker's state
+            // root under channel-scoped names; the client must derive the same
+            // ones from the product name.
+            sensor_broker_client::init_channel(
+                app.config()
+                    .product_name
+                    .as_deref()
+                    .unwrap_or("MineBench Client"),
+            );
+            // The channels are separate applications and must not run together.
+            cross_channel::start(app.handle());
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()

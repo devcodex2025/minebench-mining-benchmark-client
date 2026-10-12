@@ -53,6 +53,10 @@ if (Object.keys(platforms).length === 0) {
 }
 
 const manifest = {
+  // Self-describing on purpose: the updater ignores fields it does not know, so
+  // adding this is safe for every client that is already installed, and our own
+  // tooling can tell which shape it is reading.
+  schemaVersion: 1,
   version: packageJson.version,
   notes: process.env.MINEBENCH_UPDATE_NOTES || `MineBench Client v${packageJson.version}`,
   pub_date: new Date().toISOString(),

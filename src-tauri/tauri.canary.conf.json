@@ -1,0 +1,35 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "MineBench Client Canary",
+  "mainBinaryName": "minebench-client-canary",
+  "identifier": "minebench.canary",
+  "build": {
+    "beforeBuildCommand": "npm run build:canary"
+  },
+  "bundle": {
+    "publisher": "MineBench",
+    "windows": {
+      "nsis": {
+        "installerHooks": "installer-hooks.canary.nsh"
+      }
+    },
+    "linux": {
+      "deb": {
+        "postInstallScript": "linux/postinst-canary.sh",
+        "preRemoveScript": "linux/prerm-canary.sh"
+      },
+      "rpm": {
+        "postInstallScript": "linux/postinst-canary.sh",
+        "preRemoveScript": "linux/prerm-canary.sh"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://updates.minebench.cloud/canary/latest.json",
+        "https://bitbucket.org/minebenchapp/minebench-client/downloads/canary-latest.json"
+      ]
+    }
+  }
+}

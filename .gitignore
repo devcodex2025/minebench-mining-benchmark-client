@@ -31,15 +31,21 @@ certs/
 .env
 .sh
 *.ps1
+# The installer scripts are shipped inside the bundle and referenced by the NSIS
+# hooks, so they have to be tracked even though other local scripts are not.
+!src-tauri/resources/installer/*.ps1
+!src-tauri/resources/sensor-broker/*.ps1
 # Tracked release script (un-ignore the one entry point we ship)
 !scripts/release-win.ps1
 *.yml
 *.yaml
 !.github/workflows/*.yml
 !.github/workflows/*.yaml
+!bitbucket-pipelines.yml
 *.sql
 .env.*
 !.env.example
+!.env.*.example
 
 # Editor directories and files
 .vscode/*
@@ -53,3 +59,8 @@ certs/
 *.sw?
 .env
 .codex/
+
+# Build output: the privileged broker is compiled into this file by the build and
+# copied into the bundle, never committed.
+src-tauri/binaries/
+*.backup
