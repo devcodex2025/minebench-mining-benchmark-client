@@ -14,7 +14,6 @@ import {
 } from '../lib/cpu-telemetry';
 import type { CpuTelemetry } from '../lib/cpu-telemetry';
 import { useMinerStore } from '../store/useMinerStore';
-import { directStratumForEndpoint } from '../store/poolEndpoints';
 import { SolanaAuthService, useSolanaAuth } from '../services/solanaAuth';
 import { nativeApi } from '../lib/native-api';
 
@@ -362,8 +361,13 @@ const StressTest: React.FC = () => {
             setError('Connect Solana wallet to track stress-test rewards.');
             return;
         }
-        if (!p2poolAPI.validateMoneroAddress(wallet)) {
+        if (useMinerStore.getState().rewardAsset === 'XMR' && !p2poolAPI.validateMoneroAddress(wallet)) {
             setError('Monero wallet address is invalid.');
+            return;
+        }
+        if (backendPoolEndpoints.length > 0
+            && !backendPoolEndpoints.some(endpoint => !endpoint.direct && endpoint.url === poolUrl)) {
+            setError('Stress test requires a configured MineBench proxy endpoint.');
             return;
         }
 
@@ -404,10 +408,7 @@ const StressTest: React.FC = () => {
                 hugePages: true,
                 donateLevel: 0,
                 poolUrl,
-                directStratum: directStratumForEndpoint(backendPoolEndpoints, poolUrl, {
-                    isPremium: useMinerStore.getState().isPremium,
-                    hasMoneroWallet: !!useMinerStore.getState().premiumXmrWallet
-                }),
+                rewardAsset: useMinerStore.getState().rewardAsset,
                 manualPoolSelection: true,
                 solanaWallet: user.publicKey
             });

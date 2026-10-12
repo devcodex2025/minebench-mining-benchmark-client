@@ -7,6 +7,7 @@ import type { MinerMsrStatus } from '../lib/miner-msr';
 
 export type AppMode = 'benchmark' | 'mining';
 export type DeviceType = 'cpu' | 'gpu';
+export type RewardAsset = 'BMT' | 'XMR';
 
 interface StatsPoint {
     time: string;
@@ -20,6 +21,7 @@ interface MiningState {
     mode: AppMode;
     deviceType: DeviceType;
     wallet: string;
+    rewardAsset: RewardAsset;
     walletVerified: boolean; // Verified with Solana wallet
     solanaPublicKey?: string; // User's Solana public key for multi-device sync
     workerName: string;
@@ -45,6 +47,7 @@ interface MiningState {
     dbTotalBMT: number;   // Confirmed total BMT rewards from backend
     isPremium: boolean;
     premiumXmrWallet: string | null;
+    directAccessLoaded: boolean;
 
     // xmrig Settings
     donateLevel: number;
@@ -95,6 +98,7 @@ interface MiningState {
     setMode: (mode: AppMode) => void;
     setDeviceType: (type: DeviceType) => void;
     setWallet: (wallet: string) => void;
+    setRewardAsset: (asset: RewardAsset) => void;
     setWorkerName: (workerName: string) => void;
     setWalletVerified: (verified: boolean, solanaKey?: string) => void;
     setStatus: (status: MiningState['status']) => void;
@@ -128,6 +132,7 @@ interface MiningState {
 // Types for settings persistence
 interface MinerSettings {
     wallet: string;
+    rewardAsset?: RewardAsset;
     workerName: string;
     threads: number;
     threadsManuallySet?: boolean;
@@ -193,6 +198,7 @@ export const useMinerStore = create<MiningState>((set, get) => ({
     mode: 'benchmark',
     deviceType: 'cpu',
     wallet: '48ghPqjkJYEKAL1ukr9YmB6B8V1g9kjMrFkrP36ZnVLxHRyFs9odvapQtjFkWRyjsG1N3ipHqiByjHUNrDZTsxG2DRRHWjj',
+    rewardAsset: 'BMT',
     walletVerified: false,
     solanaPublicKey: undefined,
     workerName: 'Miner-v1',
@@ -215,6 +221,7 @@ export const useMinerStore = create<MiningState>((set, get) => ({
     p2poolBalance: 0,
     isPremium: false,
     premiumXmrWallet: null,
+    directAccessLoaded: false,
 
     donateLevel: 1,
     poolUrl: env.poolStratumUrl,
@@ -259,6 +266,7 @@ export const useMinerStore = create<MiningState>((set, get) => ({
     setMode: (mode) => set({ mode }),
     setDeviceType: (deviceType) => set({ deviceType }),
     setWallet: (wallet) => set({ wallet }),
+    setRewardAsset: (rewardAsset) => set({ rewardAsset }),
     setWorkerName: (workerName) => set({ workerName }),
     setWalletVerified: (verified, solanaKey) => set({ walletVerified: verified, solanaPublicKey: solanaKey }),
     setStatus: (status) => set((state) => ({
@@ -298,10 +306,13 @@ export const useMinerStore = create<MiningState>((set, get) => ({
     setDbTotalBMT: (dbTotalBMT) => set({ dbTotalBMT }),
     setIsPremium: (isPremium) => set((state) => ({
         isPremium,
-        poolUrl: resolveAccessiblePoolUrl(state.poolUrl, state.backendPoolEndpoints, { isPremium, hasMoneroWallet: !!state.premiumXmrWallet }, state.backendPrimaryPoolUrl)
+        poolUrl: state.directAccessLoaded
+            ? resolveAccessiblePoolUrl(state.poolUrl, state.backendPoolEndpoints, { isPremium, hasMoneroWallet: !!state.premiumXmrWallet }, state.backendPrimaryPoolUrl)
+            : state.poolUrl
     })),
     setPremiumXmrWallet: (premiumXmrWallet) => set((state) => ({
         premiumXmrWallet,
+        directAccessLoaded: true,
         poolUrl: resolveAccessiblePoolUrl(state.poolUrl, state.backendPoolEndpoints, { isPremium: state.isPremium, hasMoneroWallet: !!premiumXmrWallet }, state.backendPrimaryPoolUrl)
     })),
     setP2PoolBalance: (p2poolBalance) => set({ p2poolBalance }),
@@ -366,6 +377,7 @@ export const useMinerStore = create<MiningState>((set, get) => ({
         const state = get();
         const settings: MinerSettings = {
             wallet: state.wallet,
+            rewardAsset: state.rewardAsset,
             workerName: state.workerName,
             threads: state.threads,
             threadsManuallySet: state.threadsManuallySet,
@@ -439,7 +451,9 @@ export const useMinerStore = create<MiningState>((set, get) => ({
         const nextPoolUrl = settingsManualPoolSelection ? savedPoolUrl : backendPoolUrl;
         // An ineligible user must never dial a direct endpoint persisted by an
         // earlier session; coerce the hydrated pool URL back to the proxy.
-        const gatedPoolUrl = resolveAccessiblePoolUrl(nextPoolUrl, state.backendPoolEndpoints, directAccessOf(state), backendPoolUrl);
+        const gatedPoolUrl = state.directAccessLoaded
+            ? resolveAccessiblePoolUrl(nextPoolUrl, state.backendPoolEndpoints, directAccessOf(state), backendPoolUrl)
+            : nextPoolUrl;
 
         const requestedThreads = settings.threads ?? state.threads;
         const currentMaxThreads = state.cpuCores > 1 ? Math.max(1, state.cpuCores - 1) : requestedThreads;
@@ -455,6 +469,7 @@ export const useMinerStore = create<MiningState>((set, get) => ({
 
         set({
             wallet: settings.wallet || state.wallet,
+            rewardAsset: settings.rewardAsset === 'XMR' ? 'XMR' : 'BMT',
             workerName: settings.workerName || state.workerName,
             ...restoredThreads,
             threadsManuallySet: hasManualThreadSelection,
@@ -495,12 +510,14 @@ export const useMinerStore = create<MiningState>((set, get) => ({
 
                 // After the endpoint list resolves, re-coerce a persisted direct
                 // selection for ineligible users so the miner dials the proxy host.
-                const gatedPoolUrl = resolveAccessiblePoolUrl(
-                    currentStore.poolUrl,
-                    currentStore.backendPoolEndpoints,
-                    directAccessOf(currentStore),
-                    currentStore.backendPrimaryPoolUrl
-                );
+                const gatedPoolUrl = currentStore.directAccessLoaded
+                    ? resolveAccessiblePoolUrl(
+                        currentStore.poolUrl,
+                        currentStore.backendPoolEndpoints,
+                        directAccessOf(currentStore),
+                        currentStore.backendPrimaryPoolUrl
+                    )
+                    : currentStore.poolUrl;
                 if (gatedPoolUrl !== currentStore.poolUrl) {
                     set({ poolUrl: gatedPoolUrl });
                     console.log(`🔒 Coerced mining pool to proxy endpoint ${gatedPoolUrl}`);

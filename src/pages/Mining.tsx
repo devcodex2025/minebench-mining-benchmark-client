@@ -2,7 +2,6 @@ import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
 import { Play, SquareSolid, PauseSolid, Flame, Gauge, Zap, Shield, Cpu, TrendingUp, Clock, Activity, Info, Hourglass, Award } from '../components/icons';
 import { useMinerStore } from '../store/useMinerStore';
-import { canUseDirectEndpoint, directStratumForEndpoint } from '../store/poolEndpoints';
 import { SolanaAuthService, useSolanaAuth } from '../services/solanaAuth';
 import { MultiDeviceSyncService } from '../services/multiDeviceSync';
 import { useTheme } from '../contexts/ThemeContext';
@@ -117,6 +116,7 @@ const Mining: React.FC = () => {
     const resetMinerMsrStatus = useMinerStore((state) => state.resetMinerMsrStatus);
     const deviceType = useMinerStore((state) => state.deviceType);
     const wallet = useMinerStore((state) => state.wallet);
+    const rewardAsset = useMinerStore((state) => state.rewardAsset);
     const workerName = useMinerStore((state) => state.workerName);
     const donateLevel = useMinerStore((state) => state.donateLevel);
     const poolUrl = useMinerStore((state) => state.poolUrl);
@@ -134,11 +134,6 @@ const Mining: React.FC = () => {
     const saveSettings = useMinerStore((state) => state.saveSettings);
     const fetchPublicConfig = useMinerStore((state) => state.fetchPublicConfig);
     const isPremium = useMinerStore((state) => state.isPremium);
-    const premiumXmrWallet = useMinerStore((state) => state.premiumXmrWallet);
-    // Direct p2pool pays on-chain to a real Monero wallet, so only premium users
-    // and direct Monero miners may see/select it. Regular app users keep the proxy.
-    const directAccess = { isPremium, hasMoneroWallet: !!premiumXmrWallet };
-    const canUseDirect = canUseDirectEndpoint(directAccess);
 
     const threads = useMinerStore((state) => state.threads);
     const setThreads = useMinerStore((state) => state.setThreads);
@@ -365,7 +360,7 @@ const Mining: React.FC = () => {
         }, 500); // Debounce saves by 500ms to avoid too frequent I/O
 
         return () => clearTimeout(timer);
-    }, [settingsLoaded, wallet, workerName, threads, cpuPriority, randomxMode, hugePages, donateLevel, poolUrl, deviceType, saveSettings]);
+    }, [settingsLoaded, wallet, rewardAsset, workerName, threads, cpuPriority, randomxMode, hugePages, donateLevel, poolUrl, deviceType, saveSettings]);
 
     useEffect(() => {
         if (!(window as any).__TAURI_INTERNALS__) return;
@@ -760,7 +755,7 @@ const Mining: React.FC = () => {
             addLog('Cannot start mining: connect Solana wallet first.');
             return;
         }
-        if (!walletValid) {
+        if (useMinerStore.getState().rewardAsset === 'XMR' && !walletValid) {
             addLog('Cannot start mining: Monero wallet address is invalid.');
             return;
         }
@@ -787,6 +782,21 @@ const Mining: React.FC = () => {
             return;
         }
         const latestState = useMinerStore.getState();
+        const mineBenchPool = latestState.backendPoolEndpoints.some((endpoint) =>
+            !endpoint.direct && endpoint.url === latestState.poolUrl
+        );
+        if (latestState.backendPoolEndpoints.length > 0 && !mineBenchPool) {
+            addLog('Cannot start reward mining: select a MineBench proxy endpoint.');
+            setMiningStatus('idle');
+            miningActionInFlightRef.current = false;
+            return;
+        }
+        if (latestState.rewardAsset === 'XMR' && !latestState.premiumXmrWallet) {
+            addLog('Cannot start XMR reward mining: save a valid Monero wallet in Settings first.');
+            setMiningStatus('idle');
+            miningActionInFlightRef.current = false;
+            return;
+        }
         const latestPrimaryPool = latestState.pools?.['cpu'];
         const latestReservePool = env.enableBackupPool ? latestState.pools?.['cpu-backup'] : undefined;
         // Skip local P2Pool sync check when using a remote/backend pool endpoint —
@@ -824,8 +834,9 @@ const Mining: React.FC = () => {
             // stop_miner is a no-op when nothing is running, so this is always safe.
             try { await nativeApi.miner.stopMining(); } catch {}
 
-            addLog(`Starting miner: XMR payout wallet (-u) ${wallet}`);
-            addLog(`Starting miner: reward tracking (--rig-id) ${user!.publicKey}`);
+            addLog(latestState.rewardAsset === 'XMR'
+                ? `Starting miner: XMR payout login (-u) ${wallet}`
+                : `Starting miner: BMT Solana login (-u) ${user!.publicKey}`);
             addLog(`Starting miner: pool ${latestState.poolUrl}`);
             console.log("Invoking Native start-mining command...");
             await nativeApi.miner.startMining({
@@ -838,10 +849,7 @@ const Mining: React.FC = () => {
                 hugePages,
                 donateLevel,
                 poolUrl: latestState.poolUrl,
-                directStratum: directStratumForEndpoint(latestState.backendPoolEndpoints, latestState.poolUrl, {
-                    isPremium: latestState.isPremium,
-                    hasMoneroWallet: !!latestState.premiumXmrWallet
-                }),
+                rewardAsset: latestState.rewardAsset,
                 manualPoolSelection,
                 solanaWallet: user!.publicKey,
             });
@@ -1096,7 +1104,7 @@ const Mining: React.FC = () => {
                         </div>
                         <MsrStatus status={minerMsrStatus} theme={theme} />
                         <div className="grid grid-cols-2 gap-2">
-                            {!walletValid && status === 'idle' && (
+                            {rewardAsset === 'XMR' && !walletValid && status === 'idle' && (
                                 <div className={cn("col-span-2 p-3 rounded-lg text-xs text-center border", theme === 'light' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-red-500/10 border-red-500/20 text-red-400')}>
                                     Invalid Monero wallet address. Please update the wallet before mining.
                                 </div>
@@ -1112,7 +1120,7 @@ const Mining: React.FC = () => {
                                     Node sync must be 100% to start mining.
                                 </div>
                             )}
-                            <button onClick={status === 'paused' ? resumeMining : (status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping') ? startMining : pauseMining} disabled={status === 'starting' || ((!walletValid || !isSolanaConnected || (backendPoolEndpoints.length === 0 && !isNodeFullySynced)) && (status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping'))} className={cn('py-3.5 px-4 rounded-xl font-semibold text-sm tracking-tight transition-all transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 cursor-pointer', status === 'running' || status === 'paused' ? 'bg-yellow-500/10 text-yellow-600 border-2 border-yellow-500/20 hover:bg-yellow-500/20' : (theme === 'light' ? 'bg-emerald-600 text-white border-2 border-emerald-600 hover:bg-emerald-500' : 'bg-emerald-500 text-zinc-950 border-2 border-emerald-500 hover:bg-emerald-400'))}>
+                            <button onClick={status === 'paused' ? resumeMining : (status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping') ? startMining : pauseMining} disabled={status === 'starting' || (((rewardAsset === 'XMR' && !walletValid) || !isSolanaConnected || (backendPoolEndpoints.length === 0 && !isNodeFullySynced)) && (status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping'))} className={cn('py-3.5 px-4 rounded-xl font-semibold text-sm tracking-tight transition-all transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 cursor-pointer', status === 'running' || status === 'paused' ? 'bg-yellow-500/10 text-yellow-600 border-2 border-yellow-500/20 hover:bg-yellow-500/20' : (theme === 'light' ? 'bg-emerald-600 text-white border-2 border-emerald-600 hover:bg-emerald-500' : 'bg-emerald-500 text-zinc-950 border-2 border-emerald-500 hover:bg-emerald-400'))}>
                                 {status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping' ? <><Play size={16} /> Start</> : status === 'paused' ? <><Play size={16} /> Resume</> : status === 'starting' ? <><Hourglass size={16} className="animate-spin" /> Connecting</> : <><PauseSolid size={16} /> Pause</>}
                             </button>
                             <button onClick={stopMining} disabled={status === 'idle' || status === 'completed' || status === 'error' || status === 'stopping'} className={cn('py-3.5 px-4 rounded-xl font-semibold text-sm tracking-tight transition-all transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 cursor-pointer', status === 'running' || status === 'starting' || status === 'paused' ? 'bg-red-500/10 text-red-500 border-2 border-red-500/20 hover:bg-red-500/20' : (theme === 'light' ? 'bg-zinc-200 text-zinc-500 border-2 border-zinc-200' : 'bg-zinc-800 text-zinc-600 border-2 border-zinc-800'))}>
@@ -1167,7 +1175,7 @@ const Mining: React.FC = () => {
                         </div>
                         {backendPoolEndpoints.length > 0 ? (
                             <div className="space-y-1.5">
-                                {backendPoolEndpoints.filter((ep, index) => (ep.direct ? canUseDirect : index < 2)).map((ep) => {
+                                {backendPoolEndpoints.filter((ep, index) => !ep.direct && index < 2).map((ep) => {
                                     const isActive = ep.url === poolUrl;
                                     const ping = poolPings[ep.id];
                                     const pingAvg = ping?.avg ?? null;

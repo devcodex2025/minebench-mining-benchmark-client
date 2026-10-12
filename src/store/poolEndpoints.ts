@@ -20,10 +20,9 @@ export interface PoolEndpoint {
 /**
  * Who may use the direct-to-p2pool endpoint.
  *
- * Direct mining pays on-chain to the login account's Monero address, so it is
- * only meaningful for users with a real Monero wallet: premium app users (who
- * can register one) and direct Monero miners. Regular app users only have the
- * proxy (virtual wallet) topology and must not see or select the direct option.
+ * Direct mining uses a MineBench login for verified sidechain-share attribution.
+ * The backend pays the saved Monero destination after applying the frozen pool fee,
+ * so the endpoint is available only after a real payout wallet is registered.
  */
 export interface DirectEndpointAccess {
     isPremium: boolean;
@@ -31,7 +30,7 @@ export interface DirectEndpointAccess {
 }
 
 export function canUseDirectEndpoint(access: DirectEndpointAccess): boolean {
-    return access.isPremium || access.hasMoneroWallet;
+    return access.hasMoneroWallet;
 }
 
 /**

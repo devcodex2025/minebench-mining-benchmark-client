@@ -1003,7 +1003,7 @@ pub fn select_cpu_fan(sensors: &[RawSensor]) -> Option<(f64, String)> {
         .filter(|(_, sensor)| is_fan_sensor(sensor))
         .filter_map(|(index, sensor)| {
             let value = sensor.value_f64()?;
-            if value < MIN_PLAUSIBLE_FAN_RPM || value > MAX_PLAUSIBLE_FAN_RPM {
+            if !(MIN_PLAUSIBLE_FAN_RPM..=MAX_PLAUSIBLE_FAN_RPM).contains(&value) {
                 return None;
             }
             if let Some(unit) = sensor.unit.as_deref() {
@@ -3126,6 +3126,7 @@ mod tests {
         assert_eq!(ProviderKind::None.as_str(), "none");
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn hwinfo_value_types_map_to_sensor_types() {
         assert_eq!(normalize_hwinfo_type("1", None), "Temperature");

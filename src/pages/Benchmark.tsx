@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMinerStore } from '../store/useMinerStore';
-import { directStratumForEndpoint } from '../store/poolEndpoints';
 import { SolanaAuthService, useSolanaAuth } from '../services/solanaAuth';
 import { MultiDeviceSyncService } from '../services/multiDeviceSync';
 import { useTheme } from '../contexts/ThemeContext';
@@ -55,6 +54,7 @@ const Benchmark = () => {
     const setDeviceType = useMinerStore(state => state.setDeviceType);
     const wallet = useMinerStore(state => state.wallet);
     const workerName = useMinerStore(state => state.workerName);
+    const poolUrl = useMinerStore(state => state.poolUrl);
     const updateStats = useMinerStore(state => state.updateStats);
     const history = useMinerStore(state => state.history);
     const currentHashrate = useMinerStore(state => state.currentHashrate);
@@ -424,11 +424,21 @@ const Benchmark = () => {
             addLog('Node is not fully synced (100%). Benchmark is disabled until sync completes.');
             return;
         }
+        if (usingRemotePool && !backendPoolEndpoints.some(endpoint => !endpoint.direct && endpoint.url === poolUrl)) {
+            addLog('Benchmark requires a MineBench proxy endpoint. Select the configured MineBench pool in Settings.');
+            return;
+        }
 
         // Check if user is authenticated
         if (!user?.publicKey) {
             setShowAuthWarning(true);
             setPendingStart(true);
+            return;
+        }
+        const rewardState = useMinerStore.getState();
+        if (rewardState.rewardAsset === 'XMR'
+            && (!rewardState.premiumXmrWallet || !p2poolAPI.validateMoneroAddress(wallet))) {
+            addLog('Cannot start XMR reward benchmark: save a valid Monero wallet in Settings first.');
             return;
         }
 
@@ -500,14 +510,7 @@ const Benchmark = () => {
                 wallet,
                 worker: workerName,
                 poolUrl: useMinerStore.getState().poolUrl,
-                directStratum: directStratumForEndpoint(
-                    useMinerStore.getState().backendPoolEndpoints,
-                    useMinerStore.getState().poolUrl,
-                    {
-                        isPremium: useMinerStore.getState().isPremium,
-                        hasMoneroWallet: !!useMinerStore.getState().premiumXmrWallet
-                    }
-                ),
+                rewardAsset: useMinerStore.getState().rewardAsset,
                 solanaWallet: user?.publicKey, // Raw Solana address (no encoding)
                 threads: preset.threads,
                 cpuPriority: preset.cpuPriority,

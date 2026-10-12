@@ -129,19 +129,18 @@ const directOnly = normalizeBackendPoolEndpoints({
 assert.equal(selectFastestAutoEndpoint(directOnly, new Map([['direct.minebench.cloud:3344', 3]])), null);
 
 // --- Direct-endpoint gating -------------------------------------------------
-// Only premium app users and direct Monero miners (a real XMR wallet on the
-// account) may use the direct endpoint. Regular app users are proxy-only.
+// A saved real XMR wallet is required for direct mining, including premium users.
 const regularUser = { isPremium: false, hasMoneroWallet: false };
 const premiumUser = { isPremium: true, hasMoneroWallet: false };
 const directMoneroMiner = { isPremium: false, hasMoneroWallet: true };
 
 assert.equal(canUseDirectEndpoint(regularUser), false);
-assert.equal(canUseDirectEndpoint(premiumUser), true);
+assert.equal(canUseDirectEndpoint(premiumUser), false);
 assert.equal(canUseDirectEndpoint(directMoneroMiner), true);
 
-// Premium keeps the direct entry; regular users see only the proxy.
-assert.equal(visiblePoolEndpoints(directEndpoints, premiumUser).length, 2);
-assert.equal(visiblePoolEndpoints(directEndpoints, premiumUser).some((ep) => ep.direct), true);
+// A premium account without a destination is also proxy-only.
+assert.equal(visiblePoolEndpoints(directEndpoints, premiumUser).length, 1);
+assert.equal(visiblePoolEndpoints(directEndpoints, premiumUser).some((ep) => ep.direct), false);
 assert.equal(visiblePoolEndpoints(directEndpoints, regularUser).length, 1);
 assert.equal(visiblePoolEndpoints(directEndpoints, regularUser)[0].url, 'xmr.minebench.cloud:3333');
 assert.equal(visiblePoolEndpoints(directEndpoints, regularUser).some((ep) => ep.direct), false);
@@ -154,7 +153,7 @@ assert.equal(visiblePoolEndpoints(proxyOnly, regularUser)[0].url, 'xmr.minebench
 // Explicit selection still resolves to direct for eligible users...
 assert.equal(
     directStratumForEndpoint(directEndpoints, explicitDirectUrl, premiumUser),
-    explicitDirectUrl
+    undefined
 );
 // ...but is forced back to the proxy topology for regular users, even if a
 // direct URL was persisted by an earlier session.
@@ -170,10 +169,10 @@ assert.equal(
     resolveAccessiblePoolUrl(explicitDirectUrl, directEndpoints, regularUser, 'xmr.minebench.cloud:3333'),
     'xmr.minebench.cloud:3333'
 );
-// A premium user keeps the direct selection.
+// Premium without a saved payout destination is also coerced to proxy.
 assert.equal(
     resolveAccessiblePoolUrl(explicitDirectUrl, directEndpoints, premiumUser, 'xmr.minebench.cloud:3333'),
-    explicitDirectUrl
+    'xmr.minebench.cloud:3333'
 );
 // A direct Monero miner also keeps it.
 assert.equal(

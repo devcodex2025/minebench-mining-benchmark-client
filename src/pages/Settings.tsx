@@ -15,6 +15,8 @@ import { visiblePoolEndpoints } from '../store/poolEndpoints';
 import { useEnvironment } from '../hooks/useEnvironment';
 import { nativeApi } from '../lib/native-api';
 import { useAppUpdate } from '../hooks/useAppUpdate';
+import { backendJson } from '../lib/backend-api';
+import { authStorage } from '../lib/auth-storage';
 import {
   getInitialXmrigVersionInfo,
   getXmrigVersionPresentation,
@@ -752,9 +754,9 @@ const validateXmrWallet = (addr: string) => {  const trimmed = addr.trim();
 };
 
 const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
-  const isNative = (window as any).__TAURI_INTERNALS__;
   const env = useEnvironment();
   const wallet = useMinerStore((s) => s.wallet);
+  const rewardAsset = useMinerStore((s) => s.rewardAsset);
   const poolUrl = useMinerStore((s) => s.poolUrl);
   const backendPoolEndpoints = useMinerStore((s) => s.backendPoolEndpoints);
   const donateLevel = useMinerStore((s) => s.donateLevel);
@@ -762,23 +764,20 @@ const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
   const premiumXmrWallet = useMinerStore((s) => s.premiumXmrWallet);
   
   const setWallet = useMinerStore((s) => s.setWallet);
+  const setRewardAsset = useMinerStore((s) => s.setRewardAsset);
+  const setPremiumXmrWallet = useMinerStore((s) => s.setPremiumXmrWallet);
   const setPoolUrl = useMinerStore((s) => s.setPoolUrl);
   const setDonateLevel = useMinerStore((s) => s.setDonateLevel);
   const setManualPoolSelection = useMinerStore((s) => s.setManualPoolSelection);
+  const saveSettings = useMinerStore((s) => s.saveSettings);
 
-  const [localWallet, setLocalWallet] = useState(wallet);
+  const [localWallet, setLocalWallet] = useState(premiumXmrWallet || wallet);
+  const [localRewardAsset, setLocalRewardAsset] = useState(rewardAsset);
   const [localPool, setLocalPool] = useState(poolUrl);
   const [localDonate] = useState(donateLevel);
   const [saving, setSaving] = useState(false);
   const validation = useMemo(() => validateXmrWallet(localWallet), [localWallet]);
-
-  const openExternal = useCallback(async (url: string) => {
-    if (isNative) {
-      await nativeApi.openExternal(url);
-    } else {
-      window.open(url, '_blank', 'noopener,noreferrer');
-    }
-  }, [isNative]);
+  const canConfigurePool = true;
 
   // Local label style
   const labelClass = cn(
@@ -795,18 +794,25 @@ const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
   }));
   const presetPools = [
     ...(backendPresetPools.length > 0 ? backendPresetPools : [{ name: 'MineBench Pool (Primary)', url: env.poolStratumUrl }]),
-    { name: 'SupportXMR', url: 'pool.supportxmr.com:3333' },
-    { name: 'MoneroOcean', url: 'gulf.moneroocean.stream:10032' },
   ];
 
   const save = async () => {
-    if (!validation.ok || !isPremium) return;
+    if (localRewardAsset === 'XMR' && !validation.ok) return;
     setSaving(true);
     try {
-      setWallet(localWallet.trim());
+      const xmrWallet = localWallet.trim();
+      const result = validation.ok
+        ? await backendJson<{ xmrWallet: string | null }>('/api/user/premium-status', {
+            method: 'PATCH', body: { xmrWallet }, token: authStorage.getToken()
+          })
+        : { xmrWallet: premiumXmrWallet };
+      setWallet(xmrWallet);
+      setRewardAsset(localRewardAsset);
+      setPremiumXmrWallet(result.xmrWallet);
       setPoolUrl(localPool.trim());
       setDonateLevel(Math.max(0, Math.min(5, Math.round(localDonate))));
       setManualPoolSelection(true); // Enable manual override
+      saveSettings();
     } finally {
       setSaving(false);
     }
@@ -814,35 +820,6 @@ const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
 
   return (
     <div className="space-y-4 ml-8">
-      {/* Premium Lock Overlay for Wallet */}
-      {!isPremium && (
-        <div className={cn(
-          "p-4 rounded-xl border flex flex-col items-center text-center gap-3",
-          theme === 'light' ? 'bg-amber-50 border-amber-200' : 'bg-amber-500/10 border-amber-500/20'
-        )}>
-          <div className="w-10 h-10 rounded-full bg-amber-500/20 flex items-center justify-center">
-            <Lock size={20} className="text-amber-500" />
-          </div>
-          <div>
-            <p className={cn("text-xs font-black uppercase tracking-[0.2em]", theme === 'light' ? 'text-amber-900' : 'text-amber-400')}>Premium Feature</p>
-            <p className={cn("text-xs mt-1 font-medium", theme === 'light' ? 'text-amber-800' : 'text-amber-200/50')}>
-              Custom Monero wallet support requires Premium (29 USDC once, no expiry; network fees extra).
-            </p>
-          </div>
-          <button
-            onClick={() => openExternal('https://minebench.cloud/premium')}
-            className={cn(
-               "flex items-center gap-2 px-6 py-2 rounded-full text-[10px] font-bold transition-all transform hover:scale-102 cursor-pointer shadow-lg active:scale-95",
-               theme === 'light' 
-                ? "bg-zinc-900 text-white hover:bg-zinc-800 shadow-zinc-950/20"
-                : "bg-amber-500 text-black hover:bg-amber-400 shadow-amber-500/20"
-            )}
-          >
-            UPGRADE TO PREMIUM <ExternalLink size={10} />
-          </button>
-        </div>
-      )}
-
       {/* Wallet */}
       <div className={cn(
         "p-4 rounded-xl border relative overflow-hidden group",
@@ -854,30 +831,36 @@ const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
             value={localWallet}
             onChange={(e) => setLocalWallet(e.target.value)}
             placeholder="Enter your Monero wallet"
-            disabled={!isPremium}
             className={cn(
               'w-full px-4 py-3 rounded-lg border text-sm outline-none transition-all',
               theme === 'light' 
                 ? 'bg-zinc-50 border-zinc-200 text-zinc-900 focus:border-emerald-500/50' 
                 : 'bg-zinc-950/50 border-white/10 text-white focus:border-emerald-500/30',
-              !isPremium && "cursor-not-allowed grayscale"
             )}
           />
         </div>
 
-        {/* Central Lock Overlay */}
-        {!isPremium && (
-          <div className="absolute inset-0 bg-zinc-950/50 backdrop-blur-[1px] flex items-center justify-center z-10 transition-all group-hover:bg-zinc-950/60">
-             <div className="p-3 bg-zinc-900/90 rounded-2xl border border-white/10 shadow-2xl flex flex-col items-center gap-1 scale-90 group-hover:scale-100 transition-transform">
-                <Lock size={20} className="text-amber-500" />
-                <span className="text-[10px] font-black text-amber-500 uppercase tracking-widest">Locked</span>
-             </div>
-          </div>
-        )}
-
-        {isPremium && !validation.ok && (
+        {localRewardAsset === 'XMR' && !validation.ok && (
           <div className={cn('mt-2 text-xs', theme === 'light' ? 'text-red-600' : 'text-red-400')}>{validation.reason}</div>
         )}
+      </div>
+
+      <div className={cn(
+        "p-4 rounded-xl border",
+        theme === 'light' ? 'bg-white border-zinc-200' : 'bg-zinc-900/40 border-white/5'
+      )}>
+        <label className={labelClass}>Mining reward</label>
+        <select
+          value={localRewardAsset}
+          onChange={(event) => setLocalRewardAsset(event.target.value === 'XMR' ? 'XMR' : 'BMT')}
+          className={cn(
+            'mt-2 w-full px-4 py-3 rounded-lg border text-sm outline-none',
+            theme === 'light' ? 'bg-zinc-50 border-zinc-200 text-zinc-900' : 'bg-zinc-950/50 border-white/10 text-white'
+          )}
+        >
+          <option value="BMT">BMT to Solana wallet</option>
+          <option value="XMR">XMR to Monero wallet (95%)</option>
+        </select>
       </div>
 
       {/* Pool Selection */}
@@ -892,14 +875,14 @@ const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
           {presetPools.map((p) => (
             <button
               key={p.url}
-              onClick={() => isPremium && setLocalPool(p.url)}
-              disabled={!isPremium}
+              onClick={() => canConfigurePool && setLocalPool(p.url)}
+              disabled={!canConfigurePool}
               className={cn(
                 'px-4 py-3 rounded-lg border text-sm text-center transition-all',
                 localPool === p.url
                   ? theme === 'light' ? 'bg-emerald-50 border-emerald-300 text-emerald-700 shadow-sm' : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400 shadow-lg shadow-emerald-500/5'
                   : theme === 'light' ? 'bg-zinc-50 border-zinc-200 text-zinc-800' : 'bg-zinc-950/50 border-white/10 text-white',
-                !isPremium && "cursor-not-allowed opacity-50"
+                !canConfigurePool && "cursor-not-allowed opacity-50"
               )}
             >
               <div className="font-bold text-xs uppercase tracking-tight">{p.name}</div>
@@ -911,18 +894,18 @@ const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
           value={localPool}
           onChange={(e) => setLocalPool(e.target.value)}
           placeholder="host:port (e.g., bmt.minebench.cloud:3333)"
-          disabled={!isPremium}
+          disabled={!canConfigurePool}
           className={cn(
             'mt-3 w-full px-4 py-3 rounded-lg border text-sm outline-none transition-all font-mono',
             theme === 'light' 
               ? 'bg-zinc-50 border-zinc-200 text-zinc-900 focus:border-emerald-500/50' 
               : 'bg-zinc-950/50 border-white/10 text-white focus:border-emerald-500/30',
-            !isPremium && "cursor-not-allowed grayscale"
+            !canConfigurePool && "cursor-not-allowed grayscale"
           )}
         />
 
         {/* Central Lock Overlay */}
-        {!isPremium && (
+        {!canConfigurePool && (
           <div className="absolute inset-0 bg-zinc-950/50 backdrop-blur-[1px] flex items-center justify-center z-10 transition-all group-hover:bg-zinc-950/60">
              <div className="p-3 bg-zinc-900/90 rounded-2xl border border-white/10 shadow-2xl flex flex-col items-center gap-1 scale-90 group-hover:scale-100 transition-transform">
                 <Lock size={20} className="text-amber-500" />
@@ -935,14 +918,14 @@ const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
       <div className="flex gap-3 pt-2">
         <button
           onClick={save}
-          disabled={saving || !validation.ok || !isPremium}
+          disabled={saving || (localRewardAsset === 'XMR' && !validation.ok)}
           className={cn(
             'px-8 py-3 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all shadow-md active:scale-95',
-            (saving || !isPremium) ? 'opacity-30 cursor-not-allowed' : 'cursor-pointer hover:shadow-emerald-500/20 hover:-translate-y-0.5',
+            saving ? 'opacity-30 cursor-not-allowed' : 'cursor-pointer hover:shadow-emerald-500/20 hover:-translate-y-0.5',
             theme === 'light' ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-emerald-500 text-black border-emerald-500'
           )}
         >
-          {isPremium ? 'Save Configuration' : 'Premium Only'}
+          Save Configuration
         </button>
         <div className={cn('text-[10px] self-center uppercase tracking-widest font-bold opacity-30', theme === 'light' ? 'text-zinc-600' : 'text-zinc-500')}>Changes apply on next start.</div>
       </div>

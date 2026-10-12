@@ -311,9 +311,7 @@ export class SolanaAuthService {
         // Sync premium status to MinerStore
         const { setIsPremium, setPremiumXmrWallet } = useMinerStore.getState();
         setIsPremium(!!result.isPremium);
-        if (result.premiumXmrWallet) {
-          setPremiumXmrWallet(result.premiumXmrWallet);
-        }
+        setPremiumXmrWallet(result.premiumXmrWallet || null);
 
         console.log('[SolanaAuth] User authenticated successfully');
         return user;
@@ -545,7 +543,10 @@ export class SolanaAuthService {
 
     this.startupPremiumStatusPromise = (async () => {
       const storedToken = authStorage.getToken();
-      if (!storedToken) return;
+      if (!storedToken) {
+        useMinerStore.getState().setPremiumXmrWallet(null);
+        return;
+      }
 
       try {
         const premiumData = await backendJson<{ isPremium?: boolean; xmrWallet?: string | null }>(

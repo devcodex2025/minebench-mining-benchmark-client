@@ -256,7 +256,7 @@ fn nct_fan_count(raw: u16) -> u16 {
 #[cfg(any(target_os = "windows", test))]
 fn nct_fan_rpm(rpm_raw: u16, count_raw: Option<u16>) -> Option<f64> {
     let rpm = f64::from(rpm_raw);
-    if !rpm.is_finite() || rpm < MIN_PLAUSIBLE_FAN_RPM || rpm > MAX_PLAUSIBLE_FAN_RPM {
+    if !rpm.is_finite() || !(MIN_PLAUSIBLE_FAN_RPM..=MAX_PLAUSIBLE_FAN_RPM).contains(&rpm) {
         return None;
     }
 
@@ -312,7 +312,7 @@ fn nct_temperature_source_name(source: u8) -> &'static str {
 #[cfg(any(target_os = "windows", test))]
 fn plausible_hwm_base(base: u64) -> bool {
     const PCI_CONFIG_PORTS: core::ops::RangeInclusive<u64> = 0x0CF8..=0x0CFF;
-    (0x100..=0xFFF8).contains(&base) && base % 8 == 0 && !PCI_CONFIG_PORTS.contains(&base)
+    (0x100..=0xFFF8).contains(&base) && base.is_multiple_of(8) && !PCI_CONFIG_PORTS.contains(&base)
 }
 
 /// Joules per energy-counter count, decoded from a RAPL unit register.

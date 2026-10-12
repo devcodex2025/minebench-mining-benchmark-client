@@ -24,8 +24,69 @@ use std::time::{Duration, SystemTime};
 /// was left behind by an installation, and its numbers cannot be trusted.
 const SCHEMA: u32 = 1;
 
-/// Scheduled task name registered by the installer.
-pub const TASK_NAME: &str = "MineBenchSensorBroker";
+/// Scheduled task name the installer registers for a single-channel build.
+///
+/// The name is channel-scoped and follows the product name, so a canary or
+/// nightly installation can never replace the task a stable installation
+/// depends on. It is seeded once at startup by [`init_channel`]; the default
+/// keeps unit tests and code paths that run before startup working.
+pub const DEFAULT_TASK_NAME: &str = "MineBenchSensorBroker";
+
+/// State root the broker writes its snapshot into, when the task does not name
+/// one. Matches what pre-0.9 installations already use.
+pub const DEFAULT_STATE_ROOT: &str = "MineBench";
+
+static TASK_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+static STATE_ROOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The scheduled task this build talks to.
+pub fn task_name() -> &'static str {
+    match TASK_NAME.get() {
+        Some(name) => name.as_str(),
+        None => DEFAULT_TASK_NAME,
+    }
+}
+
+/// The channel's state root, shared with the broker it starts.
+pub fn state_root() -> &'static str {
+    match STATE_ROOT.get() {
+        Some(root) => root.as_str(),
+        None => DEFAULT_STATE_ROOT,
+    }
+}
+
+/// Channel suffix of a product name: `MineBench Client` -> `""`,
+/// `MineBench Client Canary` -> `"Canary"`.
+fn channel_suffix(product_name: &str) -> &str {
+    match product_name.strip_prefix("MineBench Client") {
+        Some(rest) => rest.trim(),
+        None => "",
+    }
+}
+
+/// Derives the task name the installer registers for a product name.
+///
+/// `MineBench Client` -> `MineBenchSensorBroker`,
+/// `MineBench Client Canary` -> `MineBenchSensorBrokerCanary`.
+pub fn task_name_for_product(product_name: &str) -> String {
+    format!("{DEFAULT_TASK_NAME}{}", channel_suffix(product_name))
+}
+
+/// Derives the broker's state root for a product name.
+///
+/// `MineBench Client` -> `MineBench`, `MineBench Client Canary` ->
+/// `MineBenchCanary`. The installers register the same name with the broker
+/// task, so the task, the broker and the client cannot disagree.
+pub fn state_root_for_product(product_name: &str) -> String {
+    format!("{DEFAULT_STATE_ROOT}{}", channel_suffix(product_name))
+}
+
+/// Seeds the channel-scoped identity (task name and state root). Called once
+/// from the app setup.
+pub fn init_channel(product_name: &str) {
+    let _ = TASK_NAME.set(task_name_for_product(product_name));
+    let _ = STATE_ROOT.set(state_root_for_product(product_name));
+}
 
 /// Snapshot older than this is not live.
 pub const SNAPSHOT_STALE_AFTER: Duration = Duration::from_secs(5);
@@ -105,13 +166,14 @@ pub struct BrokerPaths {
 }
 
 impl BrokerPaths {
-    /// `%LOCALAPPDATA%\MineBench\sensors\broker.json`, matching the broker's
-    /// own default so both sides agree without configuration.
+    /// `%LOCALAPPDATA%\<state root>\sensors\broker.json`, matching the path the
+    /// broker resolves from the `--state-root` the installer registered with the
+    /// task, so both sides agree without further configuration.
     pub fn resolve() -> Self {
         let base = std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir)
-            .join("MineBench")
+            .join(state_root())
             .join("sensors");
         Self::in_directory(base)
     }
@@ -264,7 +326,7 @@ fn start_task() -> bool {
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
     let status = std::process::Command::new("schtasks")
-        .args(["/Run", "/TN", TASK_NAME])
+        .args(["/Run", "/TN", task_name()])
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -287,7 +349,7 @@ pub fn task_registered() -> bool {
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
     std::process::Command::new("schtasks")
-        .args(["/Query", "/TN", TASK_NAME])
+        .args(["/Query", "/TN", task_name()])
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -346,10 +408,11 @@ pub fn diagnose() -> Vec<DiagnosticStep> {
         step: "scheduled-task".into(),
         ok: registered,
         detail: if registered {
-            format!("task '{TASK_NAME}' is registered")
+            format!("task '{}' is registered", task_name())
         } else {
             format!(
-                "task '{TASK_NAME}' is missing; this is expected in a development build, and the installer registers it"
+                "task '{}' is missing; this is expected in a development build, and the installer registers it",
+                task_name()
             )
         },
     });
@@ -505,7 +568,8 @@ pub fn diagnostic_detail() -> String {
     };
     if !task_registered() {
         return format!(
-            "scheduled task '{TASK_NAME}' is not registered; CPU temperature stays unavailable (broker at {broker})"
+            "scheduled task '{}' is not registered; CPU temperature stays unavailable (broker at {broker})",
+            task_name()
         );
     }
     match read_snapshot() {
@@ -577,6 +641,21 @@ mod tests {
     }
 
     #[test]
+    fn state_root_is_scoped_per_channel() {
+        // The installers register the same names with the broker task, so a
+        // canary or nightly install cannot read a stable snapshot.
+        assert_eq!(state_root_for_product("MineBench Client"), "MineBench");
+        assert_eq!(
+            state_root_for_product("MineBench Client Canary"),
+            "MineBenchCanary"
+        );
+        assert_eq!(
+            state_root_for_product("MineBench Client Nightly"),
+            "MineBenchNightly"
+        );
+    }
+
+    #[test]
     fn malformed_output_is_ignored() {
         let path = temp_path("malformed");
         std::fs::write(&path, "{ not json").expect("write");
@@ -599,8 +678,20 @@ mod tests {
 
     #[test]
     fn task_name_is_the_one_the_installer_registers() {
-        // Diagnostics, the installer and the client must agree on this string.
-        assert_eq!(TASK_NAME, "MineBenchSensorBroker");
+        // Diagnostics, the installer and the client must derive the same string.
+        // The installer registers it as `MineBenchSensorBroker<suffix>`.
+        assert_eq!(
+            task_name_for_product("MineBench Client"),
+            "MineBenchSensorBroker"
+        );
+        assert_eq!(
+            task_name_for_product("MineBench Client Canary"),
+            "MineBenchSensorBrokerCanary"
+        );
+        assert_eq!(
+            task_name_for_product("MineBench Client Nightly"),
+            "MineBenchSensorBrokerNightly"
+        );
     }
 
     #[test]

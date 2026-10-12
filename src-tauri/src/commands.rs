@@ -124,6 +124,7 @@ pub async fn backend_request(request: BackendRequest) -> Result<serde_json::Valu
     let mut builder = match method.as_str() {
         "GET" => client.get(&url),
         "POST" => client.post(&url),
+        "PATCH" => client.patch(&url),
         _ => return Err("Backend method is not allowed".to_string()),
     };
 
@@ -351,7 +352,7 @@ pub struct MinerStartRequest {
     #[serde(default)]
     pool_url: Option<String>,
     #[serde(default)]
-    direct_stratum: Option<String>,
+    reward_asset: Option<String>,
     #[serde(default)]
     solana_wallet: Option<String>,
     #[serde(default)]
@@ -957,7 +958,7 @@ pub fn get_cpu_sensor_broker_status() -> serde_json::Value {
         "supported": cfg!(target_os = "windows"),
         "taskRegistered": crate::sensor_broker_client::task_registered(),
         "detail": crate::sensor_broker_client::diagnostic_detail(),
-        "taskName": crate::sensor_broker_client::TASK_NAME,
+        "taskName": crate::sensor_broker_client::task_name(),
     })
 }
 
@@ -1363,7 +1364,7 @@ fn parse_xmrig_version(output: &str) -> Option<String> {
 fn normalize_version(version: &str) -> Option<String> {
     let version = version
         .trim()
-        .trim_start_matches(|character| character == 'v' || character == 'V');
+        .trim_start_matches(['v', 'V']);
     let valid = !version.is_empty()
         && version
             .split('.')
@@ -1397,26 +1398,22 @@ fn build_xmrig_args(
         return Err("GPU mining is not implemented in the Tauri backend yet".to_string());
     }
 
-    let wallet = validate_miner_value(&request.wallet, "wallet", 160)?;
-
-    // Optional direct-to-p2pool stratum endpoint. When set, the miner connects
-    // straight to p2pool and logs in with the MineBench identity in the login
-    // field, because p2pool reads the username (-u) and ignores --rig-id. When
-    // unset, the default proxy topology is used unchanged.
-    let direct_stratum = request
-        .direct_stratum
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| validate_pool_url(&value))
-        .transpose()?;
-    let direct_mode = direct_stratum.is_some();
+    let reward_asset = request.reward_asset.as_deref().unwrap_or("BMT");
+    if reward_asset != "BMT" && reward_asset != "XMR" {
+        return Err("rewardAsset must be BMT or XMR".to_string());
+    }
+    let wallet = if reward_asset == "XMR" {
+        validate_miner_value(&request.wallet, "Monero wallet", 160)?
+    } else {
+        request.wallet.trim().to_string()
+    };
 
     let pool_url = request
         .pool_url
         .clone()
         .unwrap_or_else(|| "xmr.minebench.cloud:3333".to_string());
     let pool_url = validate_pool_url(&pool_url)?;
-    let selected_pool = direct_stratum.unwrap_or(pool_url);
+    let selected_pool = pool_url;
     let normalized_pool = if selected_pool.contains("://") {
         selected_pool
     } else {
@@ -1428,17 +1425,13 @@ fn build_xmrig_args(
         .clone()
         .filter(|v| !v.trim().is_empty())
         .map(|value| validate_miner_value(&value, "solana wallet", 160))
-        .transpose()?
-        .unwrap_or_else(|| worker.clone());
-    // P2Pool's log-shipper expects the user field in SHARE FOUND lines to be
-    // prefixed with "mb_" so it can identify MineBench miners and extract the
-    // Solana wallet address. Without the prefix the log-shipper regex drops the
-    // share event and no contribution is ever recorded in the backend.
-    let rig_id = if solana_wallet == worker {
-        format!("mb_{}", solana_wallet)
+        .transpose()?;
+    let login = if reward_asset == "XMR" {
+        wallet.clone()
     } else {
-        validate_miner_value(&format!("mb_{}.{}", solana_wallet, worker), "rig id", 220)?
+        solana_wallet.ok_or_else(|| "Solana wallet is required for BMT rewards".to_string())?
     };
+    let rig_id = validate_miner_value(&worker, "rig id", 80)?;
     let api_port = "4077";
     let donate_level = if benchmark {
         0
@@ -1474,17 +1467,15 @@ fn build_xmrig_args(
         "-o".to_string(),
         normalized_pool,
         "-u".to_string(),
-        if direct_mode { rig_id.clone() } else { wallet.clone() },
+        login,
         "-p".to_string(),
         "x".to_string(),
     ];
 
-    // The proxy topology identifies miners through --rig-id; p2pool ignores it
-    // and expects the reward identity in the login field (-u) instead.
-    if !direct_mode {
-        args.push("--rig-id".to_string());
-        args.push(rig_id.clone());
-    }
+    // The proxy groups financial attribution by the downstream username. Rig ID
+    // is only a device label and must never select the payout destination.
+    args.push("--rig-id".to_string());
+    args.push(rig_id.clone());
 
     args.extend([
         "--keepalive".to_string(),
@@ -1659,11 +1650,11 @@ mod tests {
     fn reward_tracked_request() -> MinerStartRequest {
         MinerStartRequest {
             device_type: "cpu".to_string(),
-            wallet: "4A1moneroWallet".to_string(),
+            wallet: "43DnRu6fbhK843vmGkWC7j843vmGkWC7j843vmGkWC7j843vmGkWC7j843vmGkWC7j843vmGkWC7j843vmGkWC7j5mANPDa".to_string(),
             worker: "worker-1".to_string(),
             threads: Some(1),
             pool_url: Some("xmr.minebench.cloud:3333".to_string()),
-            direct_stratum: None,
+            reward_asset: Some("BMT".to_string()),
             solana_wallet: Some("9xQeWvG816bUx9EPjHmaT23yvVM2ZW7Y1rGQ9oTzF1Ab".to_string()),
             cpu_priority: None,
             randomx_mode: None,
@@ -1676,86 +1667,68 @@ mod tests {
     fn benchmark_and_mining_use_the_same_verified_share_identity() {
         let (_, mining_args) = build_xmrig_args(&reward_tracked_request(), false).unwrap();
         let (_, benchmark_args) = build_xmrig_args(&reward_tracked_request(), true).unwrap();
-        let expected = "mb_9xQeWvG816bUx9EPjHmaT23yvVM2ZW7Y1rGQ9oTzF1Ab.worker-1";
+        let expected = "worker-1";
 
         assert_eq!(get_arg_value(&mining_args, "--rig-id"), Some(expected));
         assert_eq!(get_arg_value(&benchmark_args, "--rig-id"), Some(expected));
     }
 
     #[test]
-    fn default_mode_keeps_proxy_wallet_login_and_rig_id() {
+    fn bmt_mode_uses_solana_login_on_the_shared_proxy_port() {
         let (_, args) = build_xmrig_args(&reward_tracked_request(), false).unwrap();
 
-        assert_eq!(get_arg_value(&args, "-u"), Some("4A1moneroWallet"));
+        assert_eq!(get_arg_value(&args, "-u"), Some("9xQeWvG816bUx9EPjHmaT23yvVM2ZW7Y1rGQ9oTzF1Ab"));
         assert_eq!(
             get_arg_value(&args, "--rig-id"),
-            Some("mb_9xQeWvG816bUx9EPjHmaT23yvVM2ZW7Y1rGQ9oTzF1Ab.worker-1")
+            Some("worker-1")
         );
         assert_eq!(get_arg_value(&args, "-o"), Some("stratum+tcp://xmr.minebench.cloud:3333"));
     }
 
     #[test]
-    fn direct_mode_uses_mb_login_and_drops_wallet_login() {
+    fn xmr_mode_uses_monero_login_on_the_shared_proxy_port() {
         let mut request = reward_tracked_request();
-        request.direct_stratum = Some("direct.minebench.cloud:3344".to_string());
+        request.reward_asset = Some("XMR".to_string());
 
         let (_, mining_args) = build_xmrig_args(&request, false).unwrap();
         let (_, benchmark_args) = build_xmrig_args(&request, true).unwrap();
 
         assert_eq!(
             get_arg_value(&mining_args, "-u"),
-            Some("mb_9xQeWvG816bUx9EPjHmaT23yvVM2ZW7Y1rGQ9oTzF1Ab.worker-1")
+            Some("43DnRu6fbhK843vmGkWC7j843vmGkWC7j843vmGkWC7j843vmGkWC7j843vmGkWC7j843vmGkWC7j843vmGkWC7j5mANPDa")
         );
-        assert_eq!(get_arg_value(&mining_args, "--rig-id"), None);
-        assert_eq!(get_arg_value(&mining_args, "-o"), Some("stratum+tcp://direct.minebench.cloud:3344"));
-        assert!(!mining_args.iter().any(|arg| arg == "4A1moneroWallet"));
+        assert_eq!(get_arg_value(&mining_args, "--rig-id"), Some("worker-1"));
+        assert_eq!(get_arg_value(&mining_args, "-o"), Some("stratum+tcp://xmr.minebench.cloud:3333"));
 
         // Benchmark and mining must publish the same reward identity in direct mode.
         assert_eq!(get_arg_value(&benchmark_args, "-u"), get_arg_value(&mining_args, "-u"));
-        assert_eq!(get_arg_value(&benchmark_args, "--rig-id"), None);
+        assert_eq!(get_arg_value(&benchmark_args, "--rig-id"), Some("worker-1"));
     }
 
     #[test]
-    fn direct_mode_without_worker_suffix_uses_bare_mb_login() {
+    fn bmt_mode_requires_a_solana_wallet() {
         let mut request = reward_tracked_request();
-        request.worker = "9xQeWvG816bUx9EPjHmaT23yvVM2ZW7Y1rGQ9oTzF1Ab".to_string();
         request.solana_wallet = None;
-        request.direct_stratum = Some("stratum+tcp://direct.minebench.cloud:3344".to_string());
-
-        let (_, args) = build_xmrig_args(&request, false).unwrap();
-
-        assert_eq!(get_arg_value(&args, "-u"), Some("mb_9xQeWvG816bUx9EPjHmaT23yvVM2ZW7Y1rGQ9oTzF1Ab"));
-        assert_eq!(get_arg_value(&args, "--rig-id"), None);
-        assert_eq!(get_arg_value(&args, "-o"), Some("stratum+tcp://direct.minebench.cloud:3344"));
+        assert!(build_xmrig_args(&request, false).is_err());
     }
 
     #[test]
-    fn blank_direct_stratum_falls_back_to_default_proxy_mode() {
+    fn invalid_reward_asset_is_rejected() {
         let mut request = reward_tracked_request();
-        request.direct_stratum = Some("   ".to_string());
-
-        let (_, args) = build_xmrig_args(&request, false).unwrap();
-
-        assert_eq!(get_arg_value(&args, "-u"), Some("4A1moneroWallet"));
-        assert_eq!(get_arg_value(&args, "-o"), Some("stratum+tcp://xmr.minebench.cloud:3333"));
-        assert!(get_arg_value(&args, "--rig-id").is_some());
+        request.reward_asset = Some("DOGE".to_string());
+        assert!(build_xmrig_args(&request, false).is_err());
     }
 
     #[test]
-    fn empty_wallet_is_rejected_in_both_modes() {
+    fn an_empty_monero_wallet_is_rejected_in_xmr_mode_only() {
+        // BMT rewards are attributed through the Solana wallet in the login
+        // field, so the Monero wallet is unused there. XMR mode pays the Monero
+        // wallet and must never start with a blank one.
         let mut request = reward_tracked_request();
         request.wallet = "   ".to_string();
-        assert!(build_xmrig_args(&request, false).is_err());
+        assert!(build_xmrig_args(&request, false).is_ok());
 
-        request.direct_stratum = Some("direct.minebench.cloud:3344".to_string());
-        assert!(build_xmrig_args(&request, false).is_err());
-    }
-
-    #[test]
-    fn invalid_direct_stratum_is_rejected() {
-        let mut request = reward_tracked_request();
-        request.direct_stratum = Some("ftp://not stratum".to_string());
-
+        request.reward_asset = Some("XMR".to_string());
         assert!(build_xmrig_args(&request, false).is_err());
     }
 
