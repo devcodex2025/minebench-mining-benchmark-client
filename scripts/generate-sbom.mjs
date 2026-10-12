@@ -14,6 +14,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
@@ -59,15 +60,58 @@ export function componentsFromCargoMetadata(metadata) {
     .filter((entry) => entry.name && entry.version);
 }
 
-export function buildSbom({ lock, metadata, version, product = 'MineBench Client' }) {
+/**
+ * Files that ship inside the bundle, each with its digest. Redistributed binaries
+ * are part of what the release contains, so leaving them out would make the SBOM
+ * describe less than the artifact.
+ */
+export function componentsFromBundled(directory) {
+  if (!fs.existsSync(directory)) return [];
+
+  const files = [];
+  const walk = (current) => {
+    const entries = fs
+      .readdirSync(current, { withFileTypes: true })
+      .sort((left, right) => left.name.localeCompare(right.name));
+
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile()) files.push(full);
+    }
+  };
+  walk(directory);
+
+  return files.map((full) => {
+    const name = path.relative(directory, full).split(path.sep).join('/');
+    return {
+      type: 'file',
+      name,
+      'bom-ref': `file:${name}`,
+      hashes: [
+        {
+          alg: 'SHA-256',
+          content: crypto.createHash('sha256').update(fs.readFileSync(full)).digest('hex'),
+        },
+      ],
+    };
+  });
+}
+
+/** Identity of a component, whatever kind it is. */
+const componentKey = (component) => component.purl ?? component['bom-ref'] ?? component.name;
+
+export function buildSbom({ lock, metadata, bundled = [], version, product = 'MineBench Client' }) {
   const byPurl = new Map();
   for (const component of [
     ...componentsFromLockfile(lock),
     ...componentsFromCargoMetadata(metadata),
+    ...bundled,
   ]) {
     // The same package can legitimately appear in both ecosystems only with
     // different purls; identical purls collapse.
-    if (!byPurl.has(component.purl)) byPurl.set(component.purl, component);
+    const key = componentKey(component);
+    if (!byPurl.has(key)) byPurl.set(key, component);
   }
 
   return {
@@ -81,7 +125,9 @@ export function buildSbom({ lock, metadata, version, product = 'MineBench Client
         version,
       },
     },
-    components: [...byPurl.values()].sort((left, right) => left.purl.localeCompare(right.purl)),
+    components: [...byPurl.values()].sort((left, right) =>
+      componentKey(left).localeCompare(componentKey(right))
+    ),
   };
 }
 
@@ -109,7 +155,13 @@ export function main(argv = process.argv.slice(2)) {
     )
   );
 
-  const sbom = buildSbom({ lock, metadata, version, product: options.product });
+  const sbom = buildSbom({
+    lock,
+    metadata,
+    bundled: componentsFromBundled(path.join(repoRoot, 'src-tauri', 'resources', 'pawnio-modules')),
+    version,
+    product: options.product,
+  });
   fs.mkdirSync(path.dirname(path.resolve(out)), { recursive: true });
   fs.writeFileSync(out, `${JSON.stringify(sbom, null, 2)}\n`);
 

@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
 import {
   SBOM_SPEC_VERSION,
   buildSbom,
+  componentsFromBundled,
   componentsFromCargoMetadata,
   componentsFromLockfile,
 } from './generate-sbom.mjs';
@@ -76,6 +80,37 @@ test('the document is deterministic and identifies the release', () => {
     'components are sorted'
   );
   assert.ok(!JSON.stringify(first).includes('serialNumber'), 'no random ids: the file must be diffable');
+});
+
+test('files that ship inside the bundle are recorded with their digest', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'minebench-bundled-'));
+
+  try {
+    fs.writeFileSync(path.join(directory, 'AMDFamily17.bin'), 'module');
+    fs.mkdirSync(path.join(directory, 'nested'));
+    fs.writeFileSync(path.join(directory, 'nested', 'COPYING'), 'licence');
+
+    const bundled = componentsFromBundled(directory);
+    assert.deepEqual(
+      bundled.map(({ name, type }) => [name, type]),
+      [
+        ['AMDFamily17.bin', 'file'],
+        ['nested/COPYING', 'file'],
+      ]
+    );
+    assert.match(bundled[0].hashes[0].content, /^[0-9a-f]{64}$/);
+
+    // Redistributed binaries have to appear in the document, or it describes less
+    // than the artifact contains.
+    const sbom = buildSbom({ lock, metadata, bundled, version: '0.9.0' });
+    assert.ok(
+      sbom.components.some(({ name, type }) => name === 'AMDFamily17.bin' && type === 'file'),
+      'bundled files are components'
+    );
+    assert.deepEqual(componentsFromBundled(path.join(directory, 'missing')), []);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('an identical purl from both sides is listed once', () => {

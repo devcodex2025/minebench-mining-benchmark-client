@@ -428,26 +428,33 @@ fn default_snapshot_path(args: &[String]) -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
         .join(root)
         .join("sensors");
-    let _ = std::fs::create_dir_all(&base);
 
     // The broker runs elevated and this directory belongs to the user, so a
-    // reparse point planted here would send the elevated write somewhere else.
-    // Refusing is better than following it: the client then reports the sensor as
-    // unavailable instead of writing through an attacker's link.
-    for directory in [Some(base.as_path()), base.parent()] {
-        let Some(directory) = directory else { continue };
-        if let Ok(metadata) = std::fs::symlink_metadata(directory) {
+    // reparse point anywhere in it would send the elevated write somewhere else.
+    // Checking before and after creating the directory closes the window between
+    // "the path did not exist" and "it does". Refusing is better than following
+    // it: the client then reports the sensor as unavailable.
+    refuse_reparse_points(&base);
+    let _ = std::fs::create_dir_all(&base);
+    refuse_reparse_points(&base);
+
+    base.join("broker.json")
+}
+
+/// Exits when the directory or its parent is a link, rather than writing through it.
+fn refuse_reparse_points(directory: &std::path::Path) {
+    for candidate in [Some(directory), directory.parent()] {
+        let Some(candidate) = candidate else { continue };
+        if let Ok(metadata) = std::fs::symlink_metadata(candidate) {
             if metadata.file_type().is_symlink() {
                 eprintln!(
                     "broker: refusing to publish through a reparse point at {}",
-                    directory.display()
+                    candidate.display()
                 );
                 std::process::exit(1);
             }
         }
     }
-
-    base.join("broker.json")
 }
 
 /// Finds the PawnIO module directory.
@@ -521,9 +528,21 @@ fn empty_snapshot(note: &str) -> String {
 }
 
 fn publish(path: &Path, snapshot: &str) -> std::io::Result<()> {
-    // Write-then-rename so a reader never sees a half-written file.
+    // Write-then-rename so a reader never sees a half-written file. The temporary
+    // file is created fresh, so it is never created through a link someone
+    // planted, and a stale copy from a crashed run is dropped rather than blocking
+    // the next one.
     let temp = path.with_extension("tmp");
-    std::fs::write(&temp, snapshot)?;
+    let _ = std::fs::remove_file(&temp);
+    {
+        use std::io::Write;
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        file.write_all(snapshot.as_bytes())?;
+    }
     std::fs::rename(&temp, path)
 }
 

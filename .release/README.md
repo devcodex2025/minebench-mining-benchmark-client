@@ -72,12 +72,16 @@ repository reaches installed clients by reinstalling or upgrading:
 | Windows | NSIS hook | `%APPDATA%\<identifier>\update-source.json` |
 | Linux (`.deb`/`.rpm`) | maintainer scripts | `/etc/minebench/<channel>/update-source.json` |
 
-A machine-wide registration (`%ProgramData%\MineBench`, `/etc/minebench`) lets a
-managed deployment override the installation's own. The client takes the first
-usable file belonging to its channel and otherwise falls back to the source
-compiled into the build, so a corrupt or foreign registration cannot break
-updating. One file per channel is the whole mechanism: upgrading replaces it, and
-nothing has to be cleaned up to avoid duplicates.
+On Linux the packages also register a machine-wide file under `/etc/minebench`
+that only root, that is the package manager, can write; it is consulted only when
+the installation's own file is missing or unusable. Windows has no equivalent that
+can be trusted: the shared location allows any user to create entries, so nothing
+machine-wide is read there at all.
+
+The client takes the first usable file belonging to its channel and otherwise falls
+back to the source compiled into the build, so a corrupt or foreign registration
+cannot break updating. One file per channel is the whole mechanism: upgrading
+replaces it, and nothing has to be cleaned up to avoid duplicates.
 
 The forward update still follows the endpoint compiled into the build, because
 the Tauri updater reads its endpoints from the build configuration only. That is

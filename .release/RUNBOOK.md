@@ -117,16 +117,26 @@ cleaned in the same run.
   The Windows install is per-user, so `minebench-sensor-broker.exe` lives in a
   directory its own user can modify, and the task that runs it is registered with
   highest privileges. A process running as that user can therefore replace the
-  broker and reach high integrity without a prompt. The broker path is now passed
-  explicitly instead of being discovered, and the broker refuses to publish its
-  snapshot through a reparse point, but the elevation path itself cannot be closed
-  without one of: signing the broker and verifying its publisher before the task
-  runs, or installing machine-wide (`bundle.windows.nsis.installMode:
-  "perMachine"`, which needs a migration path for existing per-user installs).
-  Both were out of scope for this change.
+  broker and reach high integrity without a prompt. The broker path is passed
+  explicitly instead of being discovered, the broker refuses to write its snapshot
+  through a reparse point (checked before and after creating the directory, and the
+  temporary file is created exclusively so it is never created through a link), and
+  the same writer could equally replace any file in that installation. The
+  elevation path itself cannot be closed without one of: signing the broker and
+  verifying its publisher before the task runs, or installing machine-wide
+  (`bundle.windows.nsis.installMode: "perMachine"`, which needs a migration path for
+  existing per-user installs). Both were out of scope for this change.
+* **The elevated broker loads PawnIO driver modules from the installation
+  directory**, and `MINEBENCH_PAWNIO_MODULES` overrides that search. Those modules
+  are executed by the WHQL-signed driver in kernel mode, so the blast radius is
+  larger than the high-integrity process above: an attacker who can write to that
+  directory, or register the task with the override, is beyond what this document
+  can bound. Treat any change to the module directory or the override as a release
+  blocker of its own.
 * **A payout destination can be changed by any authenticated session.** See the
   authorisation note in `iam.service.updateXmrWallet`: the field is validated, not
-  entitlement-gated, by design.
+  entitlement-gated, by design. The validation lives in the backend, so this
+  release depends on that check shipping.
 
 ## Before the first real release
 
