@@ -22,8 +22,43 @@ cleanup() {
 }
 trap cleanup EXIT
 
+find_webkit_descendant() {
+  local frontier="$1"
+  local child executable next pid
+
+  for _ in $(seq 1 8); do
+    next=""
+    for pid in $frontier; do
+      while read -r child; do
+        [ -n "$child" ] || continue
+        executable="$(readlink "/proc/$child/exe" 2>/dev/null || true)"
+        if [[ "$executable" == */WebKitWebProcess ]]; then
+          echo "$child"
+          return 0
+        fi
+        next="$next $child"
+      done < <(pgrep -P "$pid" || true)
+    done
+    frontier="$next"
+    [ -n "$frontier" ] || break
+  done
+
+  return 1
+}
+
+process_is_running() {
+  local state
+  kill -0 "$1" 2>/dev/null || return 1
+  state="$(ps -o stat= -p "$1" 2>/dev/null || true)"
+  [ -n "$state" ] && [[ "$state" != *Z* ]]
+}
+
 export GDK_BACKEND="x11"
 export XDG_SESSION_TYPE="x11"
+# GitHub-hosted runners and Docker/Xvfb have no DRM device. Exercise WebKitGTK
+# through Mesa's software renderer instead of failing while creating an EGL
+# display that cannot exist in the headless environment.
+export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
 unset WAYLAND_DISPLAY
 
 env APPIMAGE_EXTRACT_AND_RUN=1 "$appimage_path" >"$app_log" 2>&1 &
@@ -36,7 +71,7 @@ for _ in $(seq 1 40); do
     echo "MineBench AppImage exited before creating its X11 WebView" >&2
     exit 1
   fi
-  webkit_pid="$(pgrep -P "$app_pid" -f '/WebKitWebProcess' | head -n 1 || true)"
+  webkit_pid="$(find_webkit_descendant "$app_pid" || true)"
   [ -n "$webkit_pid" ] && break
   sleep 0.25
 done
@@ -48,7 +83,7 @@ if [ -z "$webkit_pid" ]; then
 fi
 
 for _ in $(seq 1 40); do
-  if ! kill -0 "$app_pid" 2>/dev/null || ! kill -0 "$webkit_pid" 2>/dev/null; then
+  if ! process_is_running "$app_pid" || ! process_is_running "$webkit_pid"; then
     cat "$app_log" >&2
     echo "MineBench X11 WebKitWebProcess exited before becoming stable" >&2
     exit 1
