@@ -1,6 +1,27 @@
 import { invoke } from '@tauri-apps/api/core';
-import { listen, UnlistenFn } from '@tauri-apps/api/event';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { XmrigVersionInfo } from '../services/xmrigVersion';
+import type {
+  CpuTelemetry,
+  CpuTelemetryDebug,
+  CpuSensorBrokerStatus,
+  CpuSensorBrokerSnapshot,
+  CpuSensorBrokerDiagnostic,
+} from './cpu-telemetry';
+
+/**
+ * Identity of a MineBench instance running for another delivery channel.
+ *
+ * The channels are separate applications, so Tauri's single-instance plugin
+ * cannot see them; the Rust side coordinates through a shared lock instead.
+ */
+export interface CrossChannelPresence {
+  identifier: string;
+  productName: string;
+  version: string;
+  pid: number;
+  startedAt: string;
+}
 
 /**
  * Type-safe native API bridge for Tauri v2
@@ -51,6 +72,29 @@ export const nativeApi = {
     getProcessStats: () => nativeApi.invoke<any>('get_process_stats'),
     getDisplayStatus: () => nativeApi.invoke<any>('get_display_status'),
     openLogsDirectory: () => nativeApi.invoke<void>('open_logs_directory'),
+    /** Normalized CPU telemetry; optional metrics are null when unsupported. */
+    getCpuTelemetry: () => nativeApi.invoke<CpuTelemetry>('get_cpu_telemetry'),
+    /** Diagnostic dump explaining why a sensor is unavailable on this machine. */
+    getCpuTelemetryDebug: () => nativeApi.invoke<CpuTelemetryDebug>('get_cpu_telemetry_debug'),
+    /**
+     * Privileged sensor broker status. The broker reads CPU die temperature
+     * through the WHQL-signed PawnIO driver; the installer registers the
+     * highest-privileges scheduled task that starts it, so MineBench never
+     * elevates itself and the user is not prompted.
+     */
+    getCpuSensorBrokerStatus: () =>
+      nativeApi.invoke<CpuSensorBrokerStatus>('get_cpu_sensor_broker_status'),
+    /** Requests a broker reading now, for the diagnostics panel. */
+    readCpuSensorBroker: () =>
+      nativeApi.invoke<{ supported: boolean; snapshot: CpuSensorBrokerSnapshot | null }>(
+        'read_cpu_sensor_broker'
+      ),
+    /**
+     * Walks the whole broker chain and reports each link, so a missing
+     * temperature can be pinned to a cause instead of guessed at.
+     */
+    diagnoseCpuSensorBroker: () =>
+      nativeApi.invoke<CpuSensorBrokerDiagnostic>('diagnose_cpu_sensor_broker'),
   },
 
   /**
@@ -66,10 +110,21 @@ export const nativeApi = {
     startBenchmark: (config: any) => nativeApi.invoke<void>('start_benchmark', { request: config }),
     stopBenchmark: () => nativeApi.invoke<void>('stop_benchmark'),
     getLatestBenchmark: (deviceType: string) => nativeApi.invoke<any>('get_latest_benchmark', { device_type: deviceType }),
-    submitBenchmark: (record: any) => nativeApi.invoke<any>('submit_benchmark_result', { record }),
+    submitBenchmark: (record: any, token: string) =>
+      nativeApi.invoke<any>('submit_benchmark_result', { record, token }),
     saveSettings: (settings: any) => nativeApi.invoke<void>('save_miner_settings', { settings }),
     loadSettings: () => nativeApi.invoke<{ success: boolean; settings: any }>('load_miner_settings'),
     saveLogs: (logs: any) => nativeApi.invoke<void>('save_miner_logs', logs),
+  },
+
+  /**
+   * Cross-channel coordination. Only one channel may run at a time; when
+   * another one already holds the lock, `conflict` names it and `closeOther`
+   * asks it to exit and takes over.
+   */
+  crossChannel: {
+    conflict: () => nativeApi.invoke<CrossChannelPresence | null>('cross_channel_conflict'),
+    closeOther: () => nativeApi.invoke<void>('cross_channel_close_other'),
   },
 
   /**

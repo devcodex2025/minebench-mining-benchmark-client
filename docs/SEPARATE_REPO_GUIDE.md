@@ -1,5 +1,7 @@
 # 🔧 Створення окремого репозиторію для MineBench-Client
 
+> **Note:** the client is now **Tauri v2** (`src-tauri/`, Rust + WebView), not Electron. Replace "Electron" references below with Tauri and use `npm run tauri:dev`/`npm run tauri:build`.
+
 ## Проблема
 Зараз MineBench-Client є частиною головного репозиторію MineBench-dApp.
 Потрібно створити окремий репозиторій для клієнта.
@@ -11,7 +13,7 @@
 1. Відкрийте: https://github.com/new
 2. Налаштування:
    - Repository name: `MineBench-Client`
-   - Description: `MineBench Desktop Mining Client - Cross-platform Electron app`
+   - Description: `MineBench Desktop Mining Client - Cross-platform Tauri app`
    - Public
    - **НЕ додавайте** README, .gitignore, license
 3. Натисніть "Create repository"
@@ -34,7 +36,7 @@ git add .
 git commit -m "Initial commit: MineBench Desktop Client v0.2.0
 
 Features:
-- Cross-platform Electron app (Windows x64/ARM64, macOS Intel/Apple Silicon, Linux x64)
+- Cross-platform Tauri app (Windows x64/ARM64, macOS Intel/Apple Silicon, Linux x64)
 - CPU mining with XMRig 6.26.0
 - Custom UI with React + Three.js + Tailwind CSS
 - Real-time mining statistics and monitoring
@@ -45,9 +47,9 @@ Features:
 - GitHub Actions for automated multi-platform releases
 
 Tech Stack:
-- Electron 31 + React 18 + TypeScript
+- Tauri v2 + Rust + React 18 + TypeScript
 - Tailwind CSS 4 + Three.js
-- Zustand + Vite + electron-builder"
+- Zustand + Vite + Tauri bundler"
 
 # Push до GitHub
 git branch -M main

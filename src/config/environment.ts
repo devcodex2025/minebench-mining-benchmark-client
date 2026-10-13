@@ -85,8 +85,8 @@ const normalizeApiBaseUrl = (value: string | undefined, fallback: string): strin
 };
 
 const fallbackDefaults = (fallbackConfig as any)?.defaults || {};
-const primaryPoolHostFallback = fallbackDefaults.primaryPoolHost || fallbackDefaults.primaryHost || 'xmr.minebench.cloud';
-const backupPoolHostFallback = fallbackDefaults.backupPoolHost || fallbackDefaults.backupHost || 'xmr.minebench.cloud';
+const primaryPoolHostFallback = fallbackDefaults.primaryPoolHost || fallbackDefaults.primaryHost || 'bmt.minebench.cloud';
+const backupPoolHostFallback = fallbackDefaults.backupPoolHost || fallbackDefaults.backupHost || 'bmt.minebench.cloud';
 const primaryRpcHostFallback = fallbackDefaults.primaryRpcHost || fallbackDefaults.primaryHost || primaryPoolHostFallback;
 const backupRpcHostFallback = fallbackDefaults.backupRpcHost || fallbackDefaults.backupHost || backupPoolHostFallback;
 
@@ -146,7 +146,7 @@ const productionConfig: EnvironmentConfig = {
   backendUrl: (import.meta as any).env.VITE_BACKEND_URL || 'https://backend.minebench.cloud',
   walletServiceUrl: 'https://minebench.cloud/wallet',
   syncServiceUrl: 'wss://minebench.cloud/sync',
-  solanaRpcUrl: 'https://api.mainnet-beta.solana.com',
+  solanaRpcUrl: (import.meta as any).env.VITE_SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com',
   bmtTokenMint: (import.meta.env.VITE_BMT_TOKEN_MINT as string) || '67ipDsgK6D7bqTW89H8T1KTxUvVuaFy92GX7Q2XFVdev',
   poolApiUrl: 'https://backend.minebench.cloud/api/pool/stats',
   poolStratumHost: (import.meta.env.VITE_PRIMARY_POOL_HOST as string) || primaryPoolHostFallback,

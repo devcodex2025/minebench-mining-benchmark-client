@@ -1,5 +1,11 @@
 mod commands;
+mod cpu_telemetry;
+mod cross_channel;
 mod miner;
+mod profile_migration;
+mod sensor_broker_client;
+mod update_source;
+mod updater;
 
 use miner::MinerState;
 use std::sync::{Arc, Mutex};
@@ -19,6 +25,8 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             commands::get_cpu_name,
             commands::get_cpu_cores,
@@ -41,6 +49,11 @@ pub fn run() {
             commands::get_pool_sync,
             commands::get_cpu_temp,
             commands::get_cpu_power,
+            commands::get_cpu_telemetry,
+            commands::get_cpu_telemetry_debug,
+            commands::get_cpu_sensor_broker_status,
+            commands::read_cpu_sensor_broker,
+            commands::diagnose_cpu_sensor_broker,
             commands::get_gpu_sensors,
             commands::log_to_file,
             commands::save_miner_settings,
@@ -62,8 +75,26 @@ pub fn run() {
             commands::get_miner_status,
             commands::pause_mining,
             commands::resume_mining,
+            cross_channel::cross_channel_conflict,
+            cross_channel::cross_channel_close_other,
+            updater::install_channel_version,
+            update_source::channel_update_source,
         ])
         .setup(|app| {
+            // Stable replaced the pre-0.9 bundle identifier, so a profile left
+            // in the legacy directory is adopted once, before anything reads it.
+            profile_migration::migrate_legacy_profile(&app.config().identifier);
+            // The installer registers the sensor task and the broker's state
+            // root under channel-scoped names; the client must derive the same
+            // ones from the product name.
+            sensor_broker_client::init_channel(
+                app.config()
+                    .product_name
+                    .as_deref()
+                    .unwrap_or("MineBench Client"),
+            );
+            // The channels are separate applications and must not run together.
+            cross_channel::start(app.handle());
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -71,6 +102,10 @@ pub fn run() {
                         .build(),
                 )?;
             }
+            // Single background sampler for CPU telemetry. It keeps utilization
+            // deltas fresh and idles down to negligible work when Stress Test
+            // stops requesting telemetry.
+            cpu_telemetry::start_sampler(app.handle().clone());
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -81,6 +116,8 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event {
                 let state = app_handle.state::<MinerState>();
                 miner::stop_miner_on_exit(&state);
+                // Nothing to shut down for CPU telemetry: the sensor broker runs
+                // per request and exits on its own.
             }
         });
 }

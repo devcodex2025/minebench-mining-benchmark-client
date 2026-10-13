@@ -1,0 +1,35 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "MineBench Client Nightly",
+  "mainBinaryName": "minebench-client-nightly",
+  "identifier": "minebench.nightly",
+  "build": {
+    "beforeBuildCommand": "npm run build:nightly"
+  },
+  "bundle": {
+    "publisher": "MineBench",
+    "windows": {
+      "nsis": {
+        "installerHooks": "installer-hooks.nightly.nsh"
+      }
+    },
+    "linux": {
+      "deb": {
+        "postInstallScript": "linux/postinst-nightly.sh",
+        "preRemoveScript": "linux/prerm-nightly.sh"
+      },
+      "rpm": {
+        "postInstallScript": "linux/postinst-nightly.sh",
+        "preRemoveScript": "linux/prerm-nightly.sh"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://updates.minebench.cloud/nightly/latest.json",
+        "https://bitbucket.org/minebenchapp/minebench-client/downloads/nightly-latest.json"
+      ]
+    }
+  }
+}

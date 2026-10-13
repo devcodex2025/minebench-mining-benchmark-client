@@ -1,5 +1,7 @@
 # 🔐 Code Signing Guide for MineBench Client
 
+> **Note:** this document predates the Tauri v2 migration. The current desktop client is **Tauri v2** (`src-tauri/tauri.conf.json`); signing is configured there (`bundle.windows.certificate*`, notarization for macOS) instead of `electron-builder`.
+
 ## Why Code Signing Matters
 
 Code signing eliminates antivirus false positives by cryptographically proving that:

@@ -1,5 +1,7 @@
 # ✅ РЕАЛІЗАЦІЯ ЗАВЕРШЕНА - Production Environment Configuration
 
+> **Note:** this document predates the Tauri v2 migration. The current desktop client is **Tauri v2** (`src-tauri/`); use `npm run tauri:build`. Electron/`electron-builder` references below are outdated.
+
 ## 📌 Ваше Питання
 "Як підготувати версію Windows з автентифікацією production?"
 

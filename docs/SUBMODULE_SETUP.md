@@ -1,10 +1,12 @@
 # MineBench Client Setup as Submodule
 
+> **Note:** the client is now **Tauri v2** (`src-tauri/`, Rust + WebView), not Electron. Use `npm run tauri:dev`/`npm run tauri:build`.
+
 ## Step 1: Create New GitHub Repository
 
 1. Go to https://github.com/new
 2. Repository name: `MineBench-Client`
-3. Description: `MineBench Desktop Mining Client - Cross-platform Electron app`
+3. Description: `MineBench Desktop Mining Client - Cross-platform Tauri app`
 4. Visibility: Public (or Private)
 5. **DO NOT** initialize with README, .gitignore, or license
 6. Click "Create repository"
@@ -26,7 +28,7 @@ git add .
 # Commit
 git commit -m "Initial commit: MineBench Desktop Client v0.2.0
 
-- Cross-platform Electron app (Windows, macOS, Linux)
+- Cross-platform Tauri app (Windows, macOS, Linux)
 - CPU mining with XMRig
 - Multi-architecture support (x64, ARM64)
 - Custom UI with React + Three.js

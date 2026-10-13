@@ -1,5 +1,7 @@
 # Wayland Implementation Summary
 
+> **Note:** this document predates the Tauri v2 migration. The current desktop client is **Tauri v2** (WebKitGTK on Linux), not Electron; `electron/main.cjs` references below no longer exist.
+
 ## 🎯 Objective Completed
 
 Implemented native Wayland support for MineBench Client with automatic detection and fallback capabilities.

@@ -1,5 +1,11 @@
 # 📚 MineBench Environment Configuration - Документація
 
+> **Примітка (актуальність):** частина build/environment-документів нижче досі
+> описує Electron і `electron-builder`. Поточний десктопний клієнт — **Tauri v2**
+> (`npm run tauri:dev`, `npm run tauri:build`, `src-tauri/`). Використовуйте ці
+> команди та актуальні гайди `docs/BROWSER_WALLET_AUTH.md` і `docs/BUILD.md`.
+> Застарілі Electron-згадки підлягають плановому оновленню.
+
 ## 🚀 Швидкий Старт
 
 ### Побудувати Windows з Production Auth
@@ -66,7 +72,7 @@
 ```bash
 npm run dev:local       # Dev з localhost
 npm run dev:prod        # Dev з production URLs
-npm run dev:all         # Dev з Electron
+npm run tauri:dev      # Dev з Tauri
 ```
 
 ### Building

@@ -2,7 +2,7 @@ import { getEnvironmentConfig } from '../config/environment';
 import { nativeApi } from './native-api';
 
 type BackendRequestOptions = {
-  method?: 'GET' | 'POST';
+  method?: 'GET' | 'POST' | 'PATCH';
   body?: any;
   token?: string | null;
 };

@@ -1,15 +1,33 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { useMinerStore, DeviceType } from '../store/useMinerStore';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useMinerStore } from '../store/useMinerStore';
 import { SolanaAuthService, useSolanaAuth } from '../services/solanaAuth';
 import { MultiDeviceSyncService } from '../services/multiDeviceSync';
 import { useTheme } from '../contexts/ThemeContext';
-import { Play, Square, Cpu, Monitor, Timer, Zap } from '../components/icons';
+import { Play, Square, Cpu, Timer, Zap } from '../components/icons';
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip } from 'recharts';
 import { cn, formatHashrate } from '../lib/utils';
 import { getEnvironmentConfig } from '../config/environment';
 import { nativeApi } from '../lib/native-api';
+import { authStorage } from '../lib/auth-storage';
 import { p2poolAPI } from '../services/p2poolAPI';
-import { classifyMinerOutput, isTransientPoolNetworkError, shouldMarkMinerExited } from '../lib/miner-output';
+import {
+    classifyMinerOutput,
+    getAcceptedShareCount,
+    getAcceptedShareCountFromOutput,
+    getCpuHashrate,
+    isTransientPoolNetworkError,
+    shouldAutoStopBenchmark,
+    shouldMarkMinerExited,
+    shouldStartBenchmarkMeasurement,
+} from '../lib/miner-output';
+import { getBenchmarkSafetyMode } from '../lib/benchmark-safety';
+import { APP_VERSION } from '../services/appUpdate';
+import { buildBenchmarkMetadata } from '../lib/benchmark-metadata';
+import { buildWarmupPresets, runBenchmarkWarmup, type WarmupPreset, type WarmupProgress } from '../lib/benchmark-warmup';
+import { MsrStatus } from '../components/MsrStatus';
+import { getMinerMsrStatusFromOutput } from '../lib/miner-msr';
+import { BenchmarkJournal } from '../components/BenchmarkJournal';
+import { createBenchmarkJournalSession, updateBenchmarkJournalSession, recordBenchmarkAcceptedShares } from '../lib/benchmark-journal';
 
 const getErrorMessage = (err: any) => {
 
@@ -36,6 +54,7 @@ const Benchmark = () => {
     const setDeviceType = useMinerStore(state => state.setDeviceType);
     const wallet = useMinerStore(state => state.wallet);
     const workerName = useMinerStore(state => state.workerName);
+    const poolUrl = useMinerStore(state => state.poolUrl);
     const updateStats = useMinerStore(state => state.updateStats);
     const history = useMinerStore(state => state.history);
     const currentHashrate = useMinerStore(state => state.currentHashrate);
@@ -43,16 +62,50 @@ const Benchmark = () => {
     const currentPower = useMinerStore(state => state.currentPower);
     const resetSession = useMinerStore(state => state.resetSession);
     const pools = useMinerStore(state => state.pools);
-    const poolUrl = useMinerStore(state => state.poolUrl);
     const backendPoolEndpoints = useMinerStore(state => state.backendPoolEndpoints);
+    const minerMsrStatus = useMinerStore(state => state.minerMsrStatus);
 
 
     const [duration, setDuration] = useState<number>(60);
     const [timeLeft, setTimeLeft] = useState<number | null>(null);
     const [finalResults, setFinalResults] = useState<{ avg: number, max: number } | null>(null);
-    const [sysInfo, setSysInfo] = useState<{ cpu: string, cores: number, ram: string, ramBytes: number } | null>(null);
+    const xmrigVersionRef = useRef<string | undefined>(undefined);
+    useEffect(() => {
+        if (import.meta.env.VITE_BENCHMARK_METADATA_ENABLED !== 'true' || !(window as any).__TAURI_INTERNALS__) return;
+        let cancelled = false;
+        nativeApi.miner.getVersionInfo().then(info => {
+            if (!cancelled) xmrigVersionRef.current = info.currentVersion || undefined;
+        }).catch(() => undefined);
+        return () => { cancelled = true; };
+    }, []);
+    const [isWarmingUp, setIsWarmingUp] = useState(false);
+    const [acceptedShares, setAcceptedShares] = useState(0);
+    const [showJournal, setShowJournal] = useState(false);
+    const closeJournal = useCallback(() => setShowJournal(false), []);
+    const [warmupProgress, setWarmupProgress] = useState<WarmupProgress | null>(null);
+    const [warmupElapsed, setWarmupElapsed] = useState(0);
+    const warmupAbortRef = useRef<AbortController | null>(null);
+    const warmupReadyRef = useRef(false);
+    const warmupStartedAtRef = useRef(0);
+    const warmupReadyAtRef = useRef(0);
+    const minerGenerationRef = useRef(0);
+    const warmupSampleRef = useRef<{ hashrate: number; sampledAt: number } | null>(null);
+    const processSharesRef = useRef(0);
+    const sharesOffsetRef = useRef(0);
+    const journalSessionRef = useRef<{ wallet: string; id: string | null } | null>(null);
+    const presetTransitionRef = useRef(false);
+    const pendingPresetRef = useRef<Promise<void> | null>(null);
+    const mountedRef = useRef(true);
+    const [sysInfo, setSysInfo] = useState<{
+        cpu: string;
+        cores: number;
+        ram: string;
+        ramBytes: number;
+        os_name?: string;
+        os_arch?: string;
+    } | null>(null);
     const [showAuthWarning, setShowAuthWarning] = useState(false);
-    const [pendingStart, setPendingStart] = useState(false);
+    const [, setPendingStart] = useState(false);
     const [isStartPending, setIsStartPending] = useState(false);
     const env = getEnvironmentConfig();
     const primaryPool = pools?.['cpu'];
@@ -60,6 +113,11 @@ const Benchmark = () => {
     const isNodeFullySynced = env.enableBackupPool
         ? !!((primaryPool?.isSynced && primaryPool?.progress >= 99.9) || (reservePool?.isSynced && reservePool?.progress >= 99.9))
         : !!(primaryPool?.isSynced && primaryPool?.progress >= 99.9);
+    const benchmarkSafety = getBenchmarkSafetyMode({
+        cores: sysInfo?.cores || 1,
+        ramBytes: sysInfo?.ramBytes || 0
+    });
+    const warmupPresets = buildWarmupPresets(sysInfo?.cores || 1, benchmarkSafety.enabled);
 
 
     const timerRef = useRef<NodeJS.Timeout | null>(null);
@@ -68,6 +126,17 @@ const Benchmark = () => {
     const lastBenchmarkRewardReportAtRef = useRef(0);
     const benchmarkRewardSeqRef = useRef(0);
     const benchmarkStartingRef = useRef(false);
+    const benchmarkMeasurementStartedRef = useRef(false);
+    const benchmarkStopInFlightRef = useRef(false);
+    const acceptedSharesRef = useRef(0);
+    const statsFetchInFlightRef = useRef(false);
+    const startBenchmarkMeasurementRef = useRef<(firstHashrate?: number) => boolean>(() => false);
+    const cpuTelemetryInFlightRef = useRef(false);
+    const cpuTelemetryRef = useRef<{ sampledAt: number; temp: number | null; power: number | null }>({
+        sampledAt: 0,
+        temp: null,
+        power: null,
+    });
     const lastPoolNetworkWarningAtRef = useRef(0);
     // Keep local tracks for final calculation to avoid dependency on store sampling rate
     const localStatsRef = useRef<number[]>([]);
@@ -120,9 +189,10 @@ const Benchmark = () => {
             try {
                 if (!(window as any).__TAURI_INTERNALS__) return;
 
-                const cpu = await nativeApi.invoke<string>('get_cpu_name');
-                const cores = await nativeApi.invoke<number>('get_cpu_cores');
-                const stats = await nativeApi.system.getSystemStats();
+                const [cpuInfo, stats] = await Promise.all([
+                    nativeApi.system.getCpuInfo(),
+                    nativeApi.system.getSystemStats()
+                ]);
 
                 // Format RAM to GB
                 const ramGB = stats && stats.ramTotal
@@ -130,10 +200,12 @@ const Benchmark = () => {
                     : 'N/A';
 
                 setSysInfo({
-                    cpu: cpu || 'Unknown CPU',
-                    cores: cores || 0,
+                    cpu: cpuInfo.name || 'Unknown CPU',
+                    cores: cpuInfo.cores || 0,
                     ram: ramGB,
-                    ramBytes: Number(stats?.ramTotal || 0)
+                    ramBytes: Number(stats?.ramTotal || 0),
+                    os_name: stats?.os_name,
+                    os_arch: stats?.os_arch,
                 });
             } catch (e) {
                 console.error("Failed to load sys info", e);
@@ -144,14 +216,33 @@ const Benchmark = () => {
 
     // Auto-stop when timer reaches 0
     useEffect(() => {
-        if (timeLeft === 0 && isBenchmarkActive) {
-            stopBenchmark();
+        if (shouldAutoStopBenchmark(
+            timeLeft,
+            isBenchmarkActive,
+            benchmarkMeasurementStartedRef.current,
+            benchmarkStopInFlightRef.current,
+        )) {
+            void stopBenchmark();
         }
     }, [timeLeft, isBenchmarkActive]);
 
     // Cleanup on unmount
     useEffect(() => {
+        mountedRef.current = true;
         return () => {
+            mountedRef.current = false;
+            warmupAbortRef.current?.abort();
+            if ((isBenchmarkPollingRef.current || benchmarkStartingRef.current) && useMinerStore.getState().mode === 'benchmark') {
+                setStatus('stopping');
+                void (async () => {
+                    await pendingPresetRef.current?.catch(() => undefined);
+                    await nativeApi.miner.stopBenchmark().catch(() => undefined);
+                    useMinerStore.getState().resetMinerMsrStatus();
+                    if (useMinerStore.getState().mode === 'benchmark') setStatus('idle');
+                })();
+                const session = journalSessionRef.current;
+                if (session) updateBenchmarkJournalSession(session.wallet, session.id, { status: 'stopped', completedAt: Date.now() });
+            }
             isBenchmarkPollingRef.current = false;
             if (timerRef.current) clearInterval(timerRef.current);
             if (statsIntervalRef.current) clearInterval(statsIntervalRef.current);
@@ -159,7 +250,41 @@ const Benchmark = () => {
     }, []);
 
     useEffect(() => {
-        if (status !== 'running' || !user?.publicKey) return;
+        if (status !== 'error' || mode !== 'benchmark') return;
+        warmupAbortRef.current?.abort();
+        isBenchmarkPollingRef.current = false;
+        if (timerRef.current) clearInterval(timerRef.current);
+        if (statsIntervalRef.current) clearInterval(statsIntervalRef.current);
+        setIsWarmingUp(false);
+        useMinerStore.getState().resetMinerMsrStatus();
+        void nativeApi.miner.stopBenchmark().catch(() => undefined);
+        const session = journalSessionRef.current;
+        if (session) updateBenchmarkJournalSession(session.wallet, session.id, { status: 'failed', completedAt: Date.now() });
+    }, [status, mode]);
+
+    useEffect(() => {
+        if (!isWarmingUp) return;
+        const timer = setInterval(() => {
+            setWarmupElapsed(Math.floor((Date.now() - warmupStartedAtRef.current) / 1000));
+            if (warmupReadyAtRef.current && Date.now() - warmupReadyAtRef.current > 180_000) {
+                addLog('No accepted share within 180 seconds after tuning. Check the pool connection and retry.');
+                void stopBenchmark();
+            }
+        }, 1000);
+        return () => clearInterval(timer);
+    }, [isWarmingUp]);
+
+    useEffect(() => {
+        const session = journalSessionRef.current;
+        if (session && session.wallet !== (user?.publicKey || '') && isBenchmarkPollingRef.current) {
+            addLog('Wallet changed. Stopping this benchmark session.');
+            void stopBenchmark();
+        }
+    }, [user?.publicKey]);
+
+    useEffect(() => {
+        if (status !== 'running' || isWarmingUp || !user?.publicKey) return;
+        if (journalSessionRef.current?.wallet !== user.publicKey) return;
 
         const now = Date.now();
         if (now - lastBenchmarkRewardReportAtRef.current < 15000) return;
@@ -170,23 +295,31 @@ const Benchmark = () => {
         SolanaAuthService.getInstance()
             .reportMiningStats({
                 hashrate: currentHashrate,
-                shares: localStatsRef.current.length,
+                shares: 0,
                 source: 'benchmark',
                 referenceId: `benchmark-${user.publicKey}-${now}-${seq}`,
                 metadata: {
                     deviceType,
                     workerName,
                     duration,
-                    samples: localStatsRef.current.length
+                    samples: localStatsRef.current.length,
+                    shareSource: 'pool-verified-only'
                 }
             })
-            .then(() => SolanaAuthService.getInstance().fetchMiningStats(user.publicKey))
             .catch((err) => {
                 console.warn('[Benchmark] Failed to report mining stats:', err);
             });
-    }, [status, user?.publicKey, currentHashrate, deviceType, workerName, duration]);
+    }, [status, isWarmingUp, user?.publicKey, currentHashrate, deviceType, workerName, duration]);
 
     // Listen for miner events
+    const recordAcceptedShares = (count: number) => {
+        processSharesRef.current = Math.max(processSharesRef.current, count);
+        acceptedSharesRef.current = sharesOffsetRef.current + processSharesRef.current;
+        setAcceptedShares(acceptedSharesRef.current);
+        const session = journalSessionRef.current;
+        if (session) recordBenchmarkAcceptedShares(session.wallet, session.id, acceptedSharesRef.current);
+    };
+
     useEffect(() => {
         if (!(window as any).__TAURI_INTERNALS__) return;
 
@@ -202,8 +335,21 @@ const Benchmark = () => {
 
             await register<string>('miner-log', (msg) => {
                 const message = String(msg || '').trim();
+                if (useMinerStore.getState().mode !== 'benchmark') return;
+                const msr = getMinerMsrStatusFromOutput(message);
+                if (msr) useMinerStore.getState().setMinerMsrStatus(msr);
                 console.log(`Miner: ${message}`);
                 if (message) addLog(message);
+                const shareCount = getAcceptedShareCountFromOutput(message);
+                if (
+                    shareCount !== null
+                    && !presetTransitionRef.current
+                    && useMinerStore.getState().mode === 'benchmark'
+                    && ['starting', 'running'].includes(useMinerStore.getState().status)
+                ) {
+                    recordAcceptedShares(shareCount);
+                    startBenchmarkMeasurementRef.current();
+                }
                 if (
                     useMinerStore.getState().mode === 'benchmark'
                     && useMinerStore.getState().status === 'starting'
@@ -215,6 +361,9 @@ const Benchmark = () => {
 
             await register<string>('miner-error', (msg) => {
                 const message = String(msg || '').trim();
+                if (useMinerStore.getState().mode !== 'benchmark') return;
+                const msr = getMinerMsrStatusFromOutput(message);
+                if (msr) useMinerStore.getState().setMinerMsrStatus(msr);
                 console.error(`Miner stderr: ${message}`);
                 if (message) {
                     if (isTransientPoolNetworkError(message)) {
@@ -228,6 +377,11 @@ const Benchmark = () => {
                     }
                 }
                 if (useMinerStore.getState().mode !== 'benchmark') return;
+                const shareCount = getAcceptedShareCountFromOutput(message);
+                if (shareCount !== null && !presetTransitionRef.current && ['starting', 'running'].includes(useMinerStore.getState().status)) {
+                    recordAcceptedShares(shareCount);
+                    startBenchmarkMeasurementRef.current();
+                }
 
                 const kind = classifyMinerOutput(message);
                 if (kind === 'auth-error') {
@@ -261,9 +415,17 @@ const Benchmark = () => {
 
     const startBenchmark = async () => {
         if (isBenchmarkActive) return;
+        if (!sysInfo) {
+            addLog('Waiting for CPU and memory information before selecting benchmark profiles.');
+            return;
+        }
         const usingRemotePool = backendPoolEndpoints.length > 0;
         if (!usingRemotePool && !isNodeFullySynced) {
             addLog('Node is not fully synced (100%). Benchmark is disabled until sync completes.');
+            return;
+        }
+        if (usingRemotePool && !backendPoolEndpoints.some(endpoint => !endpoint.direct && endpoint.url === poolUrl)) {
+            addLog('Benchmark requires a MineBench proxy endpoint. Select the configured MineBench pool in Settings.');
             return;
         }
 
@@ -273,6 +435,12 @@ const Benchmark = () => {
             setPendingStart(true);
             return;
         }
+        const rewardState = useMinerStore.getState();
+        if (rewardState.rewardAsset === 'XMR'
+            && (!rewardState.premiumXmrWallet || !p2poolAPI.validateMoneroAddress(wallet))) {
+            addLog('Cannot start XMR reward benchmark: save a valid Monero wallet in Settings first.');
+            return;
+        }
 
         // User is authenticated, proceed with benchmark
         await runBenchmark();
@@ -280,6 +448,8 @@ const Benchmark = () => {
 
     const runBenchmark = async () => {
         if (benchmarkStartingRef.current) return;
+        const controller = new AbortController();
+        warmupAbortRef.current = controller;
         benchmarkStartingRef.current = true;
         setIsStartPending(true);
         setMode('benchmark');
@@ -290,64 +460,161 @@ const Benchmark = () => {
             } catch {
                 // stop_miner is a no-op when no managed miner is running.
             }
+            controller.signal.throwIfAborted();
 
             resetSession();
             setStatus('starting');
             isBenchmarkPollingRef.current = true;
+            benchmarkMeasurementStartedRef.current = false;
+            benchmarkStopInFlightRef.current = false;
+            acceptedSharesRef.current = 0;
+            statsFetchInFlightRef.current = false;
+            cpuTelemetryInFlightRef.current = false;
+            cpuTelemetryRef.current = { sampledAt: 0, temp: null, power: null };
             localStatsRef.current = [];
             lastBenchmarkRewardReportAtRef.current = 0;
             benchmarkRewardSeqRef.current = 0;
             benchmarkApiStateRef.current = { connectedUrl: null, errorLogged: false };
             setFinalResults(null);
+            setAcceptedShares(0);
+            setIsWarmingUp(true);
+            setWarmupProgress(null);
+            setWarmupElapsed(0);
+            warmupStartedAtRef.current = Date.now();
+            warmupReadyAtRef.current = 0;
+            warmupReadyRef.current = false;
+            processSharesRef.current = 0;
+            sharesOffsetRef.current = 0;
+            journalSessionRef.current = {
+                wallet: user?.publicKey || '',
+                id: createBenchmarkJournalSession(user?.publicKey || '', { startedAt: Date.now(), durationSeconds: duration }),
+            };
             setTimeLeft(duration);
             setShowAuthWarning(false);
             p2poolAPI.invalidateCache();
 
-            const lowEndCpu = (sysInfo?.cores || 0) > 0 && (sysInfo?.cores || 0) <= 2;
-            const lowEndRam = (sysInfo?.ramBytes || 0) > 0 && (sysInfo?.ramBytes || 0) <= 4 * 1024 * 1024 * 1024;
-            const knownLowEndCpu = /celeron|n4000/i.test(sysInfo?.cpu || '');
-            const useLowEndSafeMode = deviceType === 'cpu' && (lowEndCpu || lowEndRam || knownLowEndCpu);
-
-            await nativeApi.miner.startBenchmark({
+            const startPreset = async (preset: WarmupPreset) => {
+                const launch = async () => {
+                controller.signal.throwIfAborted();
+                presetTransitionRef.current = true;
+                minerGenerationRef.current++;
+                statsFetchInFlightRef.current = false;
+                await nativeApi.miner.stopBenchmark();
+                controller.signal.throwIfAborted();
+                sharesOffsetRef.current = acceptedSharesRef.current;
+                processSharesRef.current = 0;
+                warmupSampleRef.current = null;
+                useMinerStore.getState().resetMinerMsrStatus();
+                await nativeApi.miner.startBenchmark({
                 type: deviceType,
                 wallet,
                 worker: workerName,
                 poolUrl: useMinerStore.getState().poolUrl,
+                rewardAsset: useMinerStore.getState().rewardAsset,
                 solanaWallet: user?.publicKey, // Raw Solana address (no encoding)
-                threads: useLowEndSafeMode ? 1 : undefined,
-                randomxMode: useLowEndSafeMode ? 'light' : undefined,
-                hugePages: useLowEndSafeMode ? false : undefined
-            });
-
-            setStatus('running');
-            addLog(`Benchmark started: ${deviceType.toUpperCase()} | ${duration}s`);
-            if (useLowEndSafeMode) {
-                addLog('Low-end CPU/RAM detected: using RandomX light mode, 1 thread, huge pages disabled');
-            }
-
-            // Start Countdown
-            timerRef.current = setInterval(() => {
-                setTimeLeft(prev => {
-                    if (prev === null || prev <= 1) {
-                        return 0; // Will trigger useEffect to stop
-                    }
-                    return prev - 1;
+                threads: preset.threads,
+                cpuPriority: preset.cpuPriority,
+                randomxMode: preset.randomxMode,
+                hugePages: preset.hugePages,
                 });
-            }, 1000);
-
-            // Start Polling Stats
+                if (controller.signal.aborted) {
+                    await nativeApi.miner.stopBenchmark();
+                    controller.signal.throwIfAborted();
+                }
+                setStatus('running');
+                setIsStartPending(false);
+                addLog(`Warm-up preset: ${preset.label}, ${preset.threads} threads, RandomX ${preset.randomxMode}.`);
+                };
+                pendingPresetRef.current = launch();
+                try { await pendingPresetRef.current; }
+                finally { presetTransitionRef.current = false; pendingPresetRef.current = null; }
+            };
             statsIntervalRef.current = setInterval(() => fetchStats(), 3000);
-            fetchStats(true);
+            const winner = await runBenchmarkWarmup({
+                presets: warmupPresets,
+                signal: controller.signal,
+                start: startPreset,
+                sample: () => warmupSampleRef.current,
+                progress: progress => { if (mountedRef.current) setWarmupProgress(progress); },
+            });
+            warmupReadyRef.current = true;
+            warmupReadyAtRef.current = Date.now();
+            addLog(`Warm-up selected ${winner.preset.label}: ${formatHashrate(winner.hashrate)} average. Waiting for an accepted share on this preset.`);
+            if (processSharesRef.current > 0) startBenchmarkMeasurementRef.current();
 
         } catch (err: any) {
+            if (controller.signal.aborted) return;
             isBenchmarkPollingRef.current = false;
+            if (statsIntervalRef.current) clearInterval(statsIntervalRef.current);
+            await nativeApi.miner.stopBenchmark().catch(() => undefined);
+            setIsWarmingUp(false);
+            const session = journalSessionRef.current;
+            if (session) updateBenchmarkJournalSession(session.wallet, session.id, { status: 'failed', failureReason: getErrorMessage(err) });
             console.error(err);
             setStatus('error');
             addLog(`Error starting benchmark: ${getErrorMessage(err)}`);
         } finally {
             benchmarkStartingRef.current = false;
-            setIsStartPending(false);
+            if (mountedRef.current) setIsStartPending(false);
         }
+    };
+
+    const startBenchmarkMeasurement = (firstHashrate?: number): boolean => {
+        if (!warmupReadyRef.current || processSharesRef.current < 1 || benchmarkMeasurementStartedRef.current || benchmarkStopInFlightRef.current) return false;
+
+        const warmupHashrate = useMinerStore.getState().currentHashrate;
+        const initialHashrate = Number.isFinite(firstHashrate) && Number(firstHashrate) > 0
+            ? Number(firstHashrate)
+            : warmupHashrate;
+
+        benchmarkMeasurementStartedRef.current = true;
+        setIsWarmingUp(false);
+        resetSession();
+        setStatus('running');
+        localStatsRef.current = [];
+        if (initialHashrate > 0) {
+            updateStats(initialHashrate, cpuTelemetryRef.current.temp, cpuTelemetryRef.current.power ?? undefined);
+            localStatsRef.current.push(initialHashrate);
+        }
+        setTimeLeft(duration);
+        addLog(`Warm-up complete and accepted share confirmed. Benchmark timer started for ${duration}s.`);
+
+        if (timerRef.current) clearInterval(timerRef.current);
+        timerRef.current = setInterval(() => {
+            setTimeLeft(prev => {
+                if (prev === null || prev <= 1) return 0;
+                return prev - 1;
+            });
+        }, 1000);
+        return true;
+    };
+    startBenchmarkMeasurementRef.current = startBenchmarkMeasurement;
+
+    const refreshCpuTelemetry = () => {
+        const telemetry = cpuTelemetryRef.current;
+        if (
+            !benchmarkMeasurementStartedRef.current
+            || cpuTelemetryInFlightRef.current
+            || Date.now() - telemetry.sampledAt < 15000
+        ) return;
+
+        cpuTelemetryInFlightRef.current = true;
+        cpuTelemetryRef.current.sampledAt = Date.now();
+        void (async () => {
+            try {
+                const tempRes = await nativeApi.invoke<any>('get_cpu_temp');
+                const powerRes = await nativeApi.invoke<any>('get_cpu_power');
+                cpuTelemetryRef.current = {
+                    sampledAt: Date.now(),
+                    temp: tempRes?.success ? tempRes.temp : telemetry.temp,
+                    power: powerRes?.success ? powerRes.power : telemetry.power,
+                };
+            } catch (error) {
+                console.warn('[Benchmark] CPU telemetry failed:', getErrorMessage(error));
+            } finally {
+                cpuTelemetryInFlightRef.current = false;
+            }
+        })();
     };
 
     const handleAuthWarningContinue = () => {
@@ -383,13 +650,23 @@ const Benchmark = () => {
             addLog('Benchmark result was not submitted: no positive hashrate samples were captured.');
             return;
         }
+        const token = authStorage.getToken();
+        const sessionOwner = journalSessionRef.current?.wallet;
+        if (!token || !sessionOwner || useSolanaAuth.getState().user?.publicKey !== sessionOwner) {
+            addLog('Benchmark result was not submitted: connect and authenticate a Solana wallet first.');
+            return;
+        }
 
         const state = useMinerStore.getState();
         const deviceId = localStorage.getItem('minebench_device_id') || undefined;
         const elapsedSeconds = Math.max(1, duration - (timeLeft ?? duration));
         const avgTemp = averagePositive(state.history.map((point) => point.temp));
         const avgPower = averagePositive(state.history.map((point) => point.power));
+        // Enable in a release only after the metadata API and migration are deployed.
+        const metadata = import.meta.env.VITE_BENCHMARK_METADATA_ENABLED === 'true'
+            ? buildBenchmarkMetadata({ ...sysInfo, client_version: APP_VERSION, xmrig_version: deviceType === 'cpu' ? xmrigVersionRef.current : undefined }) : {};
         const record = {
+            ...metadata,
             avg_hashrate: avg,
             max_hashrate: Number.isFinite(max) && max > 0 ? max : avg,
             duration_seconds: elapsedSeconds,
@@ -399,12 +676,13 @@ const Benchmark = () => {
             avg_power: avgPower,
             algorithm: deviceType === 'cpu' ? 'RandomX' : 'KawPow',
             coin_name: deviceType === 'cpu' ? 'XMR' : 'RVN',
-            solana_wallet_address: user?.publicKey || null,
+            solana_wallet_address: sessionOwner,
             device_uid: deviceId || `${deviceType}-${sysInfo?.cpu || workerName}`,
-            created_at: new Date().toISOString()
         };
 
-        const result = await nativeApi.miner.submitBenchmark(record) as any;
+        const result = await nativeApi.miner.submitBenchmark(record, token) as any;
+        const session = journalSessionRef.current;
+        if (session) updateBenchmarkJournalSession(session.wallet, session.id, { submissionStatus: 'saved' });
         const submittedId = result?.benchmark?.id;
         const submittedBenchmark = { ...record, ...(result?.benchmark || {}) };
         localStorage.setItem('minebench_latest_benchmark', JSON.stringify(submittedBenchmark));
@@ -415,12 +693,40 @@ const Benchmark = () => {
     };
 
     const stopBenchmark = async () => {
+        if (benchmarkStopInFlightRef.current) return;
+        benchmarkStopInFlightRef.current = true;
+        warmupAbortRef.current?.abort();
+        await pendingPresetRef.current?.catch(() => undefined);
+
         await fetchStats(true);
+        minerGenerationRef.current++;
+        const measurementStarted = benchmarkMeasurementStartedRef.current;
         isBenchmarkPollingRef.current = false;
         if (timerRef.current) clearInterval(timerRef.current);
         if (statsIntervalRef.current) clearInterval(statsIntervalRef.current);
+        timerRef.current = null;
+        statsIntervalRef.current = null;
+        setIsWarmingUp(false);
+        useMinerStore.getState().resetMinerMsrStatus();
+        const journalSession = journalSessionRef.current;
 
         setStatus('stopping');
+
+        if (!measurementStarted) {
+            try {
+                await nativeApi.miner.stopBenchmark();
+                setFinalResults(null);
+                setStatus('completed');
+                if (journalSession) updateBenchmarkJournalSession(journalSession.wallet, journalSession.id, { status: 'stopped', completedAt: Date.now() });
+                addLog('Benchmark stopped during system warm-up. No result was submitted.');
+            } catch (err: any) {
+                console.error('[Benchmark] Error stopping warm-up:', err);
+                addLog(`Error stopping benchmark: ${getErrorMessage(err)}`);
+                setStatus('error');
+                if (journalSession) updateBenchmarkJournalSession(journalSession.wallet, journalSession.id, { status: 'failed', failureReason: getErrorMessage(err) });
+            }
+            return;
+        }
 
         // Calculate Results
         const storeHistory = useMinerStore.getState().history || [];
@@ -444,6 +750,10 @@ const Benchmark = () => {
         }
 
         setFinalResults({ avg, max });
+        if (journalSession) updateBenchmarkJournalSession(journalSession.wallet, journalSession.id, {
+            status: 'completed', completedAt: Date.now(), avgHashrate: avg, maxHashrate: max,
+            acceptedShares: acceptedSharesRef.current, durationSeconds: Math.max(0, duration - (timeLeft ?? duration)),
+        });
 
         try {
             // Save logs to disk before stopping
@@ -466,6 +776,7 @@ const Benchmark = () => {
             };
 
             await submitBenchmarkResult(avg, max).catch((err: any) => {
+                if (journalSession) updateBenchmarkJournalSession(journalSession.wallet, journalSession.id, { submissionStatus: 'failed', submissionFailureReason: getErrorMessage(err) });
                 console.error('[Benchmark] Submit failed:', err);
                 addLog(`Benchmark finished, but submit failed: ${getErrorMessage(err)}`);
             });
@@ -478,11 +789,16 @@ const Benchmark = () => {
             console.error('[Benchmark] Error stopping:', err);
             addLog(`Error stopping benchmark: ${getErrorMessage(err)}`);
             setStatus('error');
+            if (journalSession) updateBenchmarkJournalSession(journalSession.wallet, journalSession.id, { status: 'failed', failureReason: getErrorMessage(err) });
         }
     };
 
     const fetchStats = async (force = false) => {
+        if (presetTransitionRef.current || !mountedRef.current) return;
         if (!force && !isBenchmarkPollingRef.current && useMinerStore.getState().status !== 'running') return;
+        if (statsFetchInFlightRef.current) return;
+        statsFetchInFlightRef.current = true;
+        const generation = minerGenerationRef.current;
 
         try {
             const endpoints = deviceType === 'cpu'
@@ -517,6 +833,7 @@ const Benchmark = () => {
                 }
             }
 
+            if (generation !== minerGenerationRef.current || !mountedRef.current || presetTransitionRef.current) return;
             if (!data) {
                 if (!benchmarkApiStateRef.current.errorLogged) {
                     addLog(`Waiting for miner API... tried ${endpoints.length} endpoint(s)`);
@@ -533,18 +850,26 @@ const Benchmark = () => {
             let hr = 0;
             let temp: number | null = null;
             let power: number | null = null;
+            const acceptedShareCount = getAcceptedShareCount(data);
 
             if (deviceType === 'cpu') {
-                hr = data.hashrate?.total?.[0] ??
-                    data.hashrate?.current ??
-                    data.hashrate ??
-                    0;
+                hr = getCpuHashrate(data);
+            } else if (data.gpus && data.gpus.length > 0) {
+                hr = Number(data.gpus[0].hashrate ?? data.gpus[0].hash ?? 0);
+            }
 
-                const tempRes = await nativeApi.invoke<any>('get_cpu_temp');
-                const powerRes = await nativeApi.invoke<any>('get_cpu_power');
+            warmupSampleRef.current = { hashrate: hr, sampledAt: Date.now() };
+            if (acceptedShareCount > processSharesRef.current) recordAcceptedShares(acceptedShareCount);
+            const measurementStartedNow = shouldStartBenchmarkMeasurement(
+                acceptedShareCount,
+                benchmarkMeasurementStartedRef.current,
+                benchmarkStopInFlightRef.current,
+            ) && startBenchmarkMeasurement(hr);
 
-                if (tempRes && tempRes.success) temp = tempRes.temp;
-                if (powerRes && powerRes.success) power = powerRes.power;
+            if (deviceType === 'cpu') {
+                refreshCpuTelemetry();
+                temp = cpuTelemetryRef.current.temp;
+                power = cpuTelemetryRef.current.power;
 
                 nativeApi.invoke('report_stats', { temp, power }).catch(() => { });
 
@@ -563,7 +888,6 @@ const Benchmark = () => {
                 }
             } else if (data.gpus && data.gpus.length > 0) {
                 const sensorFallback = await nativeApi.system.getGpuSensors().catch(() => null);
-                hr = data.gpus[0].hashrate ?? data.gpus[0].hash ?? 0;
                 temp = data.gpus[0].temperature ?? data.gpus[0].temp ?? sensorFallback?.temp ?? null;
                 power = data.gpus[0].power ?? sensorFallback?.power ?? null;
                 nativeApi.invoke('report_stats', { temp, power }).catch(() => { });
@@ -583,13 +907,16 @@ const Benchmark = () => {
                 }
             }
 
-            if (hr > 0) {
+            if (generation !== minerGenerationRef.current || !mountedRef.current) return;
+            if (hr > 0 && !measurementStartedNow) {
                 updateStats(hr, temp, power ?? undefined);
-                localStatsRef.current.push(hr);
+                if (benchmarkMeasurementStartedRef.current) localStatsRef.current.push(hr);
                 console.debug(`[Benchmark] Hashrate update: ${formatHashrate(hr)} | Temp: ${temp ?? 'n/a'}°C`);
             }
         } catch (e: any) {
             console.warn('[Benchmark] fetchStats failed:', e?.message || e);
+        } finally {
+            if (generation === minerGenerationRef.current) statsFetchInFlightRef.current = false;
         }
     };
 
@@ -599,16 +926,20 @@ const Benchmark = () => {
                 <div>
                     <h1 className={cn("text-3xl font-light", theme === 'light' ? 'text-zinc-900' : 'text-white')}>Benchmark Mode</h1>
                     <p className="text-zinc-500 mt-1">Test your hardware capabilities and estimate rewards.</p>
+                    {import.meta.env.VITE_BENCHMARK_METADATA_ENABLED === 'true' && <p className="text-zinc-500 mt-2 text-xs max-w-lg">Submitted results publicly include OS, architecture, RAM, logical CPU threads and client / miner versions.</p>}
                 </div>
 
                 <div className="flex flex-col items-end gap-2">
+                    <button onClick={() => setShowJournal(true)} className="rounded-lg border border-zinc-500/30 px-3 py-2 text-sm text-emerald-500 hover:bg-emerald-500/10">
+                        Benchmark journal
+                    </button>
                     <div className={cn("p-1 rounded-lg border flex gap-1",
                         theme === 'light'
                             ? 'bg-white border-zinc-200'
                             : 'bg-zinc-900 border-white/5'
                     )}>
                         <button
-                            onClick={() => status !== 'running' && setDeviceType('cpu')}
+                            onClick={() => !isBenchmarkActive && !isStartPending && setDeviceType('cpu')}
                             className={cn(
                                 "px-4 py-2 rounded-md text-sm font-medium flex items-center gap-2 transition-all",
                                 deviceType === 'cpu'
@@ -676,6 +1007,17 @@ const Benchmark = () => {
                                             </div>
                                         </div>
                                     </div>
+
+                                    {benchmarkSafety.enabled && (
+                                        <div className={cn("rounded-md border px-3 py-2 text-xs",
+                                            theme === 'light'
+                                                ? "border-amber-200 bg-amber-50 text-amber-800"
+                                                : "border-amber-500/20 bg-amber-500/10 text-amber-300"
+                                        )}>
+                                            <div className="font-semibold">Safe mode enabled</div>
+                                            <div className="mt-1 opacity-80">{benchmarkSafety.reasons.join(' · ')}</div>
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                         )}
@@ -697,23 +1039,28 @@ const Benchmark = () => {
                             </select>
                         </div>
 
+                        <div className="mb-4 space-y-3">
+                            <MsrStatus status={minerMsrStatus} theme={theme} />
+                            {warmupProgress?.phase === 'ready' && <p className="text-xs text-emerald-500">Selected: {warmupProgress.preset.label} · {warmupProgress.preset.threads} threads · RandomX {warmupProgress.preset.randomxMode}</p>}
+                        </div>
+
                         <div className={cn("mb-8 flex flex-col items-center justify-center py-6 border-b border-dashed",
                             theme === 'light' ? 'border-zinc-200' : 'border-white/5'
                         )}>
                             <div className={cn("text-5xl font-mono font-light tracking-tighter",
                                 theme === 'light' ? 'text-zinc-900' : 'text-white'
                             )}>
-                                {isBenchmarkActive && timeLeft !== null ? timeLeft : duration}
+                                {isWarmingUp ? warmupElapsed : isBenchmarkActive && timeLeft !== null ? timeLeft : duration}
                                 <span className={cn("text-lg ml-1", theme === 'light' ? 'text-zinc-500' : 'text-zinc-600')}> s</span>
                             </div>
                             <span className="text-xs text-zinc-500 mt-2 uppercase tracking-widest">
-                                {isBenchmarkActive ? 'Time Remaining' : 'Duration'}
+                                {isWarmingUp ? 'Warm-up elapsed' : (isBenchmarkActive ? 'Time Remaining' : 'Duration')}
                             </span>
                         </div>
 
                         <button
                             onClick={isBenchmarkActive ? stopBenchmark : startBenchmark}
-                            disabled={isStartPending || status === 'stopping' || (backendPoolEndpoints.length === 0 && !isNodeFullySynced && !isBenchmarkActive)}
+                            disabled={(!sysInfo && !isBenchmarkActive) || (isStartPending && !isBenchmarkActive) || status === 'stopping' || (backendPoolEndpoints.length === 0 && !isNodeFullySynced && !isBenchmarkActive)}
                             className={cn(
                                 "w-full py-4 rounded-lg font-bold text-sm tracking-wide transition-all transform active:scale-[0.98] cursor-pointer disabled:cursor-not-allowed",
                                 isBenchmarkActive
@@ -724,7 +1071,7 @@ const Benchmark = () => {
                             )}
                         >
                             <div className="flex items-center justify-center gap-2">
-                                {isStartPending ? (
+                                {isStartPending && !isBenchmarkActive ? (
                                     <><Timer size={18} /> STARTING...</>
                                 ) : isBenchmarkActive ? (
                                     <><Square size={18} fill="currentColor" /> STOP TEST</>
@@ -753,11 +1100,15 @@ const Benchmark = () => {
                             )}>
                                 <div className="flex items-center gap-2 mb-1">
                                     <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></div>
-                                    <span className="font-semibold">Benchmark Running</span>
+                                    <span className="font-semibold">{isWarmingUp ? 'System Warm-up' : 'Benchmark Running'}</span>
                                 </div>
                                 <p className="text-xs opacity-75">
-                                    {currentHashrate > 0
-                                        ? `Mining at ${formatHashrate(currentHashrate)} - Check chart for updates`
+                                    {isWarmingUp
+                                        ? warmupProgress?.phase === 'ready'
+                                            ? `Selected ${warmupProgress.preset.label}. Waiting for an accepted share on this profile.`
+                                            : `Testing ${warmupProgress?.preset.label || 'CPU settings'} before measurement.`
+                                        : currentHashrate > 0
+                                            ? `Benchmarking at ${formatHashrate(currentHashrate)} - Check chart for updates`
                                         : `Waiting for miner to start... (checking port ${deviceType === 'cpu' ? '4077' : '4067'})`
                                     }
                                 </p>
@@ -831,6 +1182,61 @@ const Benchmark = () => {
                     </h3>
 
                     <div className="flex-1 w-full min-h-[300px]">
+                        {isWarmingUp ? (
+                            <div
+                                className={cn(
+                                    "benchmark-warmup relative h-full min-h-[300px] overflow-hidden rounded-lg border",
+                                    theme === 'light'
+                                        ? 'border-zinc-200 bg-zinc-50 text-emerald-600'
+                                        : 'border-white/5 bg-zinc-950/60 text-emerald-400'
+                                )}
+                                role="status"
+                                aria-live="polite"
+                            >
+                                <svg className="absolute inset-0 h-full w-full opacity-30" viewBox="0 0 800 300" preserveAspectRatio="none" aria-hidden="true">
+                                    <defs>
+                                        <pattern id="warmupGrid" width="50" height="50" patternUnits="userSpaceOnUse">
+                                            <path d="M 50 0 L 0 0 0 50" fill="none" stroke="currentColor" strokeOpacity="0.16" strokeWidth="1" />
+                                        </pattern>
+                                    </defs>
+                                    <rect width="800" height="300" fill="url(#warmupGrid)" />
+                                    <path
+                                        className="benchmark-warmup-wave"
+                                        d="M0 180 C70 180 75 118 140 118 S210 218 280 218 350 82 420 82 490 196 560 196 630 132 700 132 750 162 800 162"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        strokeWidth="3"
+                                        vectorEffect="non-scaling-stroke"
+                                    />
+                                </svg>
+                                <div className="benchmark-warmup-scan absolute inset-y-0 w-1/3 bg-gradient-to-r from-transparent via-emerald-400/15 to-transparent" aria-hidden="true" />
+                                <div className="relative flex h-full min-h-[300px] flex-col items-center justify-center px-6 text-center">
+                                    <div className="mb-5 flex items-center gap-2" aria-hidden="true">
+                                        <span className="benchmark-warmup-dot h-2 w-2 rounded-full bg-current" />
+                                        <span className="benchmark-warmup-dot h-2 w-2 rounded-full bg-current [animation-delay:180ms]" />
+                                        <span className="benchmark-warmup-dot h-2 w-2 rounded-full bg-current [animation-delay:360ms]" />
+                                    </div>
+                                    <div className="font-mono text-xs font-semibold uppercase tracking-[0.24em]">System warm-up</div>
+                                    <div className="mt-2 max-w-sm text-xs text-zinc-500">
+                                        {warmupProgress?.phase === 'ready'
+                                            ? `Best measured: ${warmupProgress.preset.label}. Waiting for an accepted share.`
+                                            : `${warmupProgress?.preset.label || 'Starting miner'} · ${warmupProgress?.phase || 'initializing'}`}
+                                    </div>
+                                    {warmupProgress && <div className="mt-4 w-full max-w-sm space-y-2 text-xs">
+                                        <div>{Math.min(warmupProgress.index + 1, warmupProgress.total)} / {warmupProgress.total} profiles · {warmupElapsed}s elapsed</div>
+                                        <progress className="h-2 w-full accent-emerald-500" aria-label="Completed warm-up profiles" max={warmupProgress.total} value={warmupProgress.results.length} />
+                                        {warmupProgress.phase === 'sampling' && <div>Sampling: {warmupProgress.seconds}s / 24s</div>}
+                                        {warmupProgress.results.map(result => <div key={result.preset.id} className="flex justify-between gap-3">
+                                            <span>{result.preset.label} · {result.preset.threads} threads</span>
+                                            <span>{result.error ? 'Unavailable' : formatHashrate(result.hashrate)}</span>
+                                        </div>)}
+                                    </div>}
+                                    {currentHashrate > 0 && (
+                                        <div className="mt-5 font-mono text-lg tabular-nums">{formatHashrate(currentHashrate)}</div>
+                                    )}
+                                </div>
+                            </div>
+                        ) : (
                         <ResponsiveContainer width="100%" height="100%">
                             <AreaChart data={benchmarkHistory}>
                                 <defs>
@@ -854,10 +1260,13 @@ const Benchmark = () => {
                                     fillOpacity={1}
                                     fill="url(#colorHr)"
                                     strokeWidth={2}
-                                    animationDuration={500}
+                                    dot={{ r: 2.5, fill: '#10b981', stroke: '#09090b', strokeWidth: 1 }}
+                                    activeDot={{ r: 4, fill: '#10b981', stroke: '#d1fae5', strokeWidth: 1 }}
+                                    isAnimationActive={false}
                                 />
                             </AreaChart>
                         </ResponsiveContainer>
+                        )}
                     </div>
                 </div>
             </div>
@@ -872,7 +1281,7 @@ const Benchmark = () => {
                     <h3 className={cn("font-medium mb-4 flex items-center gap-2",
                         theme === 'light' ? 'text-emerald-600' : 'text-emerald-400'
                     )}>
-                        Included in 1.0 DB Report
+                        Benchmark results
                     </h3>
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-8">
                         <div>
@@ -898,7 +1307,7 @@ const Benchmark = () => {
                         <div>
                             <div className="text-xs text-emerald-500/60 uppercase tracking-widest">Reported Shares</div>
                             <div className="text-2xl font-mono text-white mt-1">
-                                {localStatsRef.current.length.toLocaleString()}
+                                {acceptedShares.toLocaleString()}
                             </div>
                         </div>
                     </div>
@@ -906,6 +1315,7 @@ const Benchmark = () => {
             )}
 
             {/* Authentication Warning Modal */}
+            <BenchmarkJournal key={user?.publicKey || 'anonymous'} wallet={user?.publicKey || ''} isOpen={showJournal} onClose={closeJournal} />
             {showAuthWarning && (
                 <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
                     <div className={cn("border rounded-xl p-8 max-w-md w-full",

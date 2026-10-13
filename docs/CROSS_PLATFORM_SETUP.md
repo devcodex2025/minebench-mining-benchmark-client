@@ -1,5 +1,7 @@
 # Cross-Platform Setup Guide
 
+> **Note:** this document predates the Tauri v2 migration. The current desktop client is **Tauri v2** (`src-tauri/`); use `npm run tauri:dev` and `npm run tauri:build`. Electron/`electron-builder` references below are outdated.
+
 ## Overview
 
 MineBench Client is now configured to support Windows, macOS (Intel & Apple Silicon), and Linux platforms. The application uses a cross-platform binary resolution system that automatically detects your operating system and architecture.
@@ -123,7 +125,7 @@ The application automatically selects the correct binary based on:
 
 ## Code Reference
 
-The binary resolution is handled by the `getMinerPath()` function in `electron/main.cjs`:
+The binary resolution is handled by the `resolve_miner_path()` function in `src-tauri/src/commands.rs`:
 
 ```javascript
 function getMinerPath(minerName) {
@@ -154,16 +156,13 @@ function getMinerPath(minerName) {
 To build for all three platforms from a single machine (requires all binaries to be present):
 
 ```bash
-# Install electron-builder
-npm install -D electron-builder
-
 # Build for current platform
-npm run build
+npm run tauri:build
 
-# Cross-platform build (requires setup)
-# On Windows: creates .exe
-# On macOS: creates .dmg
-# On Linux: creates AppImage
+# Cross-platform build (requires the target Rust toolchain)
+# On Windows: creates .exe/.msi
+# On macOS: creates .dmg/.app
+# On Linux: creates AppImage/deb
 ```
 
 ## Troubleshooting
@@ -198,6 +197,6 @@ For Wayland-specific troubleshooting, see [WAYLAND_SETUP.md](WAYLAND_SETUP.md).
 ## Additional Resources
 
 - **XMRig GitHub:** https://github.com/xmrig/xmrig
-- **Electron Builder Docs:** https://www.electron.build/
+- **Tauri Docs:** https://tauri.app/
 - **Monero Mining Guide:** https://www.getmonero.org/resources/user-guides/mining.html
 - **Wayland Support:** [WAYLAND_SETUP.md](WAYLAND_SETUP.md)

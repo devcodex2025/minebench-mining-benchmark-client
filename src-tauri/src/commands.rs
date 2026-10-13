@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sysinfo::{System, Components};
+use sysinfo::System;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
 #[cfg(target_os = "windows")]
@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
+use crate::cpu_telemetry;
 use crate::miner::{self, MinerState};
 
 #[cfg(target_os = "windows")]
@@ -27,18 +28,6 @@ fn default_thread_count() -> u16 {
     sys.refresh_cpu_usage();
     let total_cores = sys.cpus().len().max(1);
     ((total_cores as u16) / 2).max(1)
-}
-
-#[cfg(target_os = "windows")]
-fn hidden_powershell_output(script: &str) -> Option<std::process::Output> {
-    std::process::Command::new("powershell")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", script])
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .ok()
 }
 
 #[derive(Serialize)]
@@ -63,6 +52,34 @@ pub struct BackendRequest {
     token: Option<String>,
 }
 
+const DEFAULT_BACKEND_BASE_URL: &str = "https://backend.minebench.cloud";
+const DEFAULT_UI_BASE_URL: &str = "https://minebench.cloud";
+const DEFAULT_SOLANA_RPC_URL: &str = "https://api.mainnet-beta.solana.com";
+
+/// Resolve a base URL from a runtime env var, then a compile-time default, then a
+/// hardcoded fallback. Allows staging/local runs without a production rebuild.
+fn resolve_base_url(env_key: &str, compile_default: Option<&'static str>, fallback: &str) -> String {
+    if let Ok(value) = std::env::var(env_key) {
+        let trimmed = value.trim().trim_end_matches('/');
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    compile_default.unwrap_or(fallback).trim_end_matches('/').to_string()
+}
+
+fn backend_base_url() -> String {
+    resolve_base_url("MINEBENCH_BACKEND_URL", option_env!("MINEBENCH_BACKEND_URL"), DEFAULT_BACKEND_BASE_URL)
+}
+
+fn ui_base_url() -> String {
+    resolve_base_url("MINEBENCH_UI_URL", option_env!("MINEBENCH_UI_URL"), DEFAULT_UI_BASE_URL)
+}
+
+fn solana_rpc_url() -> String {
+    resolve_base_url("MINEBENCH_SOLANA_RPC_URL", option_env!("MINEBENCH_SOLANA_RPC_URL"), DEFAULT_SOLANA_RPC_URL)
+}
+
 fn validate_backend_path(path: &str) -> Result<String, String> {
     if !path.starts_with('/') || path.contains("://") || path.contains("..") {
         return Err("Invalid backend path".to_string());
@@ -72,10 +89,15 @@ fn validate_backend_path(path: &str) -> Result<String, String> {
     let allowed = clean_path == "/public/config"
         || clean_path == "/api/pool/stats"
         || clean_path == "/api/rates/current"
+        || clean_path == "/api/auth/nonce"
         || clean_path == "/api/auth/login"
+        || clean_path == "/api/auth/refresh"
+        || clean_path == "/api/auth/session"
         || clean_path == "/api/rewards/balance"
         || clean_path == "/api/rewards/history"
         || clean_path == "/api/rewards/claim"
+        || clean_path == "/api/rewards/claim/quote"
+        || clean_path == "/api/rewards/payout/status"
         || clean_path == "/api/user/premium-status"
         || clean_path == "/api/miner/report"
         || clean_path == "/api/sync/device-update"
@@ -92,7 +114,7 @@ fn validate_backend_path(path: &str) -> Result<String, String> {
 pub async fn backend_request(request: BackendRequest) -> Result<serde_json::Value, String> {
     let path = validate_backend_path(&request.path)?;
     let method = request.method.unwrap_or_else(|| "GET".to_string()).to_uppercase();
-    let url = format!("https://backend.minebench.cloud{}", path);
+    let url = format!("{}{}", backend_base_url(), path);
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -102,6 +124,7 @@ pub async fn backend_request(request: BackendRequest) -> Result<serde_json::Valu
     let mut builder = match method.as_str() {
         "GET" => client.get(&url),
         "POST" => client.post(&url),
+        "PATCH" => client.patch(&url),
         _ => return Err("Backend method is not allowed".to_string()),
     };
 
@@ -226,6 +249,8 @@ pub fn get_cpu_info() -> CpuInfo {
 
 #[derive(Serialize)]
 pub struct SystemStats {
+    os_name: &'static str,
+    os_arch: &'static str,
     #[serde(rename = "cpuUsage")]
     cpu_usage: f32,
     #[serde(rename = "ramUsage")]
@@ -241,6 +266,8 @@ pub fn get_system_stats() -> SystemStats {
     sys.refresh_memory();
 
     SystemStats {
+        os_name: std::env::consts::OS,
+        os_arch: std::env::consts::ARCH,
         cpu_usage: sys.global_cpu_usage(),
         ram_usage: sys.used_memory(),
         ram_total: sys.total_memory(),
@@ -296,6 +323,13 @@ pub struct OAuthCallbackParams {
     state: Option<String>,
 }
 
+/// Query for the POST callback: only `state` is carried in the URL; the signed
+/// payload arrives in the request body to avoid exposing it in the query string.
+#[derive(Deserialize)]
+struct OAuthStateQuery {
+    state: Option<String>,
+}
+
 #[derive(Serialize, Clone)]
 pub struct OAuthResult {
     #[serde(rename = "publicKey")]
@@ -317,6 +351,8 @@ pub struct MinerStartRequest {
     threads: Option<u16>,
     #[serde(default)]
     pool_url: Option<String>,
+    #[serde(default)]
+    reward_asset: Option<String>,
     #[serde(default)]
     solana_wallet: Option<String>,
     #[serde(default)]
@@ -427,6 +463,36 @@ async fn oauth_callback(
       "#)
 }
 
+/// POST variant of the callback. The browser sends the signed payload as a
+/// `text/plain` body (a CORS "simple request", no preflight) and keeps only the
+/// CSRF `state` in the URL. Delegates to the GET handler for the shared logic.
+async fn oauth_callback_post(
+    Query(query): Query<OAuthStateQuery>,
+    State(state): State<Arc<AppState>>,
+    body: String,
+) -> Html<&'static str> {
+    match serde_json::from_str::<OAuthCallbackParams>(&body) {
+        Ok(mut params) => {
+            if params.state.is_none() {
+                params.state = query.state;
+            }
+            oauth_callback(Query(params), State(state)).await
+        }
+        Err(_) => Html(r#"
+          <!DOCTYPE html>
+          <html>
+          <head><meta charset="utf-8" /><title>MineBench - Invalid Callback</title></head>
+          <body style="background:#0a0a0a;color:#e5e7eb;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
+            <div style="max-width:500px;text-align:center;">
+              <h1 style="color:#f87171;">Invalid wallet callback</h1>
+              <p>Please return to MineBench and try connecting again.</p>
+            </div>
+          </body>
+          </html>
+        "#),
+    }
+}
+
 #[tauri::command]
 pub async fn solana_connect_wallet(app: AppHandle) -> Result<OAuthResult, String> {
     let (tx, rx) = oneshot::channel();
@@ -438,14 +504,14 @@ pub async fn solana_connect_wallet(app: AppHandle) -> Result<OAuthResult, String
 
     let app_state = state.clone();
     let router = Router::new()
-        .route("/callback", get(oauth_callback))
+        .route("/callback", get(oauth_callback).post(oauth_callback_post))
         .with_state(app_state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 0));
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| e.to_string())?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
 
-    let base_url = "https://minebench.cloud";
+    let base_url = ui_base_url();
     let callback_url = format!("http://localhost:{}/callback?state={}", port, callback_state);
     let auth_url = format!("{}/wallet-connect?callbackUrl={}", base_url, urlencoding::encode(&callback_url));
 
@@ -492,7 +558,7 @@ pub async fn solana_get_token_balance(owner: String, mint: String) -> Result<ser
     });
 
     let response = client
-        .post("https://api.mainnet-beta.solana.com")
+        .post(solana_rpc_url())
         .json(&body)
         .send()
         .await
@@ -563,7 +629,7 @@ pub async fn get_runtime_pool_config() -> Result<serde_json::Value, String> {
         .map_err(|e| e.to_string())?;
 
     let response = match client
-        .get("https://backend.minebench.cloud/public/config")
+        .get(format!("{}/public/config", backend_base_url()))
         .send()
         .await
     {
@@ -623,7 +689,7 @@ pub async fn get_latest_benchmark(device_type: String) -> Result<serde_json::Val
         .map_err(|e| e.to_string())?;
 
     let response = client
-        .get("https://minebench.cloud/api/benchmarks?limit=200")
+        .get(format!("{}/api/benchmarks?limit=200", ui_base_url()))
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -665,14 +731,15 @@ pub async fn get_latest_benchmark(device_type: String) -> Result<serde_json::Val
 }
 
 #[tauri::command]
-pub async fn submit_benchmark_result(record: serde_json::Value) -> Result<serde_json::Value, String> {
+pub async fn submit_benchmark_result(record: serde_json::Value, token: String) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| e.to_string())?;
 
     let res = client
-        .post("https://minebench.cloud/api/benchmarks")
+        .post(format!("{}/api/benchmarks", ui_base_url()))
+        .bearer_auth(token)
         .json(&record)
         .send()
         .await
@@ -788,223 +855,140 @@ fn validate_rpc_port(port: u16) -> Result<(), String> {
     }
 }
 
+/// Normalized CPU telemetry used by Stress Test mode.
+///
+/// Every optional metric is nullable so the UI can distinguish "unsupported"
+/// from a real `0`. Collection happens off the async runtime and individual
+/// provider failures never blank out the remaining metrics.
 #[tauri::command]
-pub fn get_cpu_temp() -> Result<serde_json::Value, String> {
-    let components = Components::new_with_refreshed_list();
+pub async fn get_cpu_telemetry() -> Result<cpu_telemetry::CpuTelemetry, String> {
+    let state = cpu_telemetry::collector();
+    tokio::task::spawn_blocking(move || {
+        let mut guard = state.lock().unwrap_or_else(|error| error.into_inner());
+        cpu_telemetry::collect(&mut guard)
+    })
+    .await
+    .map_err(|error| format!("CPU telemetry task failed: {error}"))
+}
 
-    // Look for CPU temperature component
-    for component in components.iter() {
-        let label = component.label().to_lowercase();
-        if label.contains("cpu") || label.contains("package") || label.contains("core") || label.contains("thermal") {
-            return Ok(serde_json::json!({
-                "success": true,
-                "temp": component.temperature()
-            }));
-        }
-    }
+/// Diagnostic dump explaining why a sensor is missing on this machine.
+#[tauri::command]
+pub async fn get_cpu_telemetry_debug() -> Result<cpu_telemetry::CpuTelemetryDebug, String> {
+    let state = cpu_telemetry::collector();
+    tokio::task::spawn_blocking(move || {
+        let mut guard = state.lock().unwrap_or_else(|error| error.into_inner());
+        cpu_telemetry::collect_debug(&mut guard)
+    })
+    .await
+    .map_err(|error| format!("CPU telemetry diagnostics failed: {error}"))
+}
 
-    if let Some(temp) = read_windows_acpi_temperature_celsius() {
-        return Ok(serde_json::json!({
+/// Legacy temperature probe, retained for Benchmark mode. Backed by the same
+/// provider cache as [`get_cpu_telemetry`], so it no longer spawns a PowerShell
+/// process on every call.
+#[tauri::command]
+pub async fn get_cpu_temp() -> Result<serde_json::Value, String> {
+    let telemetry = get_cpu_telemetry().await?;
+    Ok(match telemetry.temperature_c {
+        Some(temp) => serde_json::json!({
             "success": true,
             "temp": temp,
-            "source": "windows-acpi-thermal-zone"
-        }));
-    }
-
-    Ok(serde_json::json!({
-        "success": false,
-        "temp": null,
-        "message": "CPU temperature component not found"
-    }))
+            "source": telemetry.temperature_source,
+            "reliable": telemetry.temperature_reliable
+        }),
+        None => serde_json::json!({
+            "success": false,
+            "temp": null,
+            "source": telemetry.temperature_source,
+            "message": "CPU temperature unavailable on this device",
+            "provider": telemetry.provider
+        }),
+    })
 }
 
+/// Legacy power probe. Prefers a hardware sensor and otherwise reports a
+/// clearly flagged TDP estimate.
 #[tauri::command]
-pub fn get_cpu_power() -> Result<serde_json::Value, String> {
-    if let Some(power) = read_linux_rapl_power_watts() {
-        return Ok(serde_json::json!({
+pub async fn get_cpu_power() -> Result<serde_json::Value, String> {
+    let telemetry = get_cpu_telemetry().await?;
+    Ok(match telemetry.package_power_w {
+        Some(power) => serde_json::json!({
             "success": true,
             "power": power,
-            "source": "sensor:linux-rapl",
-            "estimated": false
-        }));
-    }
-
-    if let Some(power) = read_windows_hardware_monitor_power_watts() {
-        return Ok(serde_json::json!({
-            "success": true,
-            "power": power,
-            "source": "sensor:hardware-monitor-wmi",
-            "estimated": false
-        }));
-    }
-
-    if let Some(power) = estimate_cpu_power_watts() {
-        return Ok(serde_json::json!({
-            "success": true,
-            "power": power,
-            "source": "estimated:cpu-utilization-tdp",
-            "estimated": true
-        }));
-    }
-
-    Ok(serde_json::json!({
-        "success": false,
-        "power": null,
-        "message": "CPU power telemetry unavailable"
-    }))
+            "source": telemetry.power_source,
+            "estimated": telemetry.power_is_estimated
+        }),
+        None => serde_json::json!({
+            "success": false,
+            "power": null,
+            "message": "CPU power telemetry unavailable"
+        }),
+    })
 }
 
-fn read_windows_acpi_temperature_celsius() -> Option<f64> {
-    #[cfg(not(target_os = "windows"))]
-    return None;
-
-    #[cfg(target_os = "windows")]
-    {
-        let script = r#"
-try {
-  $zones = Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction Stop |
-    Where-Object { $_.CurrentTemperature -gt 0 }
-  foreach ($zone in $zones) {
-    $c = ($zone.CurrentTemperature / 10) - 273.15
-    if ($c -gt 0 -and $c -lt 125) {
-      [Console]::Out.Write([Math]::Round($c, 2))
-      exit 0
-    }
-  }
-} catch {}
-exit 1
-"#;
-
-        #[cfg(target_os = "windows")]
-        let output = hidden_powershell_output(script);
-        if output.is_none() {
-            return None;
-        }
-        let output = output.unwrap();
-        if !output.status.success() {
-            return None;
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        stdout.trim().parse::<f64>().ok().filter(|value| *value > 0.0 && *value < 125.0)
-    }
+/// Runs the CPU sensor broker diagnostic and reports every link in the chain.
+///
+/// This is what to ask for when temperature is unavailable on a user's machine:
+/// it distinguishes a missing binary, an unregistered task, a refused task, a
+/// stale snapshot and a failed register read, which otherwise all look like
+/// "N/A".
+#[tauri::command]
+pub async fn diagnose_cpu_sensor_broker() -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(|| {
+        let steps = crate::sensor_broker_client::diagnose();
+        let all_ok = steps.iter().all(|step| step.ok);
+        serde_json::json!({
+            "ok": all_ok,
+            "steps": steps,
+        })
+    })
+    .await
+    .map_err(|error| format!("CPU sensor diagnostic failed: {error}"))
 }
 
-fn estimate_cpu_power_watts() -> Option<f64> {
-    let mut sys = System::new_all();
-    sys.refresh_cpu_usage();
-    std::thread::sleep(std::time::Duration::from_millis(250));
-    sys.refresh_cpu_usage();
-
-    let cpus = sys.cpus();
-    if cpus.is_empty() {
-        return None;
-    }
-
-    let usage = sys.global_cpu_usage().clamp(0.0, 100.0) as f64 / 100.0;
-    let brand = cpus.first().map(|cpu| cpu.brand().to_lowercase()).unwrap_or_default();
-    let core_count = cpus.len();
-    let tdp = estimate_cpu_tdp_watts(&brand, core_count);
-    let idle = (tdp * 0.12).max(3.0);
-    let dynamic = (tdp - idle).max(1.0) * usage.powf(1.25);
-    Some((idle + dynamic).max(1.0))
+/// Reports whether the privileged sensor broker can supply CPU telemetry.
+///
+/// The broker reads CPU die temperature through the WHQL-signed PawnIO kernel
+/// driver, which is only reachable from an elevated process. MineBench never
+/// elevates itself: the installer registers a highest-privileges scheduled task
+/// that starts the broker on demand, so the user is not asked for approval.
+#[tauri::command]
+pub fn get_cpu_sensor_broker_status() -> serde_json::Value {
+    serde_json::json!({
+        "supported": cfg!(target_os = "windows"),
+        "taskRegistered": crate::sensor_broker_client::task_registered(),
+        "detail": crate::sensor_broker_client::diagnostic_detail(),
+        "taskName": crate::sensor_broker_client::task_name(),
+    })
 }
 
-fn estimate_cpu_tdp_watts(brand: &str, core_count: usize) -> f64 {
-    let is_mobile = brand.contains("mobile")
-        || brand.contains("laptop")
-        || brand.contains("notebook")
-        || brand.contains("u-")
-        || brand.contains(" u ")
-        || brand.ends_with('u')
-        || brand.contains("p-")
-        || brand.ends_with('p');
-
-    if is_mobile {
-        return if core_count >= 16 { 45.0 } else if core_count >= 8 { 28.0 } else { 15.0 };
+/// Requests a broker reading now, for the diagnostics panel.
+///
+/// Returns the normalized snapshot, or `null` when the task is absent, blocked
+/// by policy, or produced nothing. Absence is a normal state, not an error.
+#[tauri::command]
+pub async fn read_cpu_sensor_broker() -> Result<serde_json::Value, String> {
+    if !cfg!(target_os = "windows") {
+        return Ok(serde_json::json!({ "supported": false, "snapshot": null }));
     }
-
-    if brand.contains("threadripper") || brand.contains("xeon") || brand.contains("epyc") {
-        return 180.0;
-    }
-
-    if brand.contains("ryzen 9") || brand.contains("core(tm) i9") || brand.contains("core i9") {
-        return 125.0;
-    }
-
-    if brand.contains("ryzen 7") || brand.contains("core(tm) i7") || brand.contains("core i7") {
-        return 105.0;
-    }
-
-    if core_count >= 16 {
-        125.0
-    } else if core_count >= 8 {
-        65.0
-    } else {
-        45.0
-    }
-}
-
-fn read_linux_rapl_power_watts() -> Option<f64> {
-    #[cfg(not(target_os = "linux"))]
-    return None;
-
-    #[cfg(target_os = "linux")]
-    {
-        use std::{fs, thread, time::Duration};
-
-        for entry in fs::read_dir("/sys/class/powercap").ok()?.flatten() {
-            let path = entry.path();
-            let energy_path = path.join("energy_uj");
-            let first = fs::read_to_string(&energy_path).ok()?.trim().parse::<f64>().ok()?;
-            thread::sleep(Duration::from_millis(250));
-            let second = fs::read_to_string(&energy_path).ok()?.trim().parse::<f64>().ok()?;
-            if second <= first {
-                continue;
-            }
-
-            return Some(((second - first) / 1_000_000.0) / 0.25);
-        }
-
-        None
-    }
-}
-
-fn read_windows_hardware_monitor_power_watts() -> Option<f64> {
-    #[cfg(not(target_os = "windows"))]
-    return None;
-
-    #[cfg(target_os = "windows")]
-    {
-        let script = r#"
-$namespaces = @('root\LibreHardwareMonitor','root\OpenHardwareMonitor')
-foreach ($ns in $namespaces) {
-  try {
-    $sensor = Get-CimInstance -Namespace $ns -ClassName Sensor -ErrorAction Stop |
-      Where-Object { $_.SensorType -eq 'Power' -and ($_.Name -match 'CPU|Package|Processor') } |
-      Select-Object -First 1
-    if ($sensor -and $sensor.Value -gt 0) {
-      [Console]::Out.Write($sensor.Value)
-      exit 0
-    }
-  } catch {}
-}
-exit 1
-"#;
-
-        #[cfg(target_os = "windows")]
-        let output = hidden_powershell_output(script);
-        if output.is_none() {
-            return None;
-        }
-        let output = output.unwrap();
-        if !output.status.success() {
-            return None;
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        stdout.trim().parse::<f64>().ok().filter(|value| *value > 0.0)
-    }
+    tokio::task::spawn_blocking(|| {
+        let snapshot = crate::sensor_broker_client::request_reading();
+        serde_json::json!({
+            "supported": true,
+            "snapshot": snapshot.map(|snapshot| serde_json::json!({
+                "schema": snapshot.schema,
+                "module": snapshot.module,
+                "vendor": snapshot.vendor,
+                "temperature_c": snapshot.temperature_c,
+                "temperature_source": snapshot.temperature_source,
+                "package_power_w": snapshot.package_power_w,
+                "raw_smn": snapshot.raw_smn,
+                "provider_detail": snapshot.provider_detail,
+            })),
+        })
+    })
+    .await
+    .map_err(|error| format!("CPU sensor broker task failed: {error}"))
 }
 
 #[tauri::command]
@@ -1163,6 +1147,7 @@ fn validate_external_url(url: &str) -> Result<String, String> {
             | "minebench.app"
             | "backend.minebench.cloud"
             | "github.com"
+            | "bitbucket.org"
             | "phantom.app"
             | "discord.gg"
             | "x.com"
@@ -1405,22 +1390,34 @@ fn is_newer_version(latest: &str, current: &str) -> bool {
     }
 }
 
-fn build_xmrig_args(request: &MinerStartRequest, _benchmark: bool) -> Result<(String, Vec<String>), String> {
+fn build_xmrig_args(
+    request: &MinerStartRequest,
+    benchmark: bool,
+) -> Result<(String, Vec<String>), String> {
     if request.device_type.to_lowercase() == "gpu" {
         return Err("GPU mining is not implemented in the Tauri backend yet".to_string());
     }
 
-    let wallet = validate_miner_value(&request.wallet, "wallet", 160)?;
+    let reward_asset = request.reward_asset.as_deref().unwrap_or("BMT");
+    if reward_asset != "BMT" && reward_asset != "XMR" {
+        return Err("rewardAsset must be BMT or XMR".to_string());
+    }
+    let wallet = if reward_asset == "XMR" {
+        validate_miner_value(&request.wallet, "Monero wallet", 160)?
+    } else {
+        request.wallet.trim().to_string()
+    };
 
     let pool_url = request
         .pool_url
         .clone()
         .unwrap_or_else(|| "xmr.minebench.cloud:3333".to_string());
     let pool_url = validate_pool_url(&pool_url)?;
-    let normalized_pool = if pool_url.contains("://") {
-        pool_url
+    let selected_pool = pool_url;
+    let normalized_pool = if selected_pool.contains("://") {
+        selected_pool
     } else {
-        format!("stratum+tcp://{}", pool_url)
+        format!("stratum+tcp://{}", selected_pool)
     };
     let worker = validate_miner_value(&request.worker.replace(char::is_whitespace, "-"), "worker", 80)?;
     let solana_wallet = request
@@ -1428,24 +1425,37 @@ fn build_xmrig_args(request: &MinerStartRequest, _benchmark: bool) -> Result<(St
         .clone()
         .filter(|v| !v.trim().is_empty())
         .map(|value| validate_miner_value(&value, "solana wallet", 160))
-        .transpose()?
-        .unwrap_or_else(|| worker.clone());
-    // P2Pool's log-shipper expects the user field in SHARE FOUND lines to be
-    // prefixed with "mb_" so it can identify MineBench miners and extract the
-    // Solana wallet address. Without the prefix the log-shipper regex drops the
-    // share event and no contribution is ever recorded in the backend.
-    let rig_id = if solana_wallet == worker {
-        format!("mb_{}", solana_wallet)
+        .transpose()?;
+    let login = if reward_asset == "XMR" {
+        wallet.clone()
     } else {
-        validate_miner_value(&format!("mb_{}.{}", solana_wallet, worker), "rig id", 220)?
+        solana_wallet.ok_or_else(|| "Solana wallet is required for BMT rewards".to_string())?
     };
+    let rig_id = validate_miner_value(&worker, "rig id", 80)?;
     let api_port = "4077";
-    let donate_level = request.donate_level.unwrap_or(0).min(5).to_string();
-    let cpu_priority = request.cpu_priority.unwrap_or(2).min(5).to_string();
-    let randomx_mode = request
-        .randomx_mode
-        .clone()
-        .unwrap_or_else(|| "auto".to_string());
+    let donate_level = if benchmark {
+        0
+    } else {
+        request.donate_level.unwrap_or(0).min(5)
+    }
+    .to_string();
+    let cpu_priority = if benchmark {
+        request.cpu_priority.unwrap_or(3).min(3)
+    } else {
+        request.cpu_priority.unwrap_or(2).min(5)
+    }
+    .to_string();
+    let randomx_mode = if benchmark {
+        request
+            .randomx_mode
+            .clone()
+            .unwrap_or_else(|| "fast".to_string())
+    } else {
+        request
+            .randomx_mode
+            .clone()
+            .unwrap_or_else(|| "auto".to_string())
+    };
     let randomx_mode = match randomx_mode.as_str() {
         "auto" | "fast" | "light" => randomx_mode,
         _ => return Err("Invalid RandomX mode".to_string()),
@@ -1457,11 +1467,17 @@ fn build_xmrig_args(request: &MinerStartRequest, _benchmark: bool) -> Result<(St
         "-o".to_string(),
         normalized_pool,
         "-u".to_string(),
-        wallet,
+        login,
         "-p".to_string(),
         "x".to_string(),
-        "--rig-id".to_string(),
-        rig_id,
+    ];
+
+    // The proxy groups financial attribution by the downstream username. Rig ID
+    // is only a device label and must never select the payout destination.
+    args.push("--rig-id".to_string());
+    args.push(rig_id.clone());
+
+    args.extend([
         "--keepalive".to_string(),
         "--http-enabled".to_string(),
         "--http-host".to_string(),
@@ -1474,7 +1490,7 @@ fn build_xmrig_args(request: &MinerStartRequest, _benchmark: bool) -> Result<(St
         cpu_priority,
         "--randomx-mode".to_string(),
         randomx_mode,
-    ];
+    ]);
 
     append_huge_page_args(
         &mut args,
@@ -1482,14 +1498,25 @@ fn build_xmrig_args(request: &MinerStartRequest, _benchmark: bool) -> Result<(St
         std::env::consts::OS,
     );
 
-    let threads = request
-        .threads
-        .filter(|&threads| threads > 0)
-        .map(|threads| threads.min(get_cpu_cores() as u16))
-        .unwrap_or_else(default_thread_count);
+    let cpu_cores = get_cpu_cores().max(1) as u16;
+    let threads = if benchmark {
+        request
+            .threads
+            .filter(|&threads| threads > 0)
+            .map(|threads| threads.min(cpu_cores))
+            .unwrap_or(cpu_cores)
+    } else {
+        request
+            .threads
+            .filter(|&threads| threads > 0)
+            .map(|threads| threads.min(cpu_cores))
+            .unwrap_or_else(default_thread_count)
+    };
 
     args.push("-t".to_string());
     args.push(threads.to_string());
+    args.push("--randomx-init".to_string());
+    args.push(if benchmark { threads } else { threads.min(2) }.to_string());
 
     Ok(("xmrig".to_string(), args))
 }
@@ -1512,12 +1539,19 @@ fn get_arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
 
 fn emit_miner_launch_logs(app: &AppHandle, args: &[String]) {
     let pool = get_arg_value(args, "-o").unwrap_or("unknown");
-    let payout_wallet = get_arg_value(args, "-u").unwrap_or("unknown");
-    let rig_id = get_arg_value(args, "--rig-id").unwrap_or("unknown");
+    let login = get_arg_value(args, "-u").unwrap_or("unknown");
+    let rig_id = get_arg_value(args, "--rig-id");
 
     let _ = app.emit("miner-log", format!("[MineBench] Pool: {}", pool));
-    let _ = app.emit("miner-log", format!("[MineBench] XMR payout wallet (-u): {}", payout_wallet));
-    let _ = app.emit("miner-log", format!("[MineBench] Reward tracking rig (--rig-id): {}", rig_id));
+    match rig_id {
+        Some(rig_id) => {
+            let _ = app.emit("miner-log", format!("[MineBench] XMR payout wallet (-u): {}", login));
+            let _ = app.emit("miner-log", format!("[MineBench] Reward tracking rig (--rig-id): {}", rig_id));
+        }
+        None => {
+            let _ = app.emit("miner-log", format!("[MineBench] Direct p2pool login (-u): {}", login));
+        }
+    }
 }
 
 fn validate_miner_value(value: &str, label: &str, max_len: usize) -> Result<String, String> {
@@ -1608,7 +1642,143 @@ pub async fn resume_mining() -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{append_huge_page_args, is_newer_version, parse_xmrig_version};
+    use super::{
+        append_huge_page_args, build_xmrig_args, get_arg_value, get_cpu_cores, is_newer_version,
+        parse_xmrig_version, MinerStartRequest,
+    };
+
+    fn reward_tracked_request() -> MinerStartRequest {
+        MinerStartRequest {
+            device_type: "cpu".to_string(),
+            wallet: "43DnRu6fbhK843vmGkWC7j843vmGkWC7j843vmGkWC7j843vmGkWC7j843vmGkWC7j843vmGkWC7j843vmGkWC7j5mANPDa".to_string(),
+            worker: "worker-1".to_string(),
+            threads: Some(1),
+            pool_url: Some("xmr.minebench.cloud:3333".to_string()),
+            reward_asset: Some("BMT".to_string()),
+            solana_wallet: Some("9xQeWvG816bUx9EPjHmaT23yvVM2ZW7Y1rGQ9oTzF1Ab".to_string()),
+            cpu_priority: None,
+            randomx_mode: None,
+            huge_pages: None,
+            donate_level: None,
+        }
+    }
+
+    #[test]
+    fn benchmark_and_mining_use_the_same_verified_share_identity() {
+        let (_, mining_args) = build_xmrig_args(&reward_tracked_request(), false).unwrap();
+        let (_, benchmark_args) = build_xmrig_args(&reward_tracked_request(), true).unwrap();
+        let expected = "worker-1";
+
+        assert_eq!(get_arg_value(&mining_args, "--rig-id"), Some(expected));
+        assert_eq!(get_arg_value(&benchmark_args, "--rig-id"), Some(expected));
+    }
+
+    #[test]
+    fn bmt_mode_uses_solana_login_on_the_shared_proxy_port() {
+        let (_, args) = build_xmrig_args(&reward_tracked_request(), false).unwrap();
+
+        assert_eq!(get_arg_value(&args, "-u"), Some("9xQeWvG816bUx9EPjHmaT23yvVM2ZW7Y1rGQ9oTzF1Ab"));
+        assert_eq!(
+            get_arg_value(&args, "--rig-id"),
+            Some("worker-1")
+        );
+        assert_eq!(get_arg_value(&args, "-o"), Some("stratum+tcp://xmr.minebench.cloud:3333"));
+    }
+
+    #[test]
+    fn xmr_mode_uses_monero_login_on_the_shared_proxy_port() {
+        let mut request = reward_tracked_request();
+        request.reward_asset = Some("XMR".to_string());
+
+        let (_, mining_args) = build_xmrig_args(&request, false).unwrap();
+        let (_, benchmark_args) = build_xmrig_args(&request, true).unwrap();
+
+        assert_eq!(
+            get_arg_value(&mining_args, "-u"),
+            Some("43DnRu6fbhK843vmGkWC7j843vmGkWC7j843vmGkWC7j843vmGkWC7j843vmGkWC7j843vmGkWC7j843vmGkWC7j5mANPDa")
+        );
+        assert_eq!(get_arg_value(&mining_args, "--rig-id"), Some("worker-1"));
+        assert_eq!(get_arg_value(&mining_args, "-o"), Some("stratum+tcp://xmr.minebench.cloud:3333"));
+
+        // Benchmark and mining must publish the same reward identity in direct mode.
+        assert_eq!(get_arg_value(&benchmark_args, "-u"), get_arg_value(&mining_args, "-u"));
+        assert_eq!(get_arg_value(&benchmark_args, "--rig-id"), Some("worker-1"));
+    }
+
+    #[test]
+    fn bmt_mode_requires_a_solana_wallet() {
+        let mut request = reward_tracked_request();
+        request.solana_wallet = None;
+        assert!(build_xmrig_args(&request, false).is_err());
+    }
+
+    #[test]
+    fn invalid_reward_asset_is_rejected() {
+        let mut request = reward_tracked_request();
+        request.reward_asset = Some("DOGE".to_string());
+        assert!(build_xmrig_args(&request, false).is_err());
+    }
+
+    #[test]
+    fn an_empty_monero_wallet_is_rejected_in_xmr_mode_only() {
+        // BMT rewards are attributed through the Solana wallet in the login
+        // field, so the Monero wallet is unused there. XMR mode pays the Monero
+        // wallet and must never start with a blank one.
+        let mut request = reward_tracked_request();
+        request.wallet = "   ".to_string();
+        assert!(build_xmrig_args(&request, false).is_ok());
+
+        request.reward_asset = Some("XMR".to_string());
+        assert!(build_xmrig_args(&request, false).is_err());
+    }
+
+    #[test]
+    fn benchmark_uses_all_cpu_threads_with_yield_enabled() {
+        let mut request = reward_tracked_request();
+        request.threads = None;
+        let (_, args) = build_xmrig_args(&request, true).unwrap();
+        let cores = get_cpu_cores().max(1).to_string();
+
+        assert_eq!(get_arg_value(&args, "-t"), Some(cores.as_str()));
+        assert_eq!(get_arg_value(&args, "--randomx-init"), Some(cores.as_str()));
+        assert_eq!(get_arg_value(&args, "--cpu-priority"), Some("3"));
+        assert_eq!(get_arg_value(&args, "--randomx-mode"), Some("fast"));
+        assert!(!args.iter().any(|arg| arg == "--cpu-no-yield"));
+        assert!(!args.iter().any(|arg| arg == "--no-huge-pages"));
+    }
+
+    #[test]
+    fn benchmark_honors_safe_mode_request() {
+        let mut request = reward_tracked_request();
+        request.threads = Some(2);
+        request.cpu_priority = Some(2);
+        request.randomx_mode = Some("light".to_string());
+        request.huge_pages = Some(false);
+
+        let (_, args) = build_xmrig_args(&request, true).unwrap();
+        let safe_threads = get_cpu_cores().max(1).min(2).to_string();
+
+        assert_eq!(get_arg_value(&args, "-t"), Some(safe_threads.as_str()));
+        assert_eq!(get_arg_value(&args, "--randomx-init"), Some(safe_threads.as_str()));
+        assert_eq!(get_arg_value(&args, "--cpu-priority"), Some("2"));
+        assert_eq!(get_arg_value(&args, "--randomx-mode"), Some("light"));
+        assert!(args.iter().any(|arg| arg == "--no-huge-pages"));
+        assert!(!args.iter().any(|arg| arg == "--cpu-no-yield"));
+    }
+
+    #[test]
+    fn mining_limits_randomx_initialization_spike() {
+        let mut request = reward_tracked_request();
+        request.threads = Some(8);
+        let (_, args) = build_xmrig_args(&request, false).unwrap();
+        let expected = get_cpu_cores().max(1).min(8).min(2).to_string();
+
+        assert_eq!(
+            get_arg_value(&args, "--randomx-init"),
+            Some(expected.as_str())
+        );
+        assert!(!args.iter().any(|arg| arg == "--cpu-no-yield"));
+    }
 
     #[test]
     fn windows_uses_default_large_pages_without_linux_only_flag() {

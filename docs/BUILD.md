@@ -1,5 +1,7 @@
 # MineBench Client - Build Instructions
 
+> **Note:** this document predates the Tauri v2 migration. The current desktop client is **Tauri v2** (`src-tauri/`); use `npm run tauri:dev` and `npm run tauri:build`. Electron/`electron-builder` references below are outdated.
+
 ## Prerequisites
 - Node.js 20+
 - npm or yarn

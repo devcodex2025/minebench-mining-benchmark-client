@@ -15,6 +15,66 @@ body {
   min-width: 920px;
 }
 
+@keyframes wallet-airdrop-coin {
+  0% { opacity: 0; transform: translate3d(var(--airdrop-x), -28px, 0) scale(0.65) rotate(-12deg); }
+  18% { opacity: 1; }
+  72% { opacity: 1; transform: translate3d(var(--airdrop-x), 24px, 0) scale(1) rotate(8deg); }
+  100% { opacity: 0; transform: translate3d(var(--airdrop-x), 42px, 0) scale(0.85) rotate(14deg); }
+}
+
+@keyframes wallet-airdrop-amount {
+  0% { opacity: 0; transform: translateY(8px) scale(0.92); }
+  22%, 72% { opacity: 1; transform: translateY(0) scale(1); }
+  100% { opacity: 0; transform: translateY(-8px) scale(0.98); }
+}
+
+@keyframes benchmark-warmup-scan {
+  from { transform: translate3d(-120%, 0, 0); }
+  to { transform: translate3d(420%, 0, 0); }
+}
+
+@keyframes benchmark-warmup-wave {
+  to { stroke-dashoffset: -48; }
+}
+
+@keyframes benchmark-warmup-dot {
+  0%, 100% { opacity: 0.25; transform: translateY(0); }
+  50% { opacity: 1; transform: translateY(-4px); }
+}
+
+.benchmark-warmup-scan {
+  animation: benchmark-warmup-scan 2.4s linear infinite;
+  will-change: transform;
+}
+
+.benchmark-warmup-wave {
+  stroke-dasharray: 12 12;
+  animation: benchmark-warmup-wave 1.2s linear infinite;
+}
+
+.benchmark-warmup-dot {
+  animation: benchmark-warmup-dot 1.1s ease-in-out infinite;
+}
+
+.wallet-airdrop-coin {
+  animation: wallet-airdrop-coin 1.35s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation-delay: var(--airdrop-delay);
+}
+
+.wallet-airdrop-amount {
+  animation: wallet-airdrop-amount 2.8s ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wallet-airdrop-coin,
+  .wallet-airdrop-amount,
+  .benchmark-warmup-scan,
+  .benchmark-warmup-wave,
+  .benchmark-warmup-dot {
+    animation: none;
+  }
+}
+
 /* Custom Scrollbar for main content (neutral dark) */
 .custom-scrollbar::-webkit-scrollbar {
   width: 6px;

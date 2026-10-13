@@ -14,5 +14,10 @@
         "devtools": false
       }
     ]
+  },
+  "bundle": {
+    "resources": [
+      "../Miner/**/*"
+    ]
   }
 }

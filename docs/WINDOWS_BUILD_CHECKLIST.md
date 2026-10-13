@@ -1,5 +1,7 @@
 # ✅ Підготування Windows Версії - Чек-лист
 
+> **Note:** this document predates the Tauri v2 migration. Use `npm run tauri:build`. `electron-builder` cache paths below do not apply.
+
 ## Перед Будуванням
 
 - [ ] Закрийте всі браузери та важкі додатки

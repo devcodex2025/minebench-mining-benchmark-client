@@ -2,10 +2,12 @@ import { create } from 'zustand';
 import { getEnvironmentConfig } from '../config/environment';
 import { nativeApi } from '../lib/native-api';
 import { backendJson } from '../lib/backend-api';
-import { normalizeBackendPoolEndpoints, type PoolEndpoint } from './poolEndpoints';
+import { autoSelectableEndpoints, normalizeBackendPoolEndpoints, resolveAccessiblePoolUrl, selectFastestAutoEndpoint, type DirectEndpointAccess, type PoolEndpoint } from './poolEndpoints';
+import type { MinerMsrStatus } from '../lib/miner-msr';
 
 export type AppMode = 'benchmark' | 'mining';
 export type DeviceType = 'cpu' | 'gpu';
+export type RewardAsset = 'BMT' | 'XMR';
 
 interface StatsPoint {
     time: string;
@@ -19,6 +21,7 @@ interface MiningState {
     mode: AppMode;
     deviceType: DeviceType;
     wallet: string;
+    rewardAsset: RewardAsset;
     walletVerified: boolean; // Verified with Solana wallet
     solanaPublicKey?: string; // User's Solana public key for multi-device sync
     workerName: string;
@@ -37,12 +40,14 @@ interface MiningState {
     currentTemp: number | null;
     currentPower: number | null;
     lastRewardUpdatedAt: number | null;
+    minerMsrStatus: MinerMsrStatus;
 
     // Rewards ($BMT)
     p2poolBalance: number; // XMR balance in P2Pool
     dbTotalBMT: number;   // Confirmed total BMT rewards from backend
     isPremium: boolean;
     premiumXmrWallet: string | null;
+    directAccessLoaded: boolean;
 
     // xmrig Settings
     donateLevel: number;
@@ -93,6 +98,7 @@ interface MiningState {
     setMode: (mode: AppMode) => void;
     setDeviceType: (type: DeviceType) => void;
     setWallet: (wallet: string) => void;
+    setRewardAsset: (asset: RewardAsset) => void;
     setWorkerName: (workerName: string) => void;
     setWalletVerified: (verified: boolean, solanaKey?: string) => void;
     setStatus: (status: MiningState['status']) => void;
@@ -109,6 +115,8 @@ interface MiningState {
     setPremiumXmrWallet: (wallet: string | null) => void;
     setP2PoolBalance: (balance: number) => void;
     setManualPoolSelection: (manual: boolean) => void;
+    setMinerMsrStatus: (status: MinerMsrStatus) => void;
+    resetMinerMsrStatus: () => void;
     addLog: (msg: string) => void;
     updateStats: (hashrate: number, temp: number | null | undefined, power?: number) => void;
     updatePoolStatus: (id: string, status: Partial<MiningState['pools'][string]>) => void;
@@ -124,6 +132,7 @@ interface MiningState {
 // Types for settings persistence
 interface MinerSettings {
     wallet: string;
+    rewardAsset?: RewardAsset;
     workerName: string;
     threads: number;
     threadsManuallySet?: boolean;
@@ -138,6 +147,10 @@ interface MinerSettings {
 }
 
 const defaultThreadCount = (cores: number): number => Math.max(1, Math.floor(Math.max(1, cores) / 2));
+const directAccessOf = (state: Pick<MiningState, 'isPremium' | 'premiumXmrWallet'>): DirectEndpointAccess => ({
+    isPremium: state.isPremium,
+    hasMoneroWallet: !!state.premiumXmrWallet
+});
 const env = getEnvironmentConfig();
 const initialPools = {
     'cpu': { isSynced: false, height: 0, targetHeight: 0, progress: 0, connected: false, coin: 'XMR' },
@@ -147,12 +160,17 @@ const initialPools = {
 };
 
 async function selectFastestPoolEndpoint(endpoints: PoolEndpoint[]): Promise<PoolEndpoint | null> {
+    // Direct endpoints are opt-in only (explicit user action). Auto-selection
+    // must never switch a miner to the direct attribution model.
+    const candidates = autoSelectableEndpoints(endpoints);
+    if (candidates.length === 0) return null;
+
     if (!(window as any).__TAURI_INTERNALS__) {
-        return endpoints.find((endpoint) => endpoint.default) || endpoints[0] || null;
+        return selectFastestAutoEndpoint(candidates, new Map());
     }
 
     const latencyResults = await Promise.all(
-        endpoints.map(async (endpoint) => {
+        candidates.map(async (endpoint) => {
             try {
                 const result = await nativeApi.pool.pingEndpoint(endpoint.host, endpoint.port);
                 return {
@@ -166,17 +184,21 @@ async function selectFastestPoolEndpoint(endpoints: PoolEndpoint[]): Promise<Poo
         })
     );
 
-    const reachable = latencyResults
-        .filter((result): result is { endpoint: PoolEndpoint; latencyMs: number } => !!result && Number.isFinite(result.latencyMs))
-        .sort((a, b) => a.latencyMs - b.latencyMs);
+    const latencyByUrl = new Map<string, number>();
+    for (const result of latencyResults) {
+        if (result && Number.isFinite(result.latencyMs)) {
+            latencyByUrl.set(result.endpoint.url, result.latencyMs);
+        }
+    }
 
-    return reachable[0]?.endpoint || endpoints.find((endpoint) => endpoint.default) || endpoints[0] || null;
+    return selectFastestAutoEndpoint(candidates, latencyByUrl);
 }
 
 export const useMinerStore = create<MiningState>((set, get) => ({
     mode: 'benchmark',
     deviceType: 'cpu',
     wallet: '48ghPqjkJYEKAL1ukr9YmB6B8V1g9kjMrFkrP36ZnVLxHRyFs9odvapQtjFkWRyjsG1N3ipHqiByjHUNrDZTsxG2DRRHWjj',
+    rewardAsset: 'BMT',
     walletVerified: false,
     solanaPublicKey: undefined,
     workerName: 'Miner-v1',
@@ -193,11 +215,13 @@ export const useMinerStore = create<MiningState>((set, get) => ({
     currentTemp: null,
     currentPower: null,
     lastRewardUpdatedAt: null,
+    minerMsrStatus: 'unknown',
 
     dbTotalBMT: 0,
     p2poolBalance: 0,
     isPremium: false,
     premiumXmrWallet: null,
+    directAccessLoaded: false,
 
     donateLevel: 1,
     poolUrl: env.poolStratumUrl,
@@ -242,6 +266,7 @@ export const useMinerStore = create<MiningState>((set, get) => ({
     setMode: (mode) => set({ mode }),
     setDeviceType: (deviceType) => set({ deviceType }),
     setWallet: (wallet) => set({ wallet }),
+    setRewardAsset: (rewardAsset) => set({ rewardAsset }),
     setWorkerName: (workerName) => set({ workerName }),
     setWalletVerified: (verified, solanaKey) => set({ walletVerified: verified, solanaPublicKey: solanaKey }),
     setStatus: (status) => set((state) => ({
@@ -279,10 +304,21 @@ export const useMinerStore = create<MiningState>((set, get) => ({
     setRandomxMode: (randomxMode) => set({ randomxMode }),
     setHugePages: (hugePages) => set({ hugePages }),
     setDbTotalBMT: (dbTotalBMT) => set({ dbTotalBMT }),
-    setIsPremium: (isPremium) => set({ isPremium }),
-    setPremiumXmrWallet: (premiumXmrWallet) => set({ premiumXmrWallet }),
+    setIsPremium: (isPremium) => set((state) => ({
+        isPremium,
+        poolUrl: state.directAccessLoaded
+            ? resolveAccessiblePoolUrl(state.poolUrl, state.backendPoolEndpoints, { isPremium, hasMoneroWallet: !!state.premiumXmrWallet }, state.backendPrimaryPoolUrl)
+            : state.poolUrl
+    })),
+    setPremiumXmrWallet: (premiumXmrWallet) => set((state) => ({
+        premiumXmrWallet,
+        directAccessLoaded: true,
+        poolUrl: resolveAccessiblePoolUrl(state.poolUrl, state.backendPoolEndpoints, { isPremium: state.isPremium, hasMoneroWallet: !!premiumXmrWallet }, state.backendPrimaryPoolUrl)
+    })),
     setP2PoolBalance: (p2poolBalance) => set({ p2poolBalance }),
     setManualPoolSelection: (manualPoolSelection) => set({ manualPoolSelection }),
+    setMinerMsrStatus: (minerMsrStatus) => set({ minerMsrStatus }),
+    resetMinerMsrStatus: () => set({ minerMsrStatus: 'unknown' }),
     addLog: (msg) => set((state) => ({
         logs: [...state.logs.slice(-100), `${new Date().toLocaleTimeString()} - ${msg}`]
     })),
@@ -341,6 +377,7 @@ export const useMinerStore = create<MiningState>((set, get) => ({
         const state = get();
         const settings: MinerSettings = {
             wallet: state.wallet,
+            rewardAsset: state.rewardAsset,
             workerName: state.workerName,
             threads: state.threads,
             threadsManuallySet: state.threadsManuallySet,
@@ -412,6 +449,11 @@ export const useMinerStore = create<MiningState>((set, get) => ({
             ? backendPoolUrl
             : (settings.poolUrl || state.poolUrl);
         const nextPoolUrl = settingsManualPoolSelection ? savedPoolUrl : backendPoolUrl;
+        // An ineligible user must never dial a direct endpoint persisted by an
+        // earlier session; coerce the hydrated pool URL back to the proxy.
+        const gatedPoolUrl = state.directAccessLoaded
+            ? resolveAccessiblePoolUrl(nextPoolUrl, state.backendPoolEndpoints, directAccessOf(state), backendPoolUrl)
+            : nextPoolUrl;
 
         const requestedThreads = settings.threads ?? state.threads;
         const currentMaxThreads = state.cpuCores > 1 ? Math.max(1, state.cpuCores - 1) : requestedThreads;
@@ -427,11 +469,12 @@ export const useMinerStore = create<MiningState>((set, get) => ({
 
         set({
             wallet: settings.wallet || state.wallet,
+            rewardAsset: settings.rewardAsset === 'XMR' ? 'XMR' : 'BMT',
             workerName: settings.workerName || state.workerName,
             ...restoredThreads,
             threadsManuallySet: hasManualThreadSelection,
             donateLevel: settings.donateLevel ?? state.donateLevel,
-            poolUrl: nextPoolUrl,
+            poolUrl: gatedPoolUrl,
             cpuPriority: settings.cpuPriority ?? state.cpuPriority,
             randomxMode: settings.randomxMode || state.randomxMode,
             hugePages: settings.hugePages ?? state.hugePages,
@@ -464,6 +507,21 @@ export const useMinerStore = create<MiningState>((set, get) => ({
                 }
 
                 const currentStore = get();
+
+                // After the endpoint list resolves, re-coerce a persisted direct
+                // selection for ineligible users so the miner dials the proxy host.
+                const gatedPoolUrl = currentStore.directAccessLoaded
+                    ? resolveAccessiblePoolUrl(
+                        currentStore.poolUrl,
+                        currentStore.backendPoolEndpoints,
+                        directAccessOf(currentStore),
+                        currentStore.backendPrimaryPoolUrl
+                    )
+                    : currentStore.poolUrl;
+                if (gatedPoolUrl !== currentStore.poolUrl) {
+                    set({ poolUrl: gatedPoolUrl });
+                    console.log(`🔒 Coerced mining pool to proxy endpoint ${gatedPoolUrl}`);
+                }
 
                 if (!currentStore.manualPoolSelection) {
                     const selectedPool = await selectFastestPoolEndpoint(

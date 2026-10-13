@@ -1,12 +1,133 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Wallet, LogOut, Loader, AlertCircle, CheckCircle } from './icons';
 import { useSolanaAuth, SolanaAuthService } from '../services/solanaAuth';
 import { useTheme } from '../contexts/ThemeContext';
-import { useWalletAuthUrl } from '../hooks/useEnvironment';
 import { getEnvironmentConfig } from '../config/environment';
 import { cn } from '../lib/utils';
 import { useMinerStore } from '../store/useMinerStore';
 import { nativeApi } from '../lib/native-api';
+import { authStorage } from '../lib/auth-storage';
+import { notifyPayoutCompleted, notifyRewardsDistributed } from '../lib/reward-events';
+import { subscribeToRewardEvents } from '../lib/reward-event-stream';
+
+interface TokenAccount {
+  account?: {
+    data?: {
+      parsed?: {
+        info?: {
+          mint?: string;
+          tokenAmount?: { uiAmount?: number; uiAmountString?: string };
+        };
+      };
+    };
+  };
+}
+
+interface TokenAccountsResponse {
+  result?: { value?: TokenAccount[] };
+}
+
+interface NativeTokenBalanceResponse {
+  success?: boolean;
+  balance?: number | string;
+  error?: string;
+}
+
+const fetchWalletTokenBalance = async (owner: string, mint: string): Promise<number> => {
+  if ((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) {
+    try {
+      const result = await nativeApi.invoke<NativeTokenBalanceResponse>('solana_get_token_balance', { owner, mint });
+      if (result?.success) {
+        const balance = Number(result.balance || 0);
+        return Number.isFinite(balance) ? balance : 0;
+      }
+      if (result?.error) console.warn('[BMT] Native balance error:', result.error);
+    } catch (error) {
+      console.warn('[BMT] Native balance unavailable, trying direct RPC:', error);
+    }
+  }
+
+  const endpoints = [
+    'https://api.mainnet-beta.solana.com',
+    'https://rpc.ankr.com/solana'
+  ];
+  const tokenPrograms = [
+    'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
+    'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'
+  ];
+  const rpc = async (url: string, body: unknown): Promise<TokenAccountsResponse> => {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) throw new Error(`RPC ${response.status}`);
+    return response.json() as Promise<TokenAccountsResponse>;
+  };
+
+  for (const url of endpoints) {
+    try {
+      const body = { jsonrpc: '2.0', id: 1, method: 'getTokenAccountsByOwner', params: [owner, { mint }, { encoding: 'jsonParsed' }] };
+      const payload = await rpc(url, body);
+      const accounts = payload?.result?.value ?? [];
+      if (accounts.length > 0) {
+        return accounts.reduce((total: number, account: TokenAccount) => {
+          const tokenAmount = account?.account?.data?.parsed?.info?.tokenAmount;
+          return total + Number(tokenAmount?.uiAmountString ?? tokenAmount?.uiAmount ?? 0);
+        }, 0);
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  for (const url of endpoints) {
+    for (const programId of tokenPrograms) {
+      try {
+        const body = { jsonrpc: '2.0', id: 1, method: 'getTokenAccountsByOwner', params: [owner, { programId }, { encoding: 'jsonParsed' }] };
+        const payload = await rpc(url, body);
+        const accounts = payload?.result?.value ?? [];
+        const total = accounts.reduce((balance: number, account: TokenAccount) => {
+          const info = account?.account?.data?.parsed?.info;
+          if (info?.mint !== mint) return balance;
+          return balance + Number(info?.tokenAmount?.uiAmountString ?? info?.tokenAmount?.uiAmount ?? 0);
+        }, 0);
+        if (total > 0) return total;
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  return 0;
+};
+
+const WalletAirdrop: React.FC<{ amount: number; animationKey: number }> = ({ amount, animationKey }) => (
+  <div
+    key={animationKey}
+    className="pointer-events-none absolute inset-x-0 -top-10 z-20 flex justify-center"
+    role="status"
+    aria-live="polite"
+  >
+    <div className="relative h-20 w-36">
+      {[-38, 0, 38].map((x, index) => (
+        <span
+          key={x}
+          className="wallet-airdrop-coin absolute left-1/2 top-0 grid h-7 w-7 place-items-center rounded-full border border-yellow-200/80 bg-yellow-400 text-[8px] font-black text-yellow-950 shadow-[0_0_18px_rgba(250,204,21,0.55)]"
+          style={{
+            '--airdrop-x': `${x}px`,
+            '--airdrop-delay': `${index * 120}ms`
+          } as React.CSSProperties}
+        >
+          BMT
+        </span>
+      ))}
+      <span className="wallet-airdrop-amount absolute inset-x-0 bottom-0 text-center text-xs font-bold text-emerald-400 drop-shadow">
+        +{amount.toFixed(4)} BMT
+      </span>
+    </div>
+  </div>
+);
 
 export const SolanaAuthButton: React.FC = () => {
   const { theme } = useTheme();
@@ -17,6 +138,11 @@ export const SolanaAuthButton: React.FC = () => {
   const [balError, setBalError] = useState<string | null>(null);
   const [rewardBalance, setRewardBalance] = useState(0);
   const [walletTokenBalance, setWalletTokenBalance] = useState<number | null>(null);
+  const [airdrop, setAirdrop] = useState<{ amount: number; key: number } | null>(null);
+  const previousWalletBalanceRef = useRef<number | null>(null);
+  const balanceOwnerRef = useRef<string | null>(null);
+  const refreshInFlightRef = useRef(false);
+  const airdropTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const tokenMint = getEnvironmentConfig().bmtTokenMint;
   const authService = SolanaAuthService.getInstance();
   const dbTotalBMT = useMinerStore(state => state.dbTotalBMT);
@@ -31,115 +157,85 @@ export const SolanaAuthButton: React.FC = () => {
     }
   }, [dbTotalBMT, isConnected, user?.publicKey, walletTokenBalance]);
 
-  // Fetch SPL token balance for BMT mint on Solana mainnet
-  useEffect(() => {
-    const fetchBalance = async () => {
-      if (!user?.publicKey) return;
-      try {
-        setBalLoading(true);
-        setBalError(null);
+  const refreshWalletBalance = useCallback(async () => {
+    const owner = user?.publicKey;
+    if (!owner || refreshInFlightRef.current) return;
 
-        try {
-          const stats = await authService.fetchMiningStats(user.publicKey);
-          const nextRewardBalance = Number.isFinite(stats.totalRewards) ? stats.totalRewards : 0;
-          setRewardBalance(nextRewardBalance);
-          setBmtBalance(nextRewardBalance);
-        } catch (e: any) {
-          console.warn('[BMT] DB reward balance failed, falling back to token balance:', e?.message);
-        }
+    refreshInFlightRef.current = true;
+    setBalLoading(previousWalletBalanceRef.current === null);
+    setBalError(null);
 
-        const owner = user.publicKey;
-        let resolved = false;
+    try {
+      const nextWalletBalance = await fetchWalletTokenBalance(owner, tokenMint);
+      const previousWalletBalance = previousWalletBalanceRef.current;
+      previousWalletBalanceRef.current = nextWalletBalance;
+      setWalletTokenBalance(nextWalletBalance);
+      setBmtBalance(nextWalletBalance);
 
-        const isNative = (window as any).__TAURI_INTERNALS__;
-        if (isNative) {
-          try {
-            // Use native bridge proxy (no CORS, fewer 403s)
-            const res = await nativeApi.invoke<any>('solana_get_token_balance', { owner, mint: tokenMint });
-            if (res?.success) {
-              const val = typeof res.balance === 'number' ? res.balance : Number(res.balance || 0);
-              const nextTokenBalance = isFinite(val) ? val : 0;
-              setWalletTokenBalance(nextTokenBalance);
-              setBmtBalance(nextTokenBalance);
-              resolved = true;
-            } else if (res?.error) {
-              console.warn('[BMT] Native balance error:', res.error);
-            }
-          } catch (e: any) {
-            console.warn('[BMT] Native balance exception:', e?.message);
-          }
-        }
-
-        if (!resolved) {
-          // Fallback: direct RPC (may hit CORS/provider 403 in renderer)
-          const endpoints = [
-            'https://api.mainnet-beta.solana.com',
-            'https://rpc.ankr.com/solana'
-          ];
-          const TOKEN_PROGRAMS = [
-            'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
-            'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'
-          ];
-          const rpc = async (url: string, body: any) => {
-            const res = await fetch(url, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(body)
-            });
-            if (!res.ok) throw new Error(`RPC ${res.status}`);
-            return res.json();
-          };
-          let total = 0;
-          let found = false;
-          for (const url of endpoints) {
-            try {
-              const body = { jsonrpc: '2.0', id: 1, method: 'getTokenAccountsByOwner', params: [owner, { mint: tokenMint }, { encoding: 'jsonParsed' }] };
-              const json = await rpc(url, body);
-              const list = json?.result?.value ?? [];
-              if (list.length > 0) {
-                for (const acc of list) {
-                  const amt = acc?.account?.data?.parsed?.info?.tokenAmount;
-                  if (amt && typeof amt.uiAmount === 'number') total += amt.uiAmount;
-                  else if (amt?.uiAmountString) total += Number(amt.uiAmountString);
-                }
-                found = true;
-                break;
-              }
-            } catch {}
-          }
-          if (!found) {
-            for (const url of endpoints) {
-              for (const programId of TOKEN_PROGRAMS) {
-                try {
-                  const body = { jsonrpc: '2.0', id: 1, method: 'getTokenAccountsByOwner', params: [owner, { programId }, { encoding: 'jsonParsed' }] };
-                  const json = await rpc(url, body);
-                  const list = json?.result?.value ?? [];
-                  for (const acc of list) {
-                    const info = acc?.account?.data?.parsed?.info;
-                    if (info?.mint === tokenMint) {
-                      const amt = info?.tokenAmount;
-                      if (amt && typeof amt.uiAmount === 'number') total += amt.uiAmount;
-                      else if (amt?.uiAmountString) total += Number(amt.uiAmountString);
-                    }
-                  }
-                  if (total > 0) { found = true; break; }
-                } catch {}
-              }
-              if (found) break;
-            }
-          }
-          setWalletTokenBalance(total);
-          setBmtBalance(total);
-        }
-      } catch (e: any) {
-        setBalError(e?.message || 'Failed to load balance');
-        setBmtBalance(null);
-      } finally {
-        setBalLoading(false);
+      if (previousWalletBalance !== null && nextWalletBalance > previousWalletBalance + 0.000001) {
+        if (airdropTimeoutRef.current) clearTimeout(airdropTimeoutRef.current);
+        setAirdrop({ amount: nextWalletBalance - previousWalletBalance, key: Date.now() });
+        airdropTimeoutRef.current = setTimeout(() => setAirdrop(null), 3200);
       }
+    } catch (error) {
+      console.warn('[BMT] Failed to refresh wallet token balance:', error);
+      setBalError(error instanceof Error ? error.message : 'Failed to load balance');
+    } finally {
+      setBalLoading(false);
+      refreshInFlightRef.current = false;
+    }
+  }, [tokenMint, user?.publicKey]);
+
+  useEffect(() => {
+    if (!user?.publicKey) {
+      previousWalletBalanceRef.current = null;
+      balanceOwnerRef.current = null;
+      setWalletTokenBalance(null);
+      setBmtBalance(null);
+      return;
+    }
+
+    if (balanceOwnerRef.current !== user.publicKey) {
+      balanceOwnerRef.current = user.publicKey;
+      previousWalletBalanceRef.current = null;
+      setWalletTokenBalance(null);
+      setAirdrop(null);
+    }
+
+    void refreshWalletBalance();
+  }, [refreshWalletBalance, user?.publicKey]);
+
+  useEffect(() => {
+    const owner = user?.publicKey;
+    if (!isConnected || !owner) return;
+
+    let rewardRefreshTimer: number | null = null;
+    const stop = subscribeToRewardEvents((event) => {
+      if (event.type === 'rewards-distributed') {
+        if (rewardRefreshTimer !== null) window.clearTimeout(rewardRefreshTimer);
+        rewardRefreshTimer = window.setTimeout(() => {
+          rewardRefreshTimer = null;
+          void authService.fetchMiningStats(owner).finally(notifyRewardsDistributed);
+        }, 150);
+        return;
+      }
+
+      notifyPayoutCompleted();
+      void Promise.allSettled([
+        authService.fetchMiningStats(owner),
+        refreshWalletBalance()
+      ]);
+    });
+
+    return () => {
+      stop();
+      if (rewardRefreshTimer !== null) window.clearTimeout(rewardRefreshTimer);
     };
-    fetchBalance();
-  }, [user?.publicKey, tokenMint]);
+  }, [authService, isConnected, refreshWalletBalance, user?.publicKey]);
+
+  useEffect(() => () => {
+    if (airdropTimeoutRef.current) clearTimeout(airdropTimeoutRef.current);
+  }, []);
 
   const isDark = theme === 'dark';
   const btnGradient = isDark
@@ -160,9 +256,17 @@ export const SolanaAuthButton: React.FC = () => {
           useSolanaAuth.getState().disconnect();
           return;
         }
-        authService.fetchMiningStats(stored.publicKey).catch((err) => {
-          console.warn('[SolanaAuthButton] Failed to refresh restored wallet stats:', err);
-        });
+        const [statsResult, premiumResult] = await Promise.allSettled([
+          authService.fetchMiningStats(stored.publicKey),
+          authService.loadPremiumStatusOnStartup()
+        ]);
+        authService.scheduleTokenRefresh();
+        if (statsResult.status === 'rejected') {
+          console.warn('[SolanaAuthButton] Failed to refresh restored wallet stats:', statsResult.reason);
+        }
+        if (premiumResult.status === 'rejected') {
+          console.warn('[SolanaAuthButton] Failed to load startup premium status:', premiumResult.reason);
+        }
       }
     };
 
@@ -170,13 +274,41 @@ export const SolanaAuthButton: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Desktop restores the session via the backend; the browser build must react to
+  // the injected wallet switching accounts or disconnecting, otherwise mining
+  // reports and rewards would be attributed to the previous wallet.
+  useEffect(() => {
+    if ((window as any).__TAURI_INTERNALS__) return;
+    const provider =
+      (window as any).phantom?.solana ||
+      (window as any).solflare ||
+      (window as any).backpack ||
+      (window as any).glow ||
+      (window as any).solana;
+    if (!provider?.on) return;
+
+    const invalidateSession = () => {
+      authStorage.removeToken();
+      authService.stopTokenRefresh();
+      useSolanaAuth.getState().setSessionExpired(true);
+      useSolanaAuth.getState().disconnect();
+    };
+
+    provider.on('accountChanged', invalidateSession);
+    provider.on('disconnect', invalidateSession);
+    return () => {
+      provider.off?.('accountChanged', invalidateSession);
+      provider.off?.('disconnect', invalidateSession);
+    };
+  }, [authService]);
+
   const handleConnect = async () => {
     try {
       setError(null);
       useSolanaAuth.getState().setConnecting(true);
       await authService.connectWallet();
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to connect wallet');
     } finally {
       useSolanaAuth.getState().setConnecting(false);
     }
@@ -190,8 +322,8 @@ export const SolanaAuthButton: React.FC = () => {
         return;
       }
       await authService.disconnectWallet();
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to disconnect wallet');
     }
   };
 
@@ -220,9 +352,10 @@ export const SolanaAuthButton: React.FC = () => {
         </div>
       )}
       <div className={cn(
-        'flex items-center gap-2 xl:gap-3 px-3 xl:px-4 py-2 rounded-lg border',
+        'relative flex items-center gap-2 xl:gap-3 px-3 xl:px-4 py-2 rounded-lg border',
         isDark ? 'bg-amber-200/10 border-amber-200/20' : 'bg-yellow-400/10 border-yellow-400/30'
       )}>
+        {airdrop ? <WalletAirdrop amount={airdrop.amount} animationKey={airdrop.key} /> : null}
         <CheckCircle className={cn('w-4 h-4 flex-shrink-0', isDark ? 'text-amber-200' : 'text-yellow-500')} />
         <div className="flex flex-col gap-0.5 min-w-0 flex-1">
           <code

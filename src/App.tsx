@@ -1,5 +1,5 @@
 ﻿import React, { Suspense, lazy, useEffect, useState } from 'react';
-import { MemoryRouter as Router, Routes, Route, useNavigate } from 'react-router-dom';
+import { MemoryRouter as Router, Routes, Route } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import { TitleBar } from './components/TitleBar';
 import BenchmarkPage from './pages/Benchmark';
@@ -8,20 +8,32 @@ import { Settings } from './pages/Settings';
 import { MiningStatistics } from './pages/Statistics';
 import { ThemeProvider } from './contexts/ThemeContext';
 import { useTheme } from './contexts/ThemeContext';
+import { useAppUpdate } from './hooks/useAppUpdate';
 import { useMinerStore } from './store/useMinerStore';
 import { cn, formatHashrate } from './lib/utils';
-import { Activity, Coins, TrendingUp, AlertTriangle, X } from './components/icons';
+import { Coins, TrendingUp, AlertTriangle, X } from './components/icons';
 import { getEnvironmentConfig } from './config/environment';
 import { useSolanaAuth, SolanaAuthService } from './services/solanaAuth';
 import { ClaimRewardsModal } from './components/ClaimRewardsModal';
+import { openReleasesPage } from './services/appUpdateState';
+import { PayoutStatusCard } from './components/PayoutStatusCard';
 import { nativeApi } from './lib/native-api';
 import { backendJson } from './lib/backend-api';
 
-const PoolMonitor = () => {
+const BACKEND_SYNC_INTERVAL_MS = 60_000;
+const BACKEND_SYNC_GAP_MS = 750;
+
+const waitForSyncGap = () => new Promise((resolve) => window.setTimeout(resolve, BACKEND_SYNC_GAP_MS));
+
+const BackendSyncMonitor = () => {
     const updatePoolStatus = useMinerStore(state => state.updatePoolStatus);
     const setGlobalPoolStats = useMinerStore(state => state.setGlobalPoolStats);
+    const publicKey = useSolanaAuth(state => state.user?.publicKey);
 
     useEffect(() => {
+        let cancelled = false;
+        let syncTimer: number | null = null;
+
         const fetchPoolStats = async () => {
             try {
                 const stats = await backendJson('/api/pool/stats');
@@ -45,21 +57,183 @@ const PoolMonitor = () => {
                         });
                     });
                 }
+                window.dispatchEvent(new CustomEvent('minebench:pool-stats', { detail: stats }));
             } catch (err) {
-                console.warn('[PoolMonitor] Failed to fetch pool stats:', err);
+                console.warn('[BackendSync] Failed to fetch pool stats:', err);
             }
         };
-        fetchPoolStats();
-        const statsInterval = setInterval(fetchPoolStats, 60000);
-        return () => clearInterval(statsInterval);
-    }, [setGlobalPoolStats]);
+
+        const fetchRates = async () => {
+            try {
+                const data = await backendJson('/api/rates/current');
+                useMinerStore.getState().setExchangeRates(
+                    Number(data?.xmr_usd || 0),
+                    Number(data?.bmt_usd || 0),
+                    Number(data?.rate_xmr_bmt || 0)
+                );
+            } catch (err) {
+                console.warn('[BackendSync] Failed to fetch rates:', err);
+            }
+        };
+
+        const fetchRewardStats = async () => {
+            if (publicKey) await SolanaAuthService.getInstance().fetchMiningStats(publicKey);
+        };
+
+        const runSyncQueue = async () => {
+            const startedAt = Date.now();
+            for (const job of [fetchPoolStats, fetchRates, fetchRewardStats]) {
+                if (cancelled) return;
+                await job();
+                if (!cancelled) await waitForSyncGap();
+            }
+
+            if (!cancelled) {
+                const elapsed = Date.now() - startedAt;
+                syncTimer = window.setTimeout(runSyncQueue, Math.max(1_000, BACKEND_SYNC_INTERVAL_MS - elapsed));
+            }
+        };
+
+        void runSyncQueue();
+        return () => {
+            cancelled = true;
+            if (syncTimer) window.clearTimeout(syncTimer);
+        };
+    }, [publicKey, setGlobalPoolStats, updatePoolStatus]);
 
     return null;
 };
 
-// Linux Display Warning Banner
-const DisplayWarningBanner = () => {
+/**
+ * Tells the user that an armed kill switch holds their version back.
+ *
+ * `block` decides how loudly it says so. Either way nothing below the gate can be
+ * installed, including a rollback, so replacing the version is the only way on.
+ */
+const KillSwitchBanner = () => {
     const { theme } = useTheme();
+    const { status, startUpdate } = useAppUpdate();
+
+    if (!status.gated) {
+        return null;
+    }
+
+    const blocking = status.killSwitch?.block === true;
+    const message = status.killSwitch?.message;
+
+    // `block` means the client must not continue, so it is a real barrier rather
+    // than a note. It carries the way out with it: an overlay that hid the update
+    // button would leave the user with nothing to do.
+    if (blocking) {
+        return (
+            <div
+                role="alertdialog"
+                aria-modal="true"
+                aria-labelledby="kill-switch-title"
+                className="fixed inset-0 z-[9998] flex items-center justify-center bg-black/80 p-6"
+            >
+                <div className="w-full max-w-md rounded-xl border border-red-800 bg-zinc-900 p-6 text-zinc-100 shadow-2xl">
+                    <h2 id="kill-switch-title" className="text-base font-semibold text-red-300">
+                        This version must be replaced
+                    </h2>
+                    <p className="mt-2 text-sm text-zinc-300">
+                        {message ? `${message}. ` : ''}
+                        Versions below{' '}
+                        <span className="font-mono text-xs">{status.killSwitch?.minVersion}</span> may
+                        not run any more.
+                    </p>
+                    <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-end">
+                        {status.updateAvailable && status.canInstall ? (
+                            <button
+                                type="button"
+                                onClick={() => void startUpdate()}
+                                className="rounded-lg bg-red-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-red-500"
+                            >
+                                Install v{status.latestVersion}
+                            </button>
+                        ) : (
+                            <button
+                                type="button"
+                                onClick={() => void openReleasesPage()}
+                                className="rounded-lg bg-red-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-red-500"
+                            >
+                                Open the downloads page
+                            </button>
+                        )}
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
+    return (
+        <div className={cn(
+            "w-full px-4 py-3 flex items-start gap-3 border-b",
+            theme === 'light'
+                ? 'bg-red-50 border-red-200'
+                : 'bg-red-950/30 border-red-900/50'
+        )}>
+            <AlertTriangle size={18} className={cn(
+                "flex-shrink-0 mt-0.5",
+                theme === 'light' ? 'text-red-700' : 'text-red-500'
+            )} />
+            <div className="flex-1 text-sm">
+                <p className={cn("font-medium mb-1", theme === 'light' ? 'text-red-900' : 'text-red-200')}>
+                    {blocking ? 'This version must be replaced' : 'This version is held back'}
+                </p>
+                <p className={cn("text-xs", theme === 'light' ? 'text-red-800' : 'text-red-300')}>
+                    {message ? `${message}. ` : ''}
+                    {status.updateAvailable
+                        ? `Update to v${status.latestVersion} from the title bar or Settings.`
+                        : `Versions below v${status.killSwitch?.minVersion} are no longer allowed; the downloads page lists what this channel offers.`}
+                </p>
+            </div>
+        </div>
+    );
+};
+
+/**
+ * Tells the user when the version they are running was withdrawn.
+ *
+ * A revoked version still runs - the requirement is a warning, not a block - but
+ * it is no longer offered, so the recommendation is to update.
+ */
+const RevokedVersionBanner = () => {
+    const { theme } = useTheme();
+    const { status } = useAppUpdate();
+
+    if (!status.revoked) {
+        return null;
+    }
+
+    return (
+        <div className={cn(
+            "w-full px-4 py-3 flex items-start gap-3 border-b",
+            theme === 'light'
+                ? 'bg-red-50 border-red-200'
+                : 'bg-red-950/30 border-red-900/50'
+        )}>
+            <AlertTriangle size={18} className={cn(
+                "flex-shrink-0 mt-0.5",
+                theme === 'light' ? 'text-red-700' : 'text-red-500'
+            )} />
+            <div className="flex-1 text-sm">
+                <p className={cn("font-medium mb-1", theme === 'light' ? 'text-red-900' : 'text-red-200')}>
+                    This version was withdrawn
+                </p>
+                <p className={cn("text-xs", theme === 'light' ? 'text-red-800' : 'text-red-300')}>
+                    v{status.currentVersion} is no longer offered by the {status.channel ?? 'stable'} channel.
+                    {status.updateAvailable
+                        ? ` Update to v${status.latestVersion} from the title bar or Settings.`
+                        : ' Settings lists the versions this channel still offers.'}
+                </p>
+            </div>
+        </div>
+    );
+};
+
+// Linux Display Warning Banner
+const DisplayWarningBanner = () => {    const { theme } = useTheme();
     const [displayStatus, setDisplayStatus] = useState<any>(null);
     const [dismissed, setDismissed] = useState(false);
 
@@ -122,12 +296,10 @@ const StressTestPage = lazy(() => import('./pages/StressTest'));
 
 const Dashboard = () => {
     const {
-        pools,
         dbTotalBMT,
         deviceType,
         poolHashrateTotal,
         poolMinersCount,
-        poolNetworkHashrate,
         xmrUsd,
         bmtUsd,
         rateXmrBmt,
@@ -137,54 +309,6 @@ const Dashboard = () => {
     const { user, isConnected, miningStats } = useSolanaAuth();
     const { theme } = useTheme();
 
-    // Periodically sync confirmed balance from DB
-    useEffect(() => {
-        if (!isConnected || !user?.publicKey) return;
-
-        const syncConfirmed = async () => {
-            try {
-                await SolanaAuthService.getInstance().fetchMiningStats(user.publicKey);
-            } catch (e) {
-                console.error('[Dashboard] Error syncing confirmed balance:', e);
-            }
-        };
-
-        syncConfirmed();
-        const interval = setInterval(syncConfirmed, 60000); // Sync every minute
-        return () => clearInterval(interval);
-    }, [isConnected, user?.publicKey]);
-
-    // Fetch exchange rates on Dashboard mount
-    useEffect(() => {
-        const fetchRates = async () => {
-            try {
-                const data = await backendJson('/api/rates/current');
-
-                const nextXmrUsd = Number(data?.xmr_usd || 0);
-                const nextBmtUsd = Number(data?.bmt_usd || 0);
-                const nextRate = Number(data?.rate_xmr_bmt || 0);
-
-                // Update store with rates
-                const { setExchangeRates } = useMinerStore.getState();
-                setExchangeRates(
-                    Number.isFinite(nextXmrUsd) ? nextXmrUsd : 0,
-                    Number.isFinite(nextBmtUsd) ? nextBmtUsd : 0,
-                    Number.isFinite(nextRate) ? nextRate : 0
-                );
-            } catch (err) {
-                console.warn('[Dashboard] Failed to fetch rates:', err);
-            }
-        };
-
-        fetchRates();
-    }, []);
-
-    const cpuPool = pools['cpu'];
-    const poolLabels: Record<string, string> = {
-        'cpu': 'XMR Pool MineBench',
-        'cpu-backup': 'XMR Pool MineBench'
-    };
-    const navigate = useNavigate();
     const [benchmarkHashrate, setBenchmarkHashrate] = useState<number>(0);
     const [lastBenchmarkDate, setLastBenchmarkDate] = useState<Date | null>(null);
     const [benchmarkDeviceName, setBenchmarkDeviceName] = useState('');
@@ -266,7 +390,7 @@ const Dashboard = () => {
     const safeDbTotalBMT = Number.isFinite(miningStats?.totalRewards)
         ? Number(miningStats?.totalRewards)
         : (Number.isFinite(dbTotalBMT) ? dbTotalBMT : 0);
-    const MIN_CLAIM_AMOUNT = 100;
+    const MIN_CLAIM_AMOUNT = Math.max(Number(miningStats?.minClaimBmt ?? 100), 0.000001);
     const canClaim = safeDbTotalBMT >= MIN_CLAIM_AMOUNT;
     const claimProgress = Math.min((safeDbTotalBMT / MIN_CLAIM_AMOUNT) * 100, 100);
     const [claiming, setClaiming] = useState(false);
@@ -279,8 +403,7 @@ const Dashboard = () => {
         if (claiming) return;
         try {
             setClaiming(true);
-            const latestStats = await refreshConfirmedRewards();
-            const latestBalance = Number(latestStats?.totalRewards ?? useMinerStore.getState().dbTotalBMT ?? 0);
+            const latestBalance = Number(miningStats?.totalRewards ?? useMinerStore.getState().dbTotalBMT ?? 0);
 
             if (latestBalance < MIN_CLAIM_AMOUNT) {
                 alert(`${(MIN_CLAIM_AMOUNT - latestBalance).toFixed(2)} $BMT more to claim`);
@@ -496,11 +619,18 @@ const Dashboard = () => {
                 </div>
             </div>
 
+            <PayoutStatusCard
+                theme={theme}
+                wallet={user?.publicKey || ''}
+                isConnected={isConnected}
+            />
+
             <ClaimRewardsModal
                 isOpen={showClaimModal}
                 onClose={() => setShowClaimModal(false)}
                 wallet={user?.publicKey || ''}
                 availableBalance={safeDbTotalBMT}
+                minWithdrawal={MIN_CLAIM_AMOUNT}
                 theme={theme}
                 onClaimed={async () => {
                     await refreshConfirmedRewards();
@@ -509,8 +639,6 @@ const Dashboard = () => {
         </div>
     );
 };
-
-const Placeholder = ({ name }: { name: string }) => <div className="text-2xl font-bold p-6">{name} (Under Construction)</div>;
 
 const App: React.FC = () => {
     // Fetch public configuration on mount
@@ -524,7 +652,9 @@ const App: React.FC = () => {
             <Router>
                 <TitleBar />
                 <DisplayWarningBanner />
-                <PoolMonitor />
+                <RevokedVersionBanner />
+                <KillSwitchBanner />
+                <BackendSyncMonitor />
                 <Layout>
                     <Suspense fallback={<div className="p-10 text-zinc-500 italic">Loading components...</div>}>
                         <Routes>

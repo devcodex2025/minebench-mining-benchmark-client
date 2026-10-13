@@ -10,7 +10,7 @@ export interface ShareDetectionResult {
 
 /**
  * Determines whether a "Share Found" animation should fire given an incoming
- * verified-share count and the previous session maximum.
+ * P2Pool share-event marker and the previous session maximum.
  *
  * Rules:
  * - First observation (lastShareCount < 0): initialize the reference; no animation.

@@ -1,5 +1,7 @@
 # 🚀 WINDOWS PRODUCTION BUILD - ІНСТРУКЦІЯ
 
+> **Note:** this document predates the Tauri v2 migration. Use `npm run dist:win` / `npm run tauri:build`. `electron-builder` cache paths below do not apply.
+
 ## ❓ Що ви хочете?
 
 Створити версію MineBench для Windows з **production автентифікацією** (https://minebench.cloud/auth)

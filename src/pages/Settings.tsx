@@ -1,11 +1,22 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Download, RefreshCw, Info, Settings as SettingsIcon, CheckCircle, Lock, ExternalLink } from '../components/icons';
+import { Download, RefreshCw, Info, Settings as SettingsIcon, Lock, ExternalLink, Cpu, Shield } from '../components/icons';
 import { useTheme } from '../contexts/ThemeContext';
 import { cn } from '../lib/utils';
+import {
+  formatClockGhz,
+  formatPercent,
+  formatRpm,
+  formatTemperature,
+  formatWatts,
+} from '../lib/cpu-telemetry';
+import type { CpuTelemetryDebug, CpuSensorBrokerStatus, CpuSensorBrokerSnapshot, CpuSensorBrokerDiagnostic } from '../lib/cpu-telemetry';
 import { useMinerStore } from '../store/useMinerStore';
+import { visiblePoolEndpoints } from '../store/poolEndpoints';
 import { useEnvironment } from '../hooks/useEnvironment';
 import { nativeApi } from '../lib/native-api';
-import { getAppUpdateStatus, getInitialAppUpdateStatus, RELEASES_URL } from '../services/appUpdate';
+import { useAppUpdate } from '../hooks/useAppUpdate';
+import { backendJson } from '../lib/backend-api';
+import { authStorage } from '../lib/auth-storage';
 import {
   getInitialXmrigVersionInfo,
   getXmrigVersionPresentation,
@@ -13,8 +24,17 @@ import {
 
 export const Settings = () => {
   const { theme, toggleTheme } = useTheme();
-  const [checkingUpdates, setCheckingUpdates] = useState(false);
-  const [updateChecked, setUpdateChecked] = useState(false);
+  const {
+    status: updateStatus,
+    checked: updateChecked,
+    checking,
+    installing: installingUpdate,
+    progress: updateProgress,
+    error: updateError,
+    checkForUpdate,
+    startUpdate,
+    rollbackTo,
+  } = useAppUpdate();
   const [checkingXmrig, setCheckingXmrig] = useState(false);
   const [xmrigVersion, setXmrigVersion] = useState(getInitialXmrigVersionInfo);
   const [autoStart, setAutoStart] = useState(false);
@@ -22,7 +42,7 @@ export const Settings = () => {
   const [autoStartLoading, setAutoStartLoading] = useState(false);
   const isNative = (window as any).__TAURI_INTERNALS__;
   const autoStartDisabled = autoStartLoading || !autoStartSupported || !isNative;
-  const [updateStatus, setUpdateStatus] = useState(getInitialAppUpdateStatus);
+  const checkingUpdates = checking || checkingXmrig;
   const xmrigPresentation = useMemo(
     () => getXmrigVersionPresentation(xmrigVersion),
     [xmrigVersion]
@@ -78,18 +98,10 @@ export const Settings = () => {
   }, [isNative]);
 
   const handleCheckUpdates = async () => {
-    setCheckingUpdates(true);
-    const [status] = await Promise.all([
-      getAppUpdateStatus(),
+    await Promise.all([
+      checkForUpdate(),
       refreshXmrigVersion(),
     ]);
-    setUpdateStatus(status);
-    setUpdateChecked(true);
-    setCheckingUpdates(false);
-  };
-
-  const handleDownloadUpdate = () => {
-    openExternal(RELEASES_URL);
   };
 
   const handleXmrigUpdate = () => {
@@ -136,16 +148,8 @@ export const Settings = () => {
   }, [refreshXmrigVersion]);
 
   useEffect(() => {
-    let active = true;
-
-    getAppUpdateStatus().then((status) => {
-      if (active) setUpdateStatus(status);
-    });
-
-    return () => {
-      active = false;
-    };
-  }, []);
+    void checkForUpdate();
+  }, [checkForUpdate]);
 
   return (
     <div className="space-y-6">
@@ -170,13 +174,20 @@ export const Settings = () => {
           )}>
             <div className="flex items-center justify-between gap-3">
               <span className={labelClass}>MineBench Client</span>
-              <span className="font-mono text-sm font-bold text-yellow-400">v{updateStatus.currentVersion}</span>
+              <span className="font-mono text-sm font-bold text-yellow-400">
+                v{updateStatus.currentVersion}
+                {updateStatus.channel && (
+                  <span className={cn("ml-2 font-sans text-xs font-normal", subLabelClass)}>
+                    {updateStatus.channel}
+                  </span>
+                )}
+              </span>
             </div>
             <p className={cn("mt-2 min-h-4", subLabelClass)}>
-              {updateStatus.error
-                ? 'Latest-version check unavailable'
-                : updateStatus.updateAvailable
+              {updateStatus.updateAvailable
                   ? `v${updateStatus.latestVersion} available`
+                : updateError
+                  ? 'Latest-version check unavailable'
                   : updateChecked
                     ? 'Latest installed'
                     : 'Ready to check'}
@@ -200,14 +211,75 @@ export const Settings = () => {
               {updateStatus.updateAvailable && (
                 <button
                   type="button"
-                  onClick={handleDownloadUpdate}
+                  onClick={() => void startUpdate()}
+                  disabled={installingUpdate}
                   className="inline-flex items-center gap-2 rounded bg-yellow-400 px-3 py-2 text-xs font-bold text-zinc-950 transition-colors hover:bg-yellow-300"
                 >
-                  <Download size={14} />
-                  Get v{updateStatus.latestVersion}
+                  <Download size={14} className={installingUpdate ? 'animate-pulse' : ''} />
+                  {installingUpdate
+                    ? `Updating${updateProgress !== null ? ` ${updateProgress}%` : '…'}`
+                    : updateStatus.canInstall
+                      ? `Install v${updateStatus.latestVersion}`
+                      : `Get v${updateStatus.latestVersion}`}
                 </button>
               )}
+              {updateStatus.revoked && !updateStatus.updateAvailable && (
+                <span className={cn("text-xs", subLabelClass)}>
+                  The downloads page always lists what this channel offers.
+                </span>
+              )}
             </div>
+            {updateError && (
+              <p role="status" className="mt-2 text-xs text-red-500">{updateError}</p>
+            )}
+
+            {updateStatus.revoked && (
+              <p role="alert" className="mt-3 text-xs font-semibold text-red-500">
+                v{updateStatus.currentVersion} was withdrawn by the maintainers.
+                {' '}
+                {updateStatus.updateAvailable
+                  ? `Updating to v${updateStatus.latestVersion} is recommended.`
+                  : 'A newer version is not available yet.'}
+              </p>
+            )}
+
+            {updateStatus.gated && (
+              <p role="alert" className="mt-3 text-xs font-semibold text-red-500">
+                {updateStatus.killSwitch?.block
+                  ? 'This version must be replaced: '
+                  : 'This version is held back: '}
+                versions below v{updateStatus.killSwitch?.minVersion} may not run.
+                {updateStatus.killSwitch?.message ? ` ${updateStatus.killSwitch.message}.` : ''}
+              </p>
+            )}
+
+            {(updateStatus.rollbackTargets?.length ?? 0) > 0 && (
+              <div className="mt-4 border-t pt-3" style={{ borderColor: 'currentColor' }}>
+                <span className={labelClass}>Roll back</span>
+                <p className={cn("mt-1", subLabelClass)}>
+                  Only versions this channel still offers can be installed.
+                </p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {(updateStatus.rollbackTargets ?? []).map((version) => (
+                    <button
+                      key={version}
+                      type="button"
+                      onClick={() => void rollbackTo(version)}
+                      disabled={installingUpdate}
+                      className={cn(
+                        "rounded border px-2 py-1 font-mono text-xs transition-colors",
+                        theme === 'light'
+                          ? 'border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-100'
+                          : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10',
+                        installingUpdate && 'cursor-wait opacity-60'
+                      )}
+                    >
+                      v{version}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           <div className={cn(
@@ -258,6 +330,11 @@ export const Settings = () => {
           </div>
         </div>
       </div>
+
+      {/* CPU sensor diagnostics. Windows has no generic CPU die temperature API,
+          so this exists to explain on any given PC which provider was found and
+          which sensors are missing. */}
+      <CpuSensorDiagnostics theme={theme} isNative={!!isNative} />
 
       {/* Other Settings */}
       <div className={cardClass}>
@@ -384,8 +461,353 @@ export const Settings = () => {
 };
 
 // Simple Monero wallet validation: starts with 4 or 8 and ~95 characters
-const validateXmrWallet = (addr: string) => {
-  const trimmed = addr.trim();
+/**
+ * CPU sensor diagnostics.
+ *
+ * Hardware monitoring varies wildly between PCs, so this reports the detected
+ * CPU, the active telemetry provider, every raw sensor the provider exposes,
+ * and the normalized values MineBench derived from them. The JSON export is what
+ * a user sends us when a sensor cannot be detected on their machine.
+ *
+ * Only hardware identifiers are included; no wallet or account data is read.
+ */
+const CpuSensorDiagnostics: React.FC<{ theme: 'light' | 'dark'; isNative: boolean }> = ({ theme, isNative }) => {
+  const [debug, setDebug] = useState<CpuTelemetryDebug | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [showSensors, setShowSensors] = useState(false);
+  const [broker, setBroker] = useState<CpuSensorBrokerStatus | null>(null);
+  const [brokerReading, setBrokerReading] = useState<CpuSensorBrokerSnapshot | null>(null);
+  const [brokerDiagnostic, setBrokerDiagnostic] = useState<CpuSensorBrokerDiagnostic | null>(null);
+  const [brokerBusy, setBrokerBusy] = useState(false);
+  const [brokerMessage, setBrokerMessage] = useState<string | null>(null);
+
+  const cardClass = cn(
+    'rounded-xl border p-5 space-y-4',
+    theme === 'light' ? 'bg-white border-zinc-200' : 'bg-zinc-900/60 border-white/10'
+  );
+  const textClass = cn('text-sm', theme === 'light' ? 'text-zinc-600' : 'text-zinc-400');
+
+  const refreshBrokerStatus = useCallback(async () => {
+    if (!isNative) return;
+    try {
+      setBroker(await nativeApi.system.getCpuSensorBrokerStatus());
+    } catch {
+      // Diagnostics must not fail just because the broker status is unreadable.
+    }
+  }, [isNative]);
+
+  /**
+   * Asks the privileged broker for a reading.
+   *
+   * The broker is started by a scheduled task the installer registered, so this
+   * never raises an approval prompt. When the task is absent the call simply
+   * returns no snapshot, which is a normal state rather than an error.
+   */
+  const requestBrokerReading = useCallback(async () => {
+    setBrokerBusy(true);
+    setBrokerMessage(null);
+    try {
+      const result = await nativeApi.system.readCpuSensorBroker();
+      if (result?.snapshot) {
+        setBrokerReading(result.snapshot);
+        setBrokerMessage(null);
+      } else {
+        setBrokerReading(null);
+        setBrokerMessage(
+          'The sensor broker returned no reading. Check the detail above; the installer must register its scheduled task.'
+        );
+      }
+      await refreshBrokerStatus();
+    } catch (err: any) {
+      setBrokerMessage(err?.message ?? String(err));
+    } finally {
+      setBrokerBusy(false);
+    }
+  }, [refreshBrokerStatus]);
+
+  useEffect(() => {
+    void refreshBrokerStatus();
+  }, [refreshBrokerStatus]);
+
+  /**
+   * Runs the full broker diagnostic.
+   *
+   * This is the report to ask for when temperature is missing on a machine we
+   * cannot inspect: it names the failing link instead of leaving a bare "N/A".
+   */
+  const runBrokerDiagnostic = useCallback(async () => {
+    setBrokerBusy(true);
+    setBrokerMessage(null);
+    try {
+      setBrokerDiagnostic(await nativeApi.system.diagnoseCpuSensorBroker());
+      await refreshBrokerStatus();
+    } catch (err: any) {
+      setBrokerMessage(err?.message ?? String(err));
+    } finally {
+      setBrokerBusy(false);
+    }
+  }, [refreshBrokerStatus]);
+
+  const runDiagnostics = useCallback(async () => {
+    if (!isNative) {
+      setError('CPU sensor diagnostics require the desktop app.');
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      setDebug(await nativeApi.system.getCpuTelemetryDebug());
+      await refreshBrokerStatus();
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, [isNative, refreshBrokerStatus]);
+
+  const downloadDiagnostics = useCallback(() => {
+    if (!debug) return;
+    const blob = new Blob([JSON.stringify(debug, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `minebench-cpu-sensors-${Date.now()}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }, [debug]);
+
+  return (
+    <div className={cardClass}>
+      <div className="flex items-start gap-3">
+        <Cpu size={20} className="text-emerald-400 mt-1 flex-shrink-0" />
+        <div className="flex-1">
+          <h2 className={cn('text-lg font-semibold', theme === 'light' ? 'text-zinc-900' : 'text-white')}>
+            CPU Sensor Diagnostics
+          </h2>
+          <p className={cn('mt-1', textClass)}>
+            Determine which CPU sensors MineBench can read on this PC, and why others are missing.
+          </p>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={runDiagnostics}
+          disabled={loading || !isNative}
+          className={cn(
+            'inline-flex items-center gap-2 rounded border px-3 py-2 text-xs font-semibold transition-colors',
+            theme === 'light'
+              ? 'border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-100'
+              : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10',
+            (loading || !isNative) && 'cursor-not-allowed opacity-60'
+          )}
+        >
+          <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+          {loading ? 'Scanning…' : 'Run diagnostics'}
+        </button>
+        {debug && (
+          <button
+            type="button"
+            onClick={downloadDiagnostics}
+            className="inline-flex items-center gap-2 rounded bg-emerald-400 px-3 py-2 text-xs font-bold text-zinc-950 transition-colors hover:bg-emerald-300"
+          >
+            <Download size={14} />
+            Save report
+          </button>
+        )}
+      </div>
+
+      {error && (
+        <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-500">{error}</div>
+      )}
+
+      {/* Bundled sensor helper: the only path to CPU die temperature on a stock
+          Windows install, because it needs a kernel driver and therefore one
+          administrator approval. */}
+      <div className={cn('rounded-lg border p-4 space-y-3', theme === 'light' ? 'bg-zinc-50 border-zinc-200' : 'bg-black/20 border-white/10')}>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className={cn('text-xs font-semibold uppercase tracking-widest', theme === 'light' ? 'text-zinc-700' : 'text-zinc-300')}>
+              CPU temperature broker
+            </div>
+            <p className={cn('mt-1 text-xs', textClass)}>
+              Windows exposes no generic CPU temperature sensor. MineBench reads it through the
+              WHQL-signed PawnIO driver with a small native broker that the installer starts
+              through a scheduled task — no administrator prompt, and no third-party monitoring
+              application.
+            </p>
+          </div>
+          <span
+            className={cn(
+              'whitespace-nowrap rounded-full border px-2 py-0.5 text-[10px] font-semibold',
+              broker?.taskRegistered
+                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+                : theme === 'light'
+                  ? 'border-zinc-300 bg-white text-zinc-600'
+                  : 'border-white/10 bg-white/5 text-zinc-400'
+            )}
+          >
+            {broker ? (broker.taskRegistered ? 'Ready' : 'Task not registered') : 'Checking…'}
+          </span>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={requestBrokerReading}
+            disabled={brokerBusy || !isNative || broker?.supported === false}
+            className={cn(
+              'inline-flex items-center gap-2 rounded bg-emerald-400 px-3 py-2 text-xs font-bold text-zinc-950 transition-colors hover:bg-emerald-300',
+              (brokerBusy || !isNative || broker?.supported === false) && 'cursor-not-allowed opacity-60'
+            )}
+          >
+            <Shield size={14} />
+            {brokerBusy ? 'Reading…' : 'Read CPU temperature'}
+          </button>
+          <button
+            type="button"
+            onClick={runBrokerDiagnostic}
+            disabled={brokerBusy || !isNative}
+            className={cn(
+              'inline-flex items-center gap-2 rounded border px-3 py-2 text-xs font-semibold transition-colors',
+              theme === 'light'
+                ? 'border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-100'
+                : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10',
+              (brokerBusy || !isNative) && 'cursor-not-allowed opacity-60'
+            )}
+          >
+            <RefreshCw size={14} className={brokerBusy ? 'animate-spin' : ''} />
+            Diagnose
+          </button>
+        </div>
+
+        {brokerDiagnostic && (
+          <div className={cn('rounded-lg border p-3 space-y-1 text-xs font-mono', theme === 'light' ? 'bg-zinc-50 border-zinc-200' : 'bg-black/20 border-white/10')}>
+            {brokerDiagnostic.steps.map((step) => (
+              <div key={step.step} className="flex items-start justify-between gap-3">
+                <span className={step.ok ? 'text-emerald-500' : 'text-amber-500'}>
+                  {step.ok ? '✓' : '✗'} {step.step}
+                </span>
+                <span className={cn('text-right flex-1', textClass)}>{step.detail}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {(brokerMessage || broker?.detail) && (
+          <p className={cn('text-xs', broker?.taskRegistered ? textClass : 'text-amber-500')}>
+            {brokerMessage ?? broker?.detail}
+          </p>
+        )}
+
+        {brokerReading && (
+          <div className={cn('rounded-lg border p-3 space-y-1 text-xs font-mono', theme === 'light' ? 'bg-zinc-50 border-zinc-200' : 'bg-black/20 border-white/10')}>
+            <div className="flex justify-between gap-4">
+              <span className={textClass}>Temperature</span>
+              <span>{formatTemperature(brokerReading.temperature_c)}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className={textClass}>Register</span>
+              <span>{brokerReading.temperature_source ?? 'n/a'}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className={textClass}>Package power</span>
+              <span>{formatWatts(brokerReading.package_power_w)}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className={textClass}>Module</span>
+              <span>{brokerReading.module ?? 'n/a'}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className={textClass}>Raw SMN</span>
+              <span>{brokerReading.raw_smn ?? 'n/a'}</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {debug && (
+        <div className="space-y-3">
+          <div className={cn('rounded-lg border p-4 space-y-2 text-xs font-mono', theme === 'light' ? 'bg-zinc-50 border-zinc-200' : 'bg-black/20 border-white/10')}>
+            <div className="flex justify-between gap-4">
+              <span className={textClass}>CPU</span>
+              <span className="text-right">{debug.cpu_model}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className={textClass}>Cores</span>
+              <span>
+                {debug.physical_cores ?? '?'} physical / {debug.logical_cores} logical
+              </span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className={textClass}>Provider</span>
+              <span>{debug.provider_label}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className={textClass}>Temperature reliable</span>
+              <span className={debug.temperature_reliable ? 'text-emerald-400' : 'text-amber-400'}>
+                {debug.temperature_reliable ? 'yes' : 'no'}
+              </span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className={textClass}>Raw sensors</span>
+              <span>{debug.raw_sensors.length}</span>
+            </div>
+          </div>
+
+          {debug.notes.length > 0 && (
+            <ul className={cn('list-disc pl-5 space-y-1 text-xs', textClass)}>
+              {debug.notes.map((note) => (
+                <li key={note}>{note}</li>
+              ))}
+            </ul>
+          )}
+
+          <div className={cn('rounded-lg border p-4 space-y-2 text-xs font-mono', theme === 'light' ? 'bg-zinc-50 border-zinc-200' : 'bg-black/20 border-white/10')}>
+            <div className={cn('uppercase tracking-widest text-[10px]', textClass)}>Normalized values</div>
+            <div className="flex justify-between gap-4"><span className={textClass}>Temperature</span><span>{formatTemperature(debug.normalized.temperature_c)}</span></div>
+            <div className="flex justify-between gap-4"><span className={textClass}>Package temp</span><span>{formatTemperature(debug.normalized.package_temperature_c)}</span></div>
+            <div className="flex justify-between gap-4"><span className={textClass}>Utilization</span><span>{formatPercent(debug.normalized.utilization_percent)}</span></div>
+            <div className="flex justify-between gap-4"><span className={textClass}>Clock</span><span>{formatClockGhz(debug.normalized.clock_mhz)}</span></div>
+            <div className="flex justify-between gap-4"><span className={textClass}>Power</span><span>{formatWatts(debug.normalized.package_power_w)}</span></div>
+            <div className="flex justify-between gap-4"><span className={textClass}>Fan</span><span>{formatRpm(debug.normalized.fan_rpm)}</span></div>
+            <div className="flex justify-between gap-4"><span className={textClass}>Missing</span><span>{debug.normalized.missing.join(', ') || 'none'}</span></div>
+            <div className="flex justify-between gap-4"><span className={textClass}>Collection cost</span><span>{debug.normalized.collection_ms.toFixed(1)} ms</span></div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setShowSensors((value) => !value)}
+            className={cn('text-xs font-semibold underline-offset-2 hover:underline', textClass)}
+          >
+            {showSensors ? 'Hide raw sensor dump' : `Show raw sensor dump (${debug.raw_sensors.length})`}
+          </button>
+
+          {showSensors && (
+            <div className={cn('max-h-72 overflow-auto rounded-lg border p-3 text-[11px] font-mono', theme === 'light' ? 'bg-zinc-50 border-zinc-200' : 'bg-black/20 border-white/10')}>
+              {debug.raw_sensors.length === 0 ? (
+                <div className={textClass}>The active provider reported no sensors.</div>
+              ) : (
+                debug.raw_sensors.map((sensor, index) => (
+                  <div key={`${sensor.name}-${index}`} className="flex justify-between gap-3 py-0.5">
+                    <span className="truncate" title={`${sensor.hardware ?? ''} ${sensor.name}`}>
+                      {sensor.type}: {sensor.name}
+                    </span>
+                    <span className="whitespace-nowrap">{sensor.value ?? 'null'}{sensor.unit ?? ''}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const validateXmrWallet = (addr: string) => {  const trimmed = addr.trim();
   if (!trimmed) return { ok: false, reason: 'Wallet is required' };
   if (!(trimmed.startsWith('4') || trimmed.startsWith('8'))) return { ok: false, reason: 'Must start with 4 or 8' };
   if (trimmed.length < 90 || trimmed.length > 110) return { ok: false, reason: 'Unexpected length' };
@@ -393,32 +815,30 @@ const validateXmrWallet = (addr: string) => {
 };
 
 const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
-  const isNative = (window as any).__TAURI_INTERNALS__;
   const env = useEnvironment();
   const wallet = useMinerStore((s) => s.wallet);
+  const rewardAsset = useMinerStore((s) => s.rewardAsset);
   const poolUrl = useMinerStore((s) => s.poolUrl);
   const backendPoolEndpoints = useMinerStore((s) => s.backendPoolEndpoints);
   const donateLevel = useMinerStore((s) => s.donateLevel);
   const isPremium = useMinerStore((s) => s.isPremium);
+  const premiumXmrWallet = useMinerStore((s) => s.premiumXmrWallet);
   
   const setWallet = useMinerStore((s) => s.setWallet);
+  const setRewardAsset = useMinerStore((s) => s.setRewardAsset);
+  const setPremiumXmrWallet = useMinerStore((s) => s.setPremiumXmrWallet);
   const setPoolUrl = useMinerStore((s) => s.setPoolUrl);
   const setDonateLevel = useMinerStore((s) => s.setDonateLevel);
   const setManualPoolSelection = useMinerStore((s) => s.setManualPoolSelection);
+  const saveSettings = useMinerStore((s) => s.saveSettings);
 
-  const [localWallet, setLocalWallet] = useState(wallet);
+  const [localWallet, setLocalWallet] = useState(premiumXmrWallet || wallet);
+  const [localRewardAsset, setLocalRewardAsset] = useState(rewardAsset);
   const [localPool, setLocalPool] = useState(poolUrl);
-  const [localDonate, setLocalDonate] = useState(donateLevel);
+  const [localDonate] = useState(donateLevel);
   const [saving, setSaving] = useState(false);
   const validation = useMemo(() => validateXmrWallet(localWallet), [localWallet]);
-
-  const openExternal = useCallback(async (url: string) => {
-    if (isNative) {
-      await nativeApi.openExternal(url);
-    } else {
-      window.open(url, '_blank', 'noopener,noreferrer');
-    }
-  }, [isNative]);
+  const canConfigurePool = true;
 
   // Local label style
   const labelClass = cn(
@@ -426,24 +846,34 @@ const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
     theme === 'light' ? 'text-zinc-600' : 'text-zinc-500'
   );
 
-  const backendPresetPools = backendPoolEndpoints.map((endpoint) => ({
+  const backendPresetPools = visiblePoolEndpoints(backendPoolEndpoints, {
+    isPremium,
+    hasMoneroWallet: !!premiumXmrWallet
+  }).map((endpoint) => ({
     name: endpoint.label,
     url: endpoint.url
   }));
   const presetPools = [
     ...(backendPresetPools.length > 0 ? backendPresetPools : [{ name: 'MineBench Pool (Primary)', url: env.poolStratumUrl }]),
-    { name: 'SupportXMR', url: 'pool.supportxmr.com:3333' },
-    { name: 'MoneroOcean', url: 'gulf.moneroocean.stream:10032' },
   ];
 
   const save = async () => {
-    if (!validation.ok || !isPremium) return;
+    if (localRewardAsset === 'XMR' && !validation.ok) return;
     setSaving(true);
     try {
-      setWallet(localWallet.trim());
+      const xmrWallet = localWallet.trim();
+      const result = validation.ok
+        ? await backendJson<{ xmrWallet: string | null }>('/api/user/premium-status', {
+            method: 'PATCH', body: { xmrWallet }, token: authStorage.getToken()
+          })
+        : { xmrWallet: premiumXmrWallet };
+      setWallet(xmrWallet);
+      setRewardAsset(localRewardAsset);
+      setPremiumXmrWallet(result.xmrWallet);
       setPoolUrl(localPool.trim());
       setDonateLevel(Math.max(0, Math.min(5, Math.round(localDonate))));
       setManualPoolSelection(true); // Enable manual override
+      saveSettings();
     } finally {
       setSaving(false);
     }
@@ -451,35 +881,6 @@ const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
 
   return (
     <div className="space-y-4 ml-8">
-      {/* Premium Lock Overlay for Wallet */}
-      {!isPremium && (
-        <div className={cn(
-          "p-4 rounded-xl border flex flex-col items-center text-center gap-3",
-          theme === 'light' ? 'bg-amber-50 border-amber-200' : 'bg-amber-500/10 border-amber-500/20'
-        )}>
-          <div className="w-10 h-10 rounded-full bg-amber-500/20 flex items-center justify-center">
-            <Lock size={20} className="text-amber-500" />
-          </div>
-          <div>
-            <p className={cn("text-xs font-black uppercase tracking-[0.2em]", theme === 'light' ? 'text-amber-900' : 'text-amber-400')}>Premium Feature</p>
-            <p className={cn("text-xs mt-1 font-medium", theme === 'light' ? 'text-amber-800' : 'text-amber-200/50')}>
-              Custom Monero wallet support requires a Premium License ($29/year).
-            </p>
-          </div>
-          <button
-            onClick={() => openExternal('https://minebench.cloud/premium')}
-            className={cn(
-               "flex items-center gap-2 px-6 py-2 rounded-full text-[10px] font-bold transition-all transform hover:scale-102 cursor-pointer shadow-lg active:scale-95",
-               theme === 'light' 
-                ? "bg-zinc-900 text-white hover:bg-zinc-800 shadow-zinc-950/20"
-                : "bg-amber-500 text-black hover:bg-amber-400 shadow-amber-500/20"
-            )}
-          >
-            UPGRADE TO PREMIUM <ExternalLink size={10} />
-          </button>
-        </div>
-      )}
-
       {/* Wallet */}
       <div className={cn(
         "p-4 rounded-xl border relative overflow-hidden group",
@@ -491,30 +892,36 @@ const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
             value={localWallet}
             onChange={(e) => setLocalWallet(e.target.value)}
             placeholder="Enter your Monero wallet"
-            disabled={!isPremium}
             className={cn(
               'w-full px-4 py-3 rounded-lg border text-sm outline-none transition-all',
               theme === 'light' 
                 ? 'bg-zinc-50 border-zinc-200 text-zinc-900 focus:border-emerald-500/50' 
                 : 'bg-zinc-950/50 border-white/10 text-white focus:border-emerald-500/30',
-              !isPremium && "cursor-not-allowed grayscale"
             )}
           />
         </div>
 
-        {/* Central Lock Overlay */}
-        {!isPremium && (
-          <div className="absolute inset-0 bg-zinc-950/50 backdrop-blur-[1px] flex items-center justify-center z-10 transition-all group-hover:bg-zinc-950/60">
-             <div className="p-3 bg-zinc-900/90 rounded-2xl border border-white/10 shadow-2xl flex flex-col items-center gap-1 scale-90 group-hover:scale-100 transition-transform">
-                <Lock size={20} className="text-amber-500" />
-                <span className="text-[10px] font-black text-amber-500 uppercase tracking-widest">Locked</span>
-             </div>
-          </div>
-        )}
-
-        {isPremium && !validation.ok && (
+        {localRewardAsset === 'XMR' && !validation.ok && (
           <div className={cn('mt-2 text-xs', theme === 'light' ? 'text-red-600' : 'text-red-400')}>{validation.reason}</div>
         )}
+      </div>
+
+      <div className={cn(
+        "p-4 rounded-xl border",
+        theme === 'light' ? 'bg-white border-zinc-200' : 'bg-zinc-900/40 border-white/5'
+      )}>
+        <label className={labelClass}>Mining reward</label>
+        <select
+          value={localRewardAsset}
+          onChange={(event) => setLocalRewardAsset(event.target.value === 'XMR' ? 'XMR' : 'BMT')}
+          className={cn(
+            'mt-2 w-full px-4 py-3 rounded-lg border text-sm outline-none',
+            theme === 'light' ? 'bg-zinc-50 border-zinc-200 text-zinc-900' : 'bg-zinc-950/50 border-white/10 text-white'
+          )}
+        >
+          <option value="BMT">BMT to Solana wallet</option>
+          <option value="XMR">XMR to Monero wallet (95%)</option>
+        </select>
       </div>
 
       {/* Pool Selection */}
@@ -529,14 +936,14 @@ const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
           {presetPools.map((p) => (
             <button
               key={p.url}
-              onClick={() => isPremium && setLocalPool(p.url)}
-              disabled={!isPremium}
+              onClick={() => canConfigurePool && setLocalPool(p.url)}
+              disabled={!canConfigurePool}
               className={cn(
                 'px-4 py-3 rounded-lg border text-sm text-center transition-all',
                 localPool === p.url
                   ? theme === 'light' ? 'bg-emerald-50 border-emerald-300 text-emerald-700 shadow-sm' : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400 shadow-lg shadow-emerald-500/5'
                   : theme === 'light' ? 'bg-zinc-50 border-zinc-200 text-zinc-800' : 'bg-zinc-950/50 border-white/10 text-white',
-                !isPremium && "cursor-not-allowed opacity-50"
+                !canConfigurePool && "cursor-not-allowed opacity-50"
               )}
             >
               <div className="font-bold text-xs uppercase tracking-tight">{p.name}</div>
@@ -547,19 +954,19 @@ const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
         <input
           value={localPool}
           onChange={(e) => setLocalPool(e.target.value)}
-          placeholder="host:port (e.g., xmr.minebench.cloud:3333)"
-          disabled={!isPremium}
+          placeholder="host:port (e.g., bmt.minebench.cloud:3333)"
+          disabled={!canConfigurePool}
           className={cn(
             'mt-3 w-full px-4 py-3 rounded-lg border text-sm outline-none transition-all font-mono',
             theme === 'light' 
               ? 'bg-zinc-50 border-zinc-200 text-zinc-900 focus:border-emerald-500/50' 
               : 'bg-zinc-950/50 border-white/10 text-white focus:border-emerald-500/30',
-            !isPremium && "cursor-not-allowed grayscale"
+            !canConfigurePool && "cursor-not-allowed grayscale"
           )}
         />
 
         {/* Central Lock Overlay */}
-        {!isPremium && (
+        {!canConfigurePool && (
           <div className="absolute inset-0 bg-zinc-950/50 backdrop-blur-[1px] flex items-center justify-center z-10 transition-all group-hover:bg-zinc-950/60">
              <div className="p-3 bg-zinc-900/90 rounded-2xl border border-white/10 shadow-2xl flex flex-col items-center gap-1 scale-90 group-hover:scale-100 transition-transform">
                 <Lock size={20} className="text-amber-500" />
@@ -572,14 +979,14 @@ const MiningConfigForm: React.FC<{ theme: 'light' | 'dark' }> = ({ theme }) => {
       <div className="flex gap-3 pt-2">
         <button
           onClick={save}
-          disabled={saving || !validation.ok || !isPremium}
+          disabled={saving || (localRewardAsset === 'XMR' && !validation.ok)}
           className={cn(
             'px-8 py-3 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all shadow-md active:scale-95',
-            (saving || !isPremium) ? 'opacity-30 cursor-not-allowed' : 'cursor-pointer hover:shadow-emerald-500/20 hover:-translate-y-0.5',
+            saving ? 'opacity-30 cursor-not-allowed' : 'cursor-pointer hover:shadow-emerald-500/20 hover:-translate-y-0.5',
             theme === 'light' ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-emerald-500 text-black border-emerald-500'
           )}
         >
-          {isPremium ? 'Save Configuration' : 'Premium Only'}
+          Save Configuration
         </button>
         <div className={cn('text-[10px] self-center uppercase tracking-widest font-bold opacity-30', theme === 'light' ? 'text-zinc-600' : 'text-zinc-500')}>Changes apply on next start.</div>
       </div>

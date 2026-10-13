@@ -138,3 +138,94 @@ jobs:
           if ($actual -ne $expected) {
             throw "Bundled XMRig version $actual does not match pinned version $expected"
           }
+
+  # The CPU sensor broker is the only component that needs elevation, and it is a
+  # second binary of the same Cargo package, so it could silently stop building
+  # or stop emitting valid JSON while the GUI still worked.
+  #
+  # A runner has no PawnIO driver, so this cannot verify a real temperature
+  # reading. What it does verify: the broker builds, its protocol tests pass, it
+  # runs and writes valid JSON, it reports "unavailable" rather than a fabricated
+  # zero when the driver is absent, and the installer's registration script
+  # parses.
+  sensor-broker-windows:
+    name: CPU sensor broker builds, runs and degrades cleanly
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the broker
+        working-directory: src-tauri
+        run: cargo build --release --bin minebench-sensor-broker
+
+      - name: Broker protocol tests
+        working-directory: src-tauri
+        run: cargo test --release --bin minebench-sensor-broker
+
+      - name: Broker runs and emits valid JSON without the driver
+        shell: pwsh
+        run: |
+          $broker = 'src-tauri/target/release/minebench-sensor-broker.exe'
+          if (-not (Test-Path $broker)) { throw "the broker was not built at $broker" }
+
+          $out = Join-Path $env:TEMP 'broker.json'
+          Remove-Item $out -ErrorAction SilentlyContinue
+          & $broker --out $out
+          if (-not (Test-Path $out)) { throw 'the broker produced no snapshot' }
+
+          $snapshot = Get-Content $out -Raw | ConvertFrom-Json
+          if ($snapshot.schema -ne 1) { throw "unexpected schema $($snapshot.schema)" }
+          if ($snapshot.provider -ne 'none') {
+            throw "expected provider 'none' without the driver, got '$($snapshot.provider)'"
+          }
+          # The whole point: no driver must mean null, never a fabricated 0 C.
+          if ($null -ne $snapshot.temperature_c) {
+            throw "expected no temperature without the PawnIO driver, got $($snapshot.temperature_c)"
+          }
+          # The fan channels are empty for the same reason, and the fields exist
+          # so a client can tell "no controller" from "no CPU-bound channel".
+          if (@($snapshot.fans).Count -ne 0) {
+            throw "expected no fan channels without the driver, got $($snapshot.fans.Count)"
+          }
+          if ($null -ne $snapshot.fan_rpm) {
+            throw "expected no fan reading without the driver, got $($snapshot.fan_rpm)"
+          }
+          Write-Host "broker reported: $($snapshot.provider_detail)"
+
+      - name: Every PawnIO module the broker can ask for is shipped
+        shell: pwsh
+        run: |
+          # A missing module does not fail loudly: the broker simply reports no
+          # temperature, or no fan, on every user's machine. Pin the names the
+          # source asks for against the files the bundle carries.
+          $modules = 'src-tauri/resources/pawnio-modules'
+          $broker = Get-Content 'src-tauri/src/bin/sensor_broker.rs' -Raw
+          foreach ($name in 'AMDFamily17.bin', 'IntelMSR.bin', 'LpcIO.bin') {
+            if ($broker -notmatch [regex]::Escape($name)) {
+              throw "$name is not referenced by the broker"
+            }
+            if (-not (Test-Path (Join-Path $modules $name))) {
+              throw "$name is not shipped in $modules"
+            }
+          }
+          $config = Get-Content 'src-tauri/tauri.conf.json' -Raw
+          if ($config -notmatch 'resources/pawnio-modules') {
+            throw 'the PawnIO modules are not bundled as resources'
+          }
+          Write-Host 'pawnio modules: ok'
+
+      - name: Registration script parses and reports status
+        shell: pwsh
+        run: |
+          # The installer calls this script on every user's machine, so a syntax
+          # error would otherwise only surface there.
+          $script = 'src-tauri/resources/sensor-broker/register-broker-task.ps1'
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path $script), [ref]$null, [ref]$errors)
+          if ($errors -and $errors.Count -gt 0) {
+            throw "registration script has syntax errors: $($errors[0].Message)"
+          }
+          $status = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -Operation status
+          Write-Host "status: $status"

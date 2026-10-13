@@ -1,5 +1,7 @@
 # MineBench Client - Environment Configuration Implementation ✅
 
+> **Note:** this document predates the Tauri v2 migration. The current desktop client is **Tauri v2** (`src-tauri/`); use `npm run tauri:dev`. Electron references below are outdated.
+
 ## Summary
 
 Successfully implemented a comprehensive environment configuration system that allows rapid switching between development (localhost) and production (https://minebench.cloud) modes for the MineBench Client application.
@@ -175,7 +177,7 @@ console.log(config.apiBaseUrl);
 | Dev with production URLs | `npm run dev:prod` |
 | Build for dev | `npm run build:dev` |
 | Build for production | `npm run build:prod` |
-| Start dev with Electron | `npm run dev:all` |
+| Start dev with Tauri | `npm run tauri:dev` |
 | Create Windows build | `npm run dist:win` |
 
 ## Next Steps
